@@ -97,6 +97,7 @@ if(interaction.isButton()){
 
 if(interaction.customId==='wallet'){
 if(!wallets[interaction.user.id]) wallets[interaction.user.id]={balance:0};
+
 return interaction.reply({
 content:`💳 Solde actuel : ${wallets[interaction.user.id].balance.toFixed(2)}€`,
 ephemeral:true
@@ -125,12 +126,10 @@ parent:TICKET_CATEGORY,
 type:ChannelType.GuildText
 });
 
-await ticket.send(
-`🅿️ Paiement PayPal :
+await ticket.send(`🅿️ Paiement PayPal :
 https://paypal.me/Snackyy1
 
-📌 Envoyez votre preuve de paiement ici.`
-);
+📌 Envoyez votre preuve de paiement ici.`);
 
 return interaction.reply({
 content:'✅ Ticket recharge cree.',
@@ -145,12 +144,10 @@ parent:TICKET_CATEGORY,
 type:ChannelType.GuildText
 });
 
-await ticket.send(
-`💳 Paiement Revolut :
+await ticket.send(`💳 Paiement Revolut :
 https://revolut.me/arthur23320/pocket/vNrIna0VcG
 
-📌 Envoyez votre preuve de paiement ici.`
-);
+📌 Envoyez votre preuve de paiement ici.`);
 
 return interaction.reply({
 content:'✅ Ticket recharge cree.',
@@ -165,14 +162,12 @@ parent:TICKET_CATEGORY,
 type:ChannelType.GuildText
 });
 
-await ticket.send(
-`🏦 IBAN :
+await ticket.send(`🏦 IBAN :
 FR76 2823 3000 0176 1307 4771 273
 
 Reference paiement : pseudo Discord
 
-📌 Envoyez votre preuve de paiement ici.`
-);
+📌 Envoyez votre preuve de paiement ici.`);
 
 return interaction.reply({
 content:'✅ Ticket recharge cree.',
@@ -257,4 +252,4 @@ ephemeral:true
 
 });
 
-client.login('MTQ5NTc1NTQxMDY5MzQyMzI0OA.GRHlFa.PmC3BGxkT_l87fAyitQKb3d134IIzYd_Qf0WtM');
+client.login(process.env.DISCORD_TOKEN);
