@@ -182,6 +182,10 @@ client.on('messageCreate', async message => {
   if (message.author.bot) return;
   if (!message.guild) return;
 
+  if (message.content.startsWith('!')) {
+    message.delete().catch(() => {});
+  }
+
   if (message.content === '!setup') {
     const embed = new EmbedBuilder()
       .setColor(0xD4AF37)
@@ -241,8 +245,6 @@ client.on('messageCreate', async message => {
   }
 
   if (message.content === '!tarifs') {
-    message.delete().catch(() => {});
-
     const embed = new EmbedBuilder()
       .setColor(0xD4AF37)
       .setAuthor({
@@ -266,9 +268,26 @@ client.on('messageCreate', async message => {
     });
   }
 
-  if (message.content.startsWith('!addmoney')) {
-    message.delete().catch(() => {});
+  if (message.content === '!avis') {
+    const avisEmbed = new EmbedBuilder()
+      .setColor(0xD4AF37)
+      .setTitle('Merci pour ta commande')
+      .setDescription([
+        'Ta commande est terminée, merci pour ta confiance !',
+        '',
+        'N’hésite pas à laisser un avis ici : <#1497652398259306516>',
+        'Et si tu as apprécié le service, parle-en autour de toi !',
+        '',
+        'Bon appétit 😋'
+      ].join('\n'))
+      .setFooter({ text: 'Le Renta McDonalds' });
 
+    return message.channel.send({
+      embeds: [avisEmbed]
+    });
+  }
+
+  if (message.content.startsWith('!addmoney')) {
     const isAdmin =
       message.member.roles.cache.has(ADMIN_ROLE_ID) ||
       message.member.permissions.has(PermissionFlagsBits.Administrator);
@@ -373,8 +392,6 @@ client.on('messageCreate', async message => {
   }
 
   if (message.content.startsWith('!removemoney')) {
-    message.delete().catch(() => {});
-
     const isAdmin =
       message.member.roles.cache.has(ADMIN_ROLE_ID) ||
       message.member.permissions.has(PermissionFlagsBits.Administrator);
