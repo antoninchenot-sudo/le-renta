@@ -180,6 +180,7 @@ client.once('ready', () => {
 
 client.on('messageCreate', async message => {
   if (message.author.bot) return;
+  if (!message.guild) return;
 
   if (message.content === '!setup') {
     const embed = new EmbedBuilder()
@@ -236,6 +237,32 @@ client.on('messageCreate', async message => {
     return message.channel.send({
       embeds: [embed],
       components: [row]
+    });
+  }
+
+  if (message.content === '!tarifs') {
+    message.delete().catch(() => {});
+
+    const embed = new EmbedBuilder()
+      .setColor(0xD4AF37)
+      .setAuthor({
+        name: 'Le Renta McDonalds',
+        iconURL: message.guild.iconURL({ dynamic: true })
+      })
+      .setTitle(`Tarifs points MCDO ${SHOP_EMOJI}`)
+      .setDescription([
+        'Voici la grille des tarifs disponibles selon le nombre de points.',
+        'Pour commander, recharge ton solde puis utilise le bouton **Commander** sur la boutique.',
+        '',
+        '```',
+        productListText(),
+        '```'
+      ].join('\n'))
+      .setThumbnail(message.guild.iconURL({ dynamic: true }))
+      .setFooter({ text: 'Tarifs points MCDO • Solde obligatoire avant commande' });
+
+    return message.channel.send({
+      embeds: [embed]
     });
   }
 
@@ -297,10 +324,42 @@ client.on('messageCreate', async message => {
           'Ton solde est maintenant disponible sur la boutique.'
         ].join('\n'));
 
-      await user.send({ embeds: [dmEmbed] }).catch(async () => {
-        const warn = await message.channel.send('⚠️ Impossible d’envoyer un MP au client.');
-        deleteLater(warn);
-      });
+      let dmSent = false;
+
+      await user.send({ embeds: [dmEmbed] })
+        .then(() => {
+          dmSent = true;
+        })
+        .catch(async () => {
+          const warn = await message.channel.send('⚠️ Impossible d’envoyer un MP au client. Le ticket reste ouvert.');
+          deleteLater(warn);
+        });
+
+      const successEmbed = new EmbedBuilder()
+        .setColor(0x2ECC71)
+        .setTitle('✅ Solde ajouté')
+        .setDescription([
+          `**${amount}€** ont été ajoutés au portefeuille de ${user}.`,
+          `🧾 Demande : #${ticketRequest.id}`,
+          dmSent ? '📩 MP envoyé au client.' : '⚠️ MP non envoyé au client.'
+        ].join('\n'));
+
+      await message.channel.send({ embeds: [successEmbed] });
+
+      if (dmSent) {
+        await message.channel.send('✅ Le ticket se fermera dans 10 secondes.');
+
+        if (requests.tickets[message.channel.id]) {
+          delete requests.tickets[message.channel.id];
+          saveRequests();
+        }
+
+        setTimeout(() => {
+          message.channel.delete().catch(() => {});
+        }, 10_000);
+      }
+
+      return;
     }
 
     return message.channel.send({
@@ -308,10 +367,7 @@ client.on('messageCreate', async message => {
         new EmbedBuilder()
           .setColor(0x2ECC71)
           .setTitle('✅ Solde ajouté')
-          .setDescription([
-            `**${amount}€** ont été ajoutés au portefeuille de ${user}.`,
-            ticketRequest ? `🧾 Demande : #${ticketRequest.id}` : null
-          ].filter(Boolean).join('\n'))
+          .setDescription(`**${amount}€** ont été ajoutés au portefeuille de ${user}.`)
       ]
     });
   }
