@@ -26,22 +26,18 @@ const client = new Client({
 const ADMIN_ROLE_ID = '1310984358991106120';
 const STAFF_ROLE_ID = '1310342652058800138';
 const TICKET_CATEGORY = '1495800617204187216';
+const SUPPORT_CATEGORY = '1499036733986308146';
 const DELETE_DELAY = 10_000;
 
-const SHOP_EMOJI = '<:4964mcdonalds:1498440076257136830>';
+const SHOP_EMOJI = '🛒';
 const INFO_IMAGE = process.env.INFO_IMAGE || '';
 const PAYPAL_LINK = process.env.PAYPAL_LINK || 'A_CONFIGURER';
 const REVOLUT_LINK = process.env.REVOLUT_LINK || 'A_CONFIGURER';
 const IBAN = process.env.IBAN || 'A_CONFIGURER';
 const NO_NOTE_TEXT = '❗❗ Ne mettre aucune note lors du paiement ❗❗';
 
-let wallets = fs.existsSync('wallets.json')
-  ? JSON.parse(fs.readFileSync('wallets.json'))
-  : {};
-
-let requests = fs.existsSync('requests.json')
-  ? JSON.parse(fs.readFileSync('requests.json'))
-  : { counter: 0, tickets: {} };
+let wallets = fs.existsSync('wallets.json') ? JSON.parse(fs.readFileSync('wallets.json')) : {};
+let requests = fs.existsSync('requests.json') ? JSON.parse(fs.readFileSync('requests.json')) : { counter: 0, tickets: {} };
 
 function saveWallets() {
   fs.writeFileSync('wallets.json', JSON.stringify(wallets, null, 2));
@@ -52,16 +48,13 @@ function saveRequests() {
 }
 
 function isAdminMember(member) {
-  return (
-    member.roles.cache.has(ADMIN_ROLE_ID) ||
-    member.permissions.has(PermissionFlagsBits.Administrator)
-  );
+  return member.roles.cache.has(ADMIN_ROLE_ID) || member.permissions.has(PermissionFlagsBits.Administrator);
 }
 
 function createRequest(type, channelId, userId, data = {}) {
   requests.counter += 1;
+  const prefix = type === 'recharge' ? 'R' : type === 'support' ? 'S' : 'C';
 
-  const prefix = type === 'recharge' ? 'R' : 'C';
   const request = {
     id: `${prefix}-${String(requests.counter).padStart(4, '0')}`,
     type,
@@ -73,7 +66,6 @@ function createRequest(type, channelId, userId, data = {}) {
 
   requests.tickets[channelId] = request;
   saveRequests();
-
   return request;
 }
 
@@ -230,10 +222,36 @@ client.on('messageCreate', async message => {
       new ButtonBuilder().setCustomId('wallet').setLabel('Portefeuille').setEmoji('👛').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('recharger').setLabel('Recharger le solde').setEmoji('➕').setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId('commande').setLabel('Commander').setEmoji('🎫').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId('infos_points').setLabel('Programme fidélité').setEmoji('ℹ️').setStyle(ButtonStyle.Secondary)
+      new ButtonBuilder().setCustomId('infos_points').setLabel('Informations').setEmoji('ℹ️').setStyle(ButtonStyle.Secondary)
     );
 
     return message.channel.send({ embeds: [embed], components: [row] });
+  }
+
+  if (message.content === '!support') {
+    const supportEmbed = new EmbedBuilder()
+      .setColor(0xD4AF37)
+      .setTitle('🎫 Support')
+      .setDescription([
+        '📩 Besoin d’aide ou une question sur une commande ?',
+        '',
+        'Clique sur le bouton ci-dessous pour ouvrir un ticket support.',
+        '👥 Un membre du staff te répondra dès que possible.'
+      ].join('\n'))
+      .setFooter({ text: 'Support • Boutique' });
+
+    const supportRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('open_support_ticket')
+        .setLabel('Ouvrir un ticket')
+        .setEmoji('🎫')
+        .setStyle(ButtonStyle.Primary)
+    );
+
+    return message.channel.send({
+      embeds: [supportEmbed],
+      components: [supportRow]
+    });
   }
 
   if (message.content === '!tarifs') {
@@ -460,6 +478,33 @@ client.on(Events.InteractionCreate, async interaction => {
       });
     }
 
+    if (interaction.customId === 'open_support_ticket') {
+      const ticket = await interaction.guild.channels.create({
+        name: `support-${sanitizeChannelName(interaction.user.username)}`,
+        parent: SUPPORT_CATEGORY,
+        type: ChannelType.GuildText,
+        permissionOverwrites: ticketPermissionOverwrites(interaction.guild, interaction.user.id)
+      });
+
+      const request = createRequest('support', ticket.id, interaction.user.id);
+
+      await ticket.send({
+        content: `🎫 Ticket support
+
+🧾 Demande : #${request.id}
+👤 Client : <@${interaction.user.id}>
+
+📩 Explique ton problème ici.
+👥 Un membre du staff va te répondre dès que possible.`,
+        components: [ticketButtons(interaction.user.id)]
+      });
+
+      return replyTemp(interaction, {
+        content: `✅ Ticket support créé : ${ticket}\n🧾 Demande : #${request.id}`,
+        ephemeral: true
+      });
+    }
+
     if (interaction.customId === 'wallet') {
       if (!wallets[interaction.user.id]) wallets[interaction.user.id] = { balance: 0 };
 
@@ -472,7 +517,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.customId === 'infos_points') {
       const infoEmbed = new EmbedBuilder()
         .setColor(0xD4AF37)
-        .setTitle('Programme fidélité')
+        .setTitle('Informations')
         .setImage(INFO_IMAGE);
 
       return replyTemp(interaction, {
