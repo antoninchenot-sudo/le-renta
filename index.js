@@ -80,6 +80,25 @@ function ticketPermissionOverwrites(guild, userId) {
   ];
 }
 
+function canManageTicket(interaction, ownerId) {
+  return (
+    interaction.user.id === ownerId ||
+    interaction.member.roles.cache.has(STAFF_ROLE_ID) ||
+    interaction.member.roles.cache.has(ADMIN_ROLE_ID) ||
+    interaction.member.permissions.has(PermissionFlagsBits.Administrator)
+  );
+}
+
+function ticketButtons(ownerId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`delete_ticket:${ownerId}`)
+      .setLabel('Supprimer le ticket')
+      .setEmoji('🗑️')
+      .setStyle(ButtonStyle.Danger)
+  );
+}
+
 function sanitizeChannelName(name) {
   return name
     .toLowerCase()
@@ -228,7 +247,7 @@ client.on('messageCreate', async message => {
     wallets[user.id].balance += amount;
     saveWallets();
 
-    const reply = await message.channel.send({
+    return message.channel.send({
       embeds: [
         new EmbedBuilder()
           .setColor(0x2ECC71)
@@ -236,8 +255,6 @@ client.on('messageCreate', async message => {
           .setDescription(`**${amount}€** ont été ajoutés au portefeuille de ${user}.`)
       ]
     });
-
-    return deleteLater(reply);
   }
 
   if (message.content.startsWith('!removemoney')) {
@@ -281,7 +298,7 @@ client.on('messageCreate', async message => {
     wallets[user.id].balance -= amount;
     saveWallets();
 
-    const reply = await message.channel.send({
+    return message.channel.send({
       embeds: [
         new EmbedBuilder()
           .setColor(0xE67E22)
@@ -289,13 +306,71 @@ client.on('messageCreate', async message => {
           .setDescription(`**${amount}€** ont été retirés du portefeuille de ${user}.`)
       ]
     });
-
-    return deleteLater(reply);
   }
 });
 
 client.on(Events.InteractionCreate, async interaction => {
   if (interaction.isButton()) {
+    if (interaction.customId.startsWith('delete_ticket:')) {
+      const ownerId = interaction.customId.split(':')[1];
+
+      if (!canManageTicket(interaction, ownerId)) {
+        return interaction.reply({
+          content: '❌ Tu ne peux pas supprimer ce ticket.',
+          ephemeral: true
+        });
+      }
+
+      const confirmRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`confirm_delete_ticket:${ownerId}`)
+          .setLabel('Confirmer')
+          .setEmoji('✅')
+          .setStyle(ButtonStyle.Danger),
+
+        new ButtonBuilder()
+          .setCustomId('cancel_delete_ticket')
+          .setLabel('Annuler')
+          .setEmoji('❌')
+          .setStyle(ButtonStyle.Secondary)
+      );
+
+      return interaction.reply({
+        content: '⚠️ Confirmer la suppression de ce ticket ?',
+        components: [confirmRow],
+        ephemeral: true
+      });
+    }
+
+    if (interaction.customId.startsWith('confirm_delete_ticket:')) {
+      const ownerId = interaction.customId.split(':')[1];
+
+      if (!canManageTicket(interaction, ownerId)) {
+        return interaction.reply({
+          content: '❌ Tu ne peux pas supprimer ce ticket.',
+          ephemeral: true
+        });
+      }
+
+      await interaction.reply({
+        content: '🗑️ Ticket supprimé dans 5 secondes...',
+        ephemeral: true
+      });
+
+      setTimeout(() => {
+        interaction.channel.delete().catch(() => {});
+      }, 5000);
+
+      return;
+    }
+
+    if (interaction.customId === 'cancel_delete_ticket') {
+      return interaction.update({
+        content: '✅ Suppression annulée.',
+        components: []
+      });
+    }
+
     if (interaction.customId === 'wallet') {
       if (!wallets[interaction.user.id]) wallets[interaction.user.id] = { balance: 0 };
 
@@ -451,13 +526,16 @@ IBAN : ${IBAN}
 ${NO_NOTE_TEXT}`;
       }
 
-      await ticket.send(`🎫 Ticket recharge
+      await ticket.send({
+        content: `🎫 Ticket recharge
 
 👤 Client : <@${interaction.user.id}>
 💰 Montant : ${amount}
 💳 Moyen de paiement : ${method}
 
-${paymentText}`);
+${paymentText}`,
+        components: [ticketButtons(interaction.user.id)]
+      });
 
       return replyTemp(interaction, {
         content: `✅ Ticket recharge créé pour ${amount}.`,
@@ -498,7 +576,8 @@ ${paymentText}`);
       permissionOverwrites: ticketPermissionOverwrites(interaction.guild, interaction.user.id)
     });
 
-    await ticket.send(`<@&${STAFF_ROLE_ID}>
+    await ticket.send({
+      content: `<@&${STAFF_ROLE_ID}>
 
 🎫 Nouvelle commande à traiter
 
@@ -506,7 +585,9 @@ ${paymentText}`);
 📦 Produit : ${product.label}
 💰 Payé : ${prix}€
 
-📌 Envoyer le produit au client.`);
+📌 Envoyer le code barre au client.`,
+      components: [ticketButtons(interaction.user.id)]
+    });
 
     return replyTemp(interaction, {
       content: '✅ Commande envoyée au staff.',
