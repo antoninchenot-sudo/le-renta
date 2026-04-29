@@ -29,22 +29,19 @@ const TICKET_CATEGORY = '1495800617204187216';
 const DELETE_DELAY = 10_000;
 
 const SHOP_EMOJI = '<:4964mcdonalds:1498440076257136830>';
-const INFO_IMAGE = 'https://images-ext-1.discordapp.net/external/PDwpqnH8rd9lL2CwVonbWngM9hLKFtpxOZ_da1iKy50/https/img.draftbot.fr/1776700160616-f67ef3f129b6a57b.png?format=webp&quality=lossless&width=623&height=944';
-
-const PAYPAL_LINK = 'https://www.paypal.com/paypalme/AntoninChenot';
-const REVOLUT_LINK = 'https://revolut.me/arthur23320/pocket/vNrIna0VcG';
-const IBAN = 'FR76 2823 3000 0176 1307 4771 273';
+const INFO_IMAGE = process.env.INFO_IMAGE || '';
+const PAYPAL_LINK = process.env.PAYPAL_LINK || 'A_CONFIGURER';
+const REVOLUT_LINK = process.env.REVOLUT_LINK || 'A_CONFIGURER';
+const IBAN = process.env.IBAN || 'A_CONFIGURER';
 const NO_NOTE_TEXT = '❗❗ Ne mettre aucune note lors du paiement ❗❗';
 
-let wallets = {};
-if (fs.existsSync('wallets.json')) {
-  wallets = JSON.parse(fs.readFileSync('wallets.json'));
-}
+let wallets = fs.existsSync('wallets.json')
+  ? JSON.parse(fs.readFileSync('wallets.json'))
+  : {};
 
-let requests = { counter: 0, tickets: {} };
-if (fs.existsSync('requests.json')) {
-  requests = JSON.parse(fs.readFileSync('requests.json'));
-}
+let requests = fs.existsSync('requests.json')
+  ? JSON.parse(fs.readFileSync('requests.json'))
+  : { counter: 0, tickets: {} };
 
 function saveWallets() {
   fs.writeFileSync('wallets.json', JSON.stringify(wallets, null, 2));
@@ -52,6 +49,13 @@ function saveWallets() {
 
 function saveRequests() {
   fs.writeFileSync('requests.json', JSON.stringify(requests, null, 2));
+}
+
+function isAdminMember(member) {
+  return (
+    member.roles.cache.has(ADMIN_ROLE_ID) ||
+    member.permissions.has(PermissionFlagsBits.Administrator)
+  );
 }
 
 function createRequest(type, channelId, userId, data = {}) {
@@ -78,21 +82,21 @@ function getTicketRequest(channelId) {
 }
 
 const products = [
-  { label: '50-74 points', description: '2€', value: '50_74', price: 2 },
-  { label: '75-99 points', description: '4€', value: '75_99', price: 4 },
-  { label: '100-124 points', description: '6€', value: '100_124', price: 6 },
-  { label: '125-149 points', description: '7€', value: '125_149', price: 7 },
-  { label: '150-174 points', description: '8€', value: '150_174', price: 8 },
-  { label: '175-199 points', description: '10€', value: '175_199', price: 10 },
-  { label: '200-224 points', description: '11€', value: '200_224', price: 11 },
-  { label: '225-249 points', description: '12€', value: '225_249', price: 12 },
-  { label: '250-274 points', description: '13€', value: '250_274', price: 13 },
-  { label: '275-299 points', description: '14€', value: '275_299', price: 14 },
-  { label: '300-324 points', description: '15€', value: '300_324', price: 15 },
-  { label: '325-349 points', description: '16€', value: '325_349', price: 16 },
-  { label: '350-374 points', description: '17€', value: '350_374', price: 17 },
-  { label: '400-499 points', description: '18€', value: '400_499', price: 18 },
-  { label: '500-599 points', description: '21€', value: '500_599', price: 21 }
+  { label: 'Produit 50-74', description: '2€', value: '50_74', price: 2 },
+  { label: 'Produit 75-99', description: '4€', value: '75_99', price: 4 },
+  { label: 'Produit 100-124', description: '6€', value: '100_124', price: 6 },
+  { label: 'Produit 125-149', description: '7€', value: '125_149', price: 7 },
+  { label: 'Produit 150-174', description: '8€', value: '150_174', price: 8 },
+  { label: 'Produit 175-199', description: '10€', value: '175_199', price: 10 },
+  { label: 'Produit 200-224', description: '11€', value: '200_224', price: 11 },
+  { label: 'Produit 225-249', description: '12€', value: '225_249', price: 12 },
+  { label: 'Produit 250-274', description: '13€', value: '250_274', price: 13 },
+  { label: 'Produit 275-299', description: '14€', value: '275_299', price: 14 },
+  { label: 'Produit 300-324', description: '15€', value: '300_324', price: 15 },
+  { label: 'Produit 325-349', description: '16€', value: '325_349', price: 16 },
+  { label: 'Produit 350-374', description: '17€', value: '350_374', price: 17 },
+  { label: 'Produit 400-499', description: '18€', value: '400_499', price: 18 },
+  { label: 'Produit 500-599', description: '21€', value: '500_599', price: 21 }
 ];
 
 const prices = Object.fromEntries(products.map(product => [product.value, product.price]));
@@ -142,11 +146,7 @@ function sanitizeChannelName(name) {
 
 function parseAmountToCents(value) {
   const amount = Number(value.trim().replace(',', '.'));
-
-  if (!Number.isFinite(amount) || amount < 1 || amount > 200) {
-    return null;
-  }
-
+  if (!Number.isFinite(amount) || amount < 1 || amount > 200) return null;
   return Math.round(amount * 100);
 }
 
@@ -162,7 +162,6 @@ function deleteLater(message, delay = DELETE_DELAY) {
 
 async function replyTemp(interaction, options, delay = DELETE_DELAY) {
   await interaction.reply(options);
-
   setTimeout(() => {
     interaction.deleteReply().catch(() => {});
   }, delay);
@@ -183,17 +182,32 @@ client.on('messageCreate', async message => {
   if (!message.guild) return;
 
   if (message.content.startsWith('!')) {
-    message.delete().catch(() => {});
+    await message.delete().catch(error => {
+      console.error('Impossible de supprimer la commande :', error.message);
+    });
+
+    if (!isAdminMember(message.member)) {
+      const reply = await message.channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0xE74C3C)
+            .setTitle('❌ Permission refusée')
+            .setDescription('Tu n’as pas la permission d’utiliser cette commande.')
+        ]
+      });
+
+      return deleteLater(reply);
+    }
   }
 
   if (message.content === '!setup') {
     const embed = new EmbedBuilder()
       .setColor(0xD4AF37)
       .setAuthor({
-        name: 'Le Renta McDonalds',
+        name: 'Boutique',
         iconURL: message.guild.iconURL({ dynamic: true })
       })
-      .setTitle(`Tarifs points MCDO ${SHOP_EMOJI}`)
+      .setTitle(`Tarifs boutique ${SHOP_EMOJI}`)
       .setDescription([
         'Pour commander, recharge d’abord ton solde avec le bouton ci-dessous.',
         '',
@@ -213,47 +227,25 @@ client.on('messageCreate', async message => {
       .setFooter({ text: 'Portefeuille • Recharge • Commande' });
 
     const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId('wallet')
-        .setLabel('Portefeuille')
-        .setEmoji('👛')
-        .setStyle(ButtonStyle.Secondary),
-
-      new ButtonBuilder()
-        .setCustomId('recharger')
-        .setLabel('Recharger le solde')
-        .setEmoji('➕')
-        .setStyle(ButtonStyle.Primary),
-
-      new ButtonBuilder()
-        .setCustomId('commande')
-        .setLabel('Commander')
-        .setEmoji('🎫')
-        .setStyle(ButtonStyle.Success),
-
-      new ButtonBuilder()
-        .setCustomId('infos_points')
-        .setLabel('Programme fidélité McDo')
-        .setEmoji('ℹ️')
-        .setStyle(ButtonStyle.Secondary)
+      new ButtonBuilder().setCustomId('wallet').setLabel('Portefeuille').setEmoji('👛').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('recharger').setLabel('Recharger le solde').setEmoji('➕').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('commande').setLabel('Commander').setEmoji('🎫').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('infos_points').setLabel('Programme fidélité').setEmoji('ℹ️').setStyle(ButtonStyle.Secondary)
     );
 
-    return message.channel.send({
-      embeds: [embed],
-      components: [row]
-    });
+    return message.channel.send({ embeds: [embed], components: [row] });
   }
 
   if (message.content === '!tarifs') {
     const embed = new EmbedBuilder()
       .setColor(0xD4AF37)
       .setAuthor({
-        name: 'Le Renta McDonalds',
+        name: 'Boutique',
         iconURL: message.guild.iconURL({ dynamic: true })
       })
-      .setTitle(`Tarifs points MCDO ${SHOP_EMOJI}`)
+      .setTitle(`Tarifs boutique ${SHOP_EMOJI}`)
       .setDescription([
-        'Voici la grille des tarifs disponibles selon le nombre de points.',
+        'Voici la grille des tarifs disponibles.',
         'Pour commander, recharge ton solde puis utilise le bouton **Commander** sur la boutique.',
         '',
         '```',
@@ -261,11 +253,16 @@ client.on('messageCreate', async message => {
         '```'
       ].join('\n'))
       .setThumbnail(message.guild.iconURL({ dynamic: true }))
-      .setFooter({ text: 'Tarifs points MCDO • Solde obligatoire avant commande' });
+      .setFooter({ text: 'Solde obligatoire avant commande' });
 
-    return message.channel.send({
-      embeds: [embed]
-    });
+    await message.channel.send({ embeds: [embed] });
+
+    const confirm = await message.channel.send('✅ Tarifs envoyés.');
+    setTimeout(() => {
+      confirm.delete().catch(() => {});
+    }, 2000);
+
+    return;
   }
 
   if (message.content === '!avis') {
@@ -280,31 +277,12 @@ client.on('messageCreate', async message => {
         '',
         'Bon appétit 😋'
       ].join('\n'))
-      .setFooter({ text: 'Le Renta McDonalds' });
+      .setFooter({ text: 'Boutique' });
 
-    return message.channel.send({
-      embeds: [avisEmbed]
-    });
+    return message.channel.send({ embeds: [avisEmbed] });
   }
 
   if (message.content.startsWith('!addmoney')) {
-    const isAdmin =
-      message.member.roles.cache.has(ADMIN_ROLE_ID) ||
-      message.member.permissions.has(PermissionFlagsBits.Administrator);
-
-    if (!isAdmin) {
-      const reply = await message.channel.send({
-        embeds: [
-          new EmbedBuilder()
-            .setColor(0xE74C3C)
-            .setTitle('❌ Permission refusée')
-            .setDescription('Tu n’as pas la permission d’utiliser cette commande.')
-        ]
-      });
-
-      return deleteLater(reply);
-    }
-
     const ticketRequest = getTicketRequest(message.channel.id);
     const mentionedUser = message.mentions.users.first();
     const userId = mentionedUser ? mentionedUser.id : ticketRequest?.userId;
@@ -392,23 +370,6 @@ client.on('messageCreate', async message => {
   }
 
   if (message.content.startsWith('!removemoney')) {
-    const isAdmin =
-      message.member.roles.cache.has(ADMIN_ROLE_ID) ||
-      message.member.permissions.has(PermissionFlagsBits.Administrator);
-
-    if (!isAdmin) {
-      const reply = await message.channel.send({
-        embeds: [
-          new EmbedBuilder()
-            .setColor(0xE74C3C)
-            .setTitle('❌ Permission refusée')
-            .setDescription('Tu n’as pas la permission d’utiliser cette commande.')
-        ]
-      });
-
-      return deleteLater(reply);
-    }
-
     const args = message.content.split(' ');
     const user = message.mentions.users.first();
     const amount = parseFloat(args[2]);
@@ -454,17 +415,8 @@ client.on(Events.InteractionCreate, async interaction => {
       }
 
       const confirmRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`confirm_delete_ticket:${ownerId}`)
-          .setLabel('Confirmer')
-          .setEmoji('✅')
-          .setStyle(ButtonStyle.Danger),
-
-        new ButtonBuilder()
-          .setCustomId('cancel_delete_ticket')
-          .setLabel('Annuler')
-          .setEmoji('❌')
-          .setStyle(ButtonStyle.Secondary)
+        new ButtonBuilder().setCustomId(`confirm_delete_ticket:${ownerId}`).setLabel('Confirmer').setEmoji('✅').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId('cancel_delete_ticket').setLabel('Annuler').setEmoji('❌').setStyle(ButtonStyle.Secondary)
       );
 
       return interaction.reply({
@@ -520,7 +472,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.customId === 'infos_points') {
       const infoEmbed = new EmbedBuilder()
         .setColor(0xD4AF37)
-        .setTitle('Programme fidélité McDo+')
+        .setTitle('Programme fidélité')
         .setImage(INFO_IMAGE);
 
       return replyTemp(interaction, {
@@ -543,10 +495,7 @@ client.on(Events.InteractionCreate, async interaction => {
         .setMinLength(1)
         .setMaxLength(6);
 
-      modal.addComponents(
-        new ActionRowBuilder().addComponents(amountInput)
-      );
-
+      modal.addComponents(new ActionRowBuilder().addComponents(amountInput));
       return interaction.showModal(modal);
     }
 
@@ -599,24 +548,9 @@ client.on(Events.InteractionCreate, async interaction => {
           .setCustomId(`payment_method:${cents}`)
           .setPlaceholder('💳 Choisir un moyen de paiement...')
           .addOptions([
-            {
-              label: 'PayPal',
-              description: `Recharge de ${formatAmount(cents)}`,
-              value: 'paypal',
-              emoji: '🅿️'
-            },
-            {
-              label: 'Revolut',
-              description: `Recharge de ${formatAmount(cents)}`,
-              value: 'revolut',
-              emoji: '💳'
-            },
-            {
-              label: 'Virement bancaire',
-              description: `Recharge de ${formatAmount(cents)}`,
-              value: 'virement',
-              emoji: '🏦'
-            }
+            { label: 'PayPal', description: `Recharge de ${formatAmount(cents)}`, value: 'paypal', emoji: '🅿️' },
+            { label: 'Revolut', description: `Recharge de ${formatAmount(cents)}`, value: 'revolut', emoji: '💳' },
+            { label: 'Virement bancaire', description: `Recharge de ${formatAmount(cents)}`, value: 'virement', emoji: '🏦' }
           ])
       );
 
@@ -641,10 +575,7 @@ client.on(Events.InteractionCreate, async interaction => {
         permissionOverwrites: ticketPermissionOverwrites(interaction.guild, interaction.user.id)
       });
 
-      const request = createRequest('recharge', ticket.id, interaction.user.id, {
-        amount,
-        method
-      });
+      const request = createRequest('recharge', ticket.id, interaction.user.id, { amount, method });
 
       let paymentText = '';
 
@@ -734,7 +665,7 @@ ${paymentText}`,
 📦 Produit : ${product.label}
 💰 Payé : ${prix}€
 
-📌 Envoyer le code barre au client.`,
+📌 Envoyer le produit au client.`,
       components: [ticketButtons(interaction.user.id)]
     });
 
