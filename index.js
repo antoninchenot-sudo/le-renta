@@ -26,6 +26,9 @@ const client = new Client({
 const ADMIN_ROLE_ID = '1310984358991106120';
 const STAFF_ROLE_ID = '1310342652058800138';
 const TICKET_CATEGORY = '1495800617204187216';
+const DELETE_DELAY = 10_000;
+
+const SHOP_EMOJI = '🛒';
 
 let wallets = {};
 if (fs.existsSync('wallets.json')) {
@@ -36,23 +39,25 @@ function saveWallets() {
   fs.writeFileSync('wallets.json', JSON.stringify(wallets, null, 2));
 }
 
-const prices = {
-  "50_74": 2,
-  "75_99": 4,
-  "100_124": 6,
-  "125_149": 7,
-  "150_174": 8,
-  "175_199": 10,
-  "200_224": 11,
-  "225_249": 12,
-  "250_274": 13,
-  "275_299": 14,
-  "300_324": 15,
-  "325_349": 16,
-  "350_374": 17,
-  "400_499": 18,
-  "500_599": 21
-};
+const products = [
+  { label: '50-74 crédits', description: '2€', value: '50_74', price: 2 },
+  { label: '75-99 crédits', description: '4€', value: '75_99', price: 4 },
+  { label: '100-124 crédits', description: '6€', value: '100_124', price: 6 },
+  { label: '125-149 crédits', description: '7€', value: '125_149', price: 7 },
+  { label: '150-174 crédits', description: '8€', value: '150_174', price: 8 },
+  { label: '175-199 crédits', description: '10€', value: '175_199', price: 10 },
+  { label: '200-224 crédits', description: '11€', value: '200_224', price: 11 },
+  { label: '225-249 crédits', description: '12€', value: '225_249', price: 12 },
+  { label: '250-274 crédits', description: '13€', value: '250_274', price: 13 },
+  { label: '275-299 crédits', description: '14€', value: '275_299', price: 14 },
+  { label: '300-324 crédits', description: '15€', value: '300_324', price: 15 },
+  { label: '325-349 crédits', description: '16€', value: '325_349', price: 16 },
+  { label: '350-374 crédits', description: '17€', value: '350_374', price: 17 },
+  { label: '400-499 crédits', description: '18€', value: '400_499', price: 18 },
+  { label: '500-599 crédits', description: '21€', value: '500_599', price: 21 }
+];
+
+const prices = Object.fromEntries(products.map(product => [product.value, product.price]));
 
 const ticketAllow = [
   PermissionFlagsBits.ViewChannel,
@@ -93,6 +98,26 @@ function formatAmount(cents) {
   return `${(cents / 100).toFixed(2)}€`;
 }
 
+function deleteLater(message, delay = DELETE_DELAY) {
+  setTimeout(() => {
+    message.delete().catch(() => {});
+  }, delay);
+}
+
+async function replyTemp(interaction, options, delay = DELETE_DELAY) {
+  await interaction.reply(options);
+
+  setTimeout(() => {
+    interaction.deleteReply().catch(() => {});
+  }, delay);
+}
+
+function productListText() {
+  return products
+    .map(product => `💰  ${product.label.padEnd(15, ' ')} →   ${product.description}`)
+    .join('\n\n');
+}
+
 client.once('ready', () => {
   console.log('Bot connecte');
 });
@@ -102,75 +127,100 @@ client.on('messageCreate', async message => {
 
   if (message.content === '!setup') {
     const embed = new EmbedBuilder()
-      .setTitle('👑 Boutique')
-      .setDescription(`🔥 PRODUITS DISPONIBLES 🔥
-
-💰 50-74 pts -> 2€
-
-💰 75-99 pts -> 4€
-
-💰 100-124 pts -> 6€
-
-💰 125-149 pts -> 7€
-
-💰 150-174 pts -> 8€
-
-💰 175-199 pts -> 10€
-
-💰 200-224 pts -> 11€
-
-💰 225-249 pts -> 12€
-
-💰 250-274 pts -> 13€
-
-💰 275-299 pts -> 14€
-
-💰 300-324 pts -> 15€
-
-💰 325-349 pts -> 16€
-
-💰 350-374 pts -> 17€
-
-💰 400-499 pts -> 18€
-
-💰 500-599 pts -> 21€`)
-      .setColor(0xD4AF37);
+      .setColor(0xD4AF37)
+      .setAuthor({
+        name: 'Boutique',
+        iconURL: message.guild.iconURL({ dynamic: true })
+      })
+      .setTitle(`${SHOP_EMOJI} Boutique`)
+      .setDescription([
+        'Bienvenue sur la boutique.',
+        '',
+        '```',
+        productListText(),
+        '```',
+        '',
+        'Choisis une action avec les boutons ci-dessous.'
+      ].join('\n'))
+      .setThumbnail(message.guild.iconURL({ dynamic: true }))
+      .setFooter({ text: 'Portefeuille • Recharge • Commande' });
 
     const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('wallet').setLabel('👛 Portefeuille').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId('recharger').setLabel('➕ Recharge de solde').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('commande').setLabel('🎫 Commander').setStyle(ButtonStyle.Success)
+      new ButtonBuilder()
+        .setCustomId('wallet')
+        .setLabel('Portefeuille')
+        .setEmoji('👛')
+        .setStyle(ButtonStyle.Secondary),
+
+      new ButtonBuilder()
+        .setCustomId('recharger')
+        .setLabel('Recharger')
+        .setEmoji('➕')
+        .setStyle(ButtonStyle.Primary),
+
+      new ButtonBuilder()
+        .setCustomId('commande')
+        .setLabel('Commander')
+        .setEmoji('🎫')
+        .setStyle(ButtonStyle.Success)
     );
 
-    message.channel.send({
-      content: '@everyone',
+    return message.channel.send({
       embeds: [embed],
       components: [row]
     });
   }
 
   if (message.content.startsWith('!addmoney')) {
+    if (
+      !message.member.roles.cache.has(ADMIN_ROLE_ID) &&
+      !message.member.permissions.has(PermissionFlagsBits.Administrator)
+    ) {
+      const reply = await message.reply('❌ Permission refusée.');
+      return deleteLater(reply);
+    }
+
     const args = message.content.split(' ');
     const user = message.mentions.users.first();
     const amount = parseFloat(args[2]);
+
+    if (!user || !Number.isFinite(amount)) {
+      const reply = await message.reply('❌ Utilisation : `!addmoney @user montant`');
+      return deleteLater(reply);
+    }
 
     if (!wallets[user.id]) wallets[user.id] = { balance: 0 };
     wallets[user.id].balance += amount;
     saveWallets();
 
-    message.reply(`${amount} euros ajoutes.`);
+    const reply = await message.reply(`${amount} euros ajoutés.`);
+    return deleteLater(reply);
   }
 
   if (message.content.startsWith('!removemoney')) {
+    if (
+      !message.member.roles.cache.has(ADMIN_ROLE_ID) &&
+      !message.member.permissions.has(PermissionFlagsBits.Administrator)
+    ) {
+      const reply = await message.reply('❌ Permission refusée.');
+      return deleteLater(reply);
+    }
+
     const args = message.content.split(' ');
     const user = message.mentions.users.first();
     const amount = parseFloat(args[2]);
+
+    if (!user || !Number.isFinite(amount)) {
+      const reply = await message.reply('❌ Utilisation : `!removemoney @user montant`');
+      return deleteLater(reply);
+    }
 
     if (!wallets[user.id]) wallets[user.id] = { balance: 0 };
     wallets[user.id].balance -= amount;
     saveWallets();
 
-    message.reply(`${amount} euros retires.`);
+    const reply = await message.reply(`${amount} euros retirés.`);
+    return deleteLater(reply);
   }
 });
 
@@ -179,7 +229,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.customId === 'wallet') {
       if (!wallets[interaction.user.id]) wallets[interaction.user.id] = { balance: 0 };
 
-      return interaction.reply({
+      return replyTemp(interaction, {
         content: `💳 Solde actuel : ${wallets[interaction.user.id].balance.toFixed(2)}€`,
         ephemeral: true
       });
@@ -206,11 +256,88 @@ client.on(Events.InteractionCreate, async interaction => {
       return interaction.showModal(modal);
     }
 
-    const paymentMatch = interaction.customId.match(/^(paypal|revolut|virement):(\d+)$/);
+    if (interaction.customId === 'commande') {
+      const orderEmbed = new EmbedBuilder()
+        .setColor(0xD4AF37)
+        .setTitle('🎫 Fenêtre de commande')
+        .setDescription([
+          'Choisis ton produit dans le menu ci-dessous.',
+          '',
+          '```',
+          productListText(),
+          '```'
+        ].join('\n'))
+        .setFooter({ text: 'Cette fenêtre disparaît automatiquement.' });
 
-    if (paymentMatch) {
-      const method = paymentMatch[1];
-      const cents = Number(paymentMatch[2]);
+      const menu = new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId('produits')
+          .setPlaceholder('🛒 Choisir un produit...')
+          .addOptions(products.map(product => ({
+            label: product.label,
+            description: product.description,
+            value: product.value,
+            emoji: '💰'
+          })))
+      );
+
+      return replyTemp(interaction, {
+        embeds: [orderEmbed],
+        components: [menu],
+        ephemeral: true
+      });
+    }
+  }
+
+  if (interaction.isModalSubmit()) {
+    if (interaction.customId === 'recharge_amount') {
+      const cents = parseAmountToCents(interaction.fields.getTextInputValue('amount'));
+
+      if (cents === null) {
+        return replyTemp(interaction, {
+          content: '❌ Montant invalide. Entrez un montant entre 1€ et 200€.',
+          ephemeral: true
+        });
+      }
+
+      const paymentMenu = new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId(`payment_method:${cents}`)
+          .setPlaceholder('💳 Choisir un moyen de paiement...')
+          .addOptions([
+            {
+              label: 'PayPal',
+              description: `Recharge de ${formatAmount(cents)}`,
+              value: 'paypal',
+              emoji: '🅿️'
+            },
+            {
+              label: 'Revolut',
+              description: `Recharge de ${formatAmount(cents)}`,
+              value: 'revolut',
+              emoji: '💳'
+            },
+            {
+              label: 'Virement bancaire',
+              description: `Recharge de ${formatAmount(cents)}`,
+              value: 'virement',
+              emoji: '🏦'
+            }
+          ])
+      );
+
+      return replyTemp(interaction, {
+        content: `💰 Montant choisi : ${formatAmount(cents)}\nChoisissez un moyen de paiement :`,
+        components: [paymentMenu],
+        ephemeral: true
+      });
+    }
+  }
+
+  if (interaction.isStringSelectMenu()) {
+    if (interaction.customId.startsWith('payment_method:')) {
+      const cents = Number(interaction.customId.split(':')[1]);
+      const method = interaction.values[0];
       const amount = formatAmount(cents);
 
       const ticket = await interaction.guild.channels.create({
@@ -223,17 +350,19 @@ client.on(Events.InteractionCreate, async interaction => {
       let paymentText = '';
 
       if (method === 'paypal') {
-        paymentText = '🅿️ Paiement PayPal : REMPLACE_PAR_TON_LIEN_PAYPAL';
+        paymentText = '🅿️ Paiement PayPal : https://www.paypal.com/paypalme/AntoninChenot';
       }
 
       if (method === 'revolut') {
-        paymentText = '💳 Paiement Revolut : REMPLACE_PAR_TON_LIEN_REVOLUT';
+        paymentText = '💳 Paiement Revolut : https://revolut.me/arthur23320/pocket/vNrIna0VcG';
       }
 
       if (method === 'virement') {
-        paymentText = `🏦 IBAN : REMPLACE_PAR_TON_IBAN
+        paymentText = `🏦 Virement bancaire
 
-Reference paiement : pseudo Discord`;
+IBAN : FR76 2823 3000 0176 1307 4771 273
+
+Référence paiement : pseudo Discord`;
       }
 
       await ticket.send(`🎫 Ticket recharge
@@ -244,81 +373,31 @@ Reference paiement : pseudo Discord`;
 
 ${paymentText}`);
 
-      return interaction.reply({
+      return replyTemp(interaction, {
         content: `✅ Ticket recharge créé pour ${amount}.`,
         ephemeral: true
       });
     }
 
-    if (interaction.customId === 'commande') {
-      const menu = new ActionRowBuilder().addComponents(
-        new StringSelectMenuBuilder()
-          .setCustomId('produits')
-          .setPlaceholder('🛒 Choisir un produit...')
-          .addOptions([
-            { label: '50-74 points', description: '2€', value: '50_74' },
-            { label: '75-99 points', description: '4€', value: '75_99' },
-            { label: '100-124 points', description: '6€', value: '100_124' },
-            { label: '125-149 points', description: '7€', value: '125_149' },
-            { label: '150-174 points', description: '8€', value: '150_174' },
-            { label: '175-199 points', description: '10€', value: '175_199' },
-            { label: '200-224 points', description: '11€', value: '200_224' },
-            { label: '225-249 points', description: '12€', value: '225_249' },
-            { label: '250-274 points', description: '13€', value: '250_274' },
-            { label: '275-299 points', description: '14€', value: '275_299' },
-            { label: '300-324 points', description: '15€', value: '300_324' },
-            { label: '325-349 points', description: '16€', value: '325_349' },
-            { label: '350-374 points', description: '17€', value: '350_374' },
-            { label: '400-499 points', description: '18€', value: '400_499' },
-            { label: '500-599 points', description: '21€', value: '500_599' }
-          ])
-      );
+    if (interaction.customId !== 'produits') return;
 
-      return interaction.reply({
-        content: '📦 Sélectionnez votre produit :',
-        components: [menu],
-        ephemeral: true
-      });
-    }
-  }
-
-  if (interaction.isModalSubmit()) {
-    if (interaction.customId === 'recharge_amount') {
-      const cents = parseAmountToCents(interaction.fields.getTextInputValue('amount'));
-
-      if (cents === null) {
-        return interaction.reply({
-          content: '❌ Montant invalide. Entrez un montant entre 1€ et 200€.',
-          ephemeral: true
-        });
-      }
-
-      const payMenu = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`paypal:${cents}`).setLabel('🅿️ PayPal').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId(`revolut:${cents}`).setLabel('💳 Revolut').setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId(`virement:${cents}`).setLabel('🏦 Virement').setStyle(ButtonStyle.Secondary)
-      );
-
-      return interaction.reply({
-        content: `💰 Montant choisi : ${formatAmount(cents)}
-Choisissez un moyen de paiement :`,
-        components: [payMenu],
-        ephemeral: true
-      });
-    }
-  }
-
-  if (interaction.isStringSelectMenu()) {
     const uid = interaction.user.id;
     if (!wallets[uid]) wallets[uid] = { balance: 0 };
 
-    const prix = prices[interaction.values[0]];
+    const productId = interaction.values[0];
+    const product = products.find(item => item.value === productId);
+    const prix = prices[productId];
+
+    if (!product || !prix) {
+      return replyTemp(interaction, {
+        content: '❌ Produit introuvable.',
+        ephemeral: true
+      });
+    }
 
     if (wallets[uid].balance < prix) {
-      return interaction.reply({
-        content: `❌ Solde insuffisant
-💰 Prix : ${prix}€
-👛 Solde : ${wallets[uid].balance}€`,
+      return replyTemp(interaction, {
+        content: `❌ Solde insuffisant\n💰 Prix : ${prix}€\n👛 Solde : ${wallets[uid].balance.toFixed(2)}€`,
         ephemeral: true
       });
     }
@@ -338,12 +417,12 @@ Choisissez un moyen de paiement :`,
 🎫 Nouvelle commande à traiter
 
 👤 Client : <@${interaction.user.id}>
-📦 Produit : ${interaction.values[0]}
+📦 Produit : ${product.label}
 💰 Payé : ${prix}€
 
 📌 Traiter la commande avec le client.`);
 
-    return interaction.reply({
+    return replyTemp(interaction, {
       content: '✅ Commande envoyée au staff.',
       ephemeral: true
     });
