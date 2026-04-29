@@ -28,7 +28,8 @@ const STAFF_ROLE_ID = '1310342652058800138';
 const TICKET_CATEGORY = '1495800617204187216';
 const DELETE_DELAY = 10_000;
 
-const SHOP_EMOJI = '🛒';
+const SHOP_EMOJI = '<:4964mcdonalds:1498440076257136830>';
+const INFO_IMAGE = 'https://images-ext-1.discordapp.net/external/PDwpqnH8rd9lL2CwVonbWngM9hLKFtpxOZ_da1iKy50/https/img.draftbot.fr/1776700160616-f67ef3f129b6a57b.png?format=webp&quality=lossless&width=623&height=944';
 
 let wallets = {};
 if (fs.existsSync('wallets.json')) {
@@ -40,21 +41,21 @@ function saveWallets() {
 }
 
 const products = [
-  { label: '50-74 crédits', description: '2€', value: '50_74', price: 2 },
-  { label: '75-99 crédits', description: '4€', value: '75_99', price: 4 },
-  { label: '100-124 crédits', description: '6€', value: '100_124', price: 6 },
-  { label: '125-149 crédits', description: '7€', value: '125_149', price: 7 },
-  { label: '150-174 crédits', description: '8€', value: '150_174', price: 8 },
-  { label: '175-199 crédits', description: '10€', value: '175_199', price: 10 },
-  { label: '200-224 crédits', description: '11€', value: '200_224', price: 11 },
-  { label: '225-249 crédits', description: '12€', value: '225_249', price: 12 },
-  { label: '250-274 crédits', description: '13€', value: '250_274', price: 13 },
-  { label: '275-299 crédits', description: '14€', value: '275_299', price: 14 },
-  { label: '300-324 crédits', description: '15€', value: '300_324', price: 15 },
-  { label: '325-349 crédits', description: '16€', value: '325_349', price: 16 },
-  { label: '350-374 crédits', description: '17€', value: '350_374', price: 17 },
-  { label: '400-499 crédits', description: '18€', value: '400_499', price: 18 },
-  { label: '500-599 crédits', description: '21€', value: '500_599', price: 21 }
+  { label: '50-74 points', description: '2€', value: '50_74', price: 2 },
+  { label: '75-99 points', description: '4€', value: '75_99', price: 4 },
+  { label: '100-124 points', description: '6€', value: '100_124', price: 6 },
+  { label: '125-149 points', description: '7€', value: '125_149', price: 7 },
+  { label: '150-174 points', description: '8€', value: '150_174', price: 8 },
+  { label: '175-199 points', description: '10€', value: '175_199', price: 10 },
+  { label: '200-224 points', description: '11€', value: '200_224', price: 11 },
+  { label: '225-249 points', description: '12€', value: '225_249', price: 12 },
+  { label: '250-274 points', description: '13€', value: '250_274', price: 13 },
+  { label: '275-299 points', description: '14€', value: '275_299', price: 14 },
+  { label: '300-324 points', description: '15€', value: '300_324', price: 15 },
+  { label: '325-349 points', description: '16€', value: '325_349', price: 16 },
+  { label: '350-374 points', description: '17€', value: '350_374', price: 17 },
+  { label: '400-499 points', description: '18€', value: '400_499', price: 18 },
+  { label: '500-599 points', description: '21€', value: '500_599', price: 21 }
 ];
 
 const prices = Object.fromEntries(products.map(product => [product.value, product.price]));
@@ -84,8 +85,7 @@ function sanitizeChannelName(name) {
 }
 
 function parseAmountToCents(value) {
-  const normalized = value.trim().replace(',', '.');
-  const amount = Number(normalized);
+  const amount = Number(value.trim().replace(',', '.'));
 
   if (!Number.isFinite(amount) || amount < 1 || amount > 200) {
     return null;
@@ -132,15 +132,20 @@ client.on('messageCreate', async message => {
         name: 'Boutique',
         iconURL: message.guild.iconURL({ dynamic: true })
       })
-      .setTitle(`${SHOP_EMOJI} Boutique`)
+      .setTitle(`${SHOP_EMOJI} Tarifs`)
       .setDescription([
-        'Bienvenue sur la boutique.',
+        'Pour commander, recharge d’abord ton solde avec le bouton ci-dessous.',
+        '',
+        'Moyens de paiement disponibles :',
+        '🅿️ PayPal',
+        '💳 Revolut',
+        '🏦 Virement bancaire',
         '',
         '```',
         productListText(),
         '```',
         '',
-        'Choisis une action avec les boutons ci-dessous.'
+        'Une fois ton solde rechargé, clique sur Commander.'
       ].join('\n'))
       .setThumbnail(message.guild.iconURL({ dynamic: true }))
       .setFooter({ text: 'Portefeuille • Recharge • Commande' });
@@ -154,7 +159,7 @@ client.on('messageCreate', async message => {
 
       new ButtonBuilder()
         .setCustomId('recharger')
-        .setLabel('Recharger')
+        .setLabel('Recharger le solde')
         .setEmoji('➕')
         .setStyle(ButtonStyle.Primary),
 
@@ -162,7 +167,13 @@ client.on('messageCreate', async message => {
         .setCustomId('commande')
         .setLabel('Commander')
         .setEmoji('🎫')
-        .setStyle(ButtonStyle.Success)
+        .setStyle(ButtonStyle.Success),
+
+      new ButtonBuilder()
+        .setCustomId('infos_points')
+        .setLabel('Infos')
+        .setEmoji('ℹ️')
+        .setStyle(ButtonStyle.Secondary)
     );
 
     return message.channel.send({
@@ -172,10 +183,11 @@ client.on('messageCreate', async message => {
   }
 
   if (message.content.startsWith('!addmoney')) {
-    if (
-      !message.member.roles.cache.has(ADMIN_ROLE_ID) &&
-      !message.member.permissions.has(PermissionFlagsBits.Administrator)
-    ) {
+    const isAdmin =
+      message.member.roles.cache.has(ADMIN_ROLE_ID) ||
+      message.member.permissions.has(PermissionFlagsBits.Administrator);
+
+    if (!isAdmin) {
       const reply = await message.reply('❌ Permission refusée.');
       return deleteLater(reply);
     }
@@ -198,10 +210,11 @@ client.on('messageCreate', async message => {
   }
 
   if (message.content.startsWith('!removemoney')) {
-    if (
-      !message.member.roles.cache.has(ADMIN_ROLE_ID) &&
-      !message.member.permissions.has(PermissionFlagsBits.Administrator)
-    ) {
+    const isAdmin =
+      message.member.roles.cache.has(ADMIN_ROLE_ID) ||
+      message.member.permissions.has(PermissionFlagsBits.Administrator);
+
+    if (!isAdmin) {
       const reply = await message.reply('❌ Permission refusée.');
       return deleteLater(reply);
     }
@@ -233,6 +246,18 @@ client.on(Events.InteractionCreate, async interaction => {
         content: `💳 Solde actuel : ${wallets[interaction.user.id].balance.toFixed(2)}€`,
         ephemeral: true
       });
+    }
+
+    if (interaction.customId === 'infos_points') {
+      const infoEmbed = new EmbedBuilder()
+        .setColor(0xD4AF37)
+        .setTitle('Informations')
+        .setImage(INFO_IMAGE);
+
+      return replyTemp(interaction, {
+        embeds: [infoEmbed],
+        ephemeral: true
+      }, 30_000);
     }
 
     if (interaction.customId === 'recharger') {
@@ -420,7 +445,7 @@ ${paymentText}`);
 📦 Produit : ${product.label}
 💰 Payé : ${prix}€
 
-📌 Traiter la commande avec le client.`);
+📌 Envoyer le code barre au client.`);
 
     return replyTemp(interaction, {
       content: '✅ Commande envoyée au staff.',
