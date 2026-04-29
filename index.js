@@ -41,8 +41,40 @@ if (fs.existsSync('wallets.json')) {
   wallets = JSON.parse(fs.readFileSync('wallets.json'));
 }
 
+let requests = { counter: 0, tickets: {} };
+if (fs.existsSync('requests.json')) {
+  requests = JSON.parse(fs.readFileSync('requests.json'));
+}
+
 function saveWallets() {
   fs.writeFileSync('wallets.json', JSON.stringify(wallets, null, 2));
+}
+
+function saveRequests() {
+  fs.writeFileSync('requests.json', JSON.stringify(requests, null, 2));
+}
+
+function createRequest(type, channelId, userId, data = {}) {
+  requests.counter += 1;
+
+  const prefix = type === 'recharge' ? 'R' : 'C';
+  const request = {
+    id: `${prefix}-${String(requests.counter).padStart(4, '0')}`,
+    type,
+    channelId,
+    userId,
+    createdAt: Date.now(),
+    ...data
+  };
+
+  requests.tickets[channelId] = request;
+  saveRequests();
+
+  return request;
+}
+
+function getTicketRequest(channelId) {
+  return requests.tickets[channelId] || null;
 }
 
 const products = [
@@ -156,11 +188,12 @@ client.on('messageCreate', async message => {
         name: 'Le Renta McDonalds',
         iconURL: message.guild.iconURL({ dynamic: true })
       })
-      .setTitle(`${SHOP_EMOJI} Tarifs points MCDO`)
+      .setTitle(`Tarifs points MCDO ${SHOP_EMOJI}`)
       .setDescription([
         'Pour commander, recharge d’abord ton solde avec le bouton ci-dessous.',
         '',
         'Moyens de paiement disponibles :',
+        '',
         '🅿️ PayPal',
         '💳 Revolut',
         '🏦 Virement bancaire',
@@ -226,9 +259,12 @@ client.on('messageCreate', async message => {
       return deleteLater(reply);
     }
 
+    const ticketRequest = getTicketRequest(message.channel.id);
+    const mentionedUser = message.mentions.users.first();
+    const userId = mentionedUser ? mentionedUser.id : ticketRequest?.userId;
+    const user = userId ? await client.users.fetch(userId).catch(() => null) : null;
     const args = message.content.split(' ');
-    const user = message.mentions.users.first();
-    const amount = parseFloat(args[2]);
+    const amount = parseFloat(mentionedUser ? args[2] : args[1]);
 
     if (!user || !Number.isFinite(amount)) {
       const reply = await message.channel.send({
@@ -236,7 +272,7 @@ client.on('messageCreate', async message => {
           new EmbedBuilder()
             .setColor(0xE74C3C)
             .setTitle('❌ Commande invalide')
-            .setDescription('Utilisation : `!addmoney @user montant`')
+            .setDescription('Utilisation : `!addmoney @user montant` ou `!addmoney montant` dans un ticket recharge.')
         ]
       });
 
@@ -247,12 +283,35 @@ client.on('messageCreate', async message => {
     wallets[user.id].balance += amount;
     saveWallets();
 
+    if (ticketRequest && ticketRequest.type === 'recharge' && ticketRequest.userId === user.id) {
+      const dmEmbed = new EmbedBuilder()
+        .setColor(0x2ECC71)
+        .setTitle('✅ Recharge validée')
+        .setDescription([
+          'Ta recharge a été validée avec succès.',
+          '',
+          `🧾 Demande : #${ticketRequest.id}`,
+          `💰 Montant ajouté : **${amount}€**`,
+          `👤 Pris en charge par : **${message.author.tag}**`,
+          '',
+          'Ton solde est maintenant disponible sur la boutique.'
+        ].join('\n'));
+
+      await user.send({ embeds: [dmEmbed] }).catch(async () => {
+        const warn = await message.channel.send('⚠️ Impossible d’envoyer un MP au client.');
+        deleteLater(warn);
+      });
+    }
+
     return message.channel.send({
       embeds: [
         new EmbedBuilder()
           .setColor(0x2ECC71)
           .setTitle('✅ Solde ajouté')
-          .setDescription(`**${amount}€** ont été ajoutés au portefeuille de ${user}.`)
+          .setDescription([
+            `**${amount}€** ont été ajoutés au portefeuille de ${user}.`,
+            ticketRequest ? `🧾 Demande : #${ticketRequest.id}` : null
+          ].filter(Boolean).join('\n'))
       ]
     });
   }
@@ -350,6 +409,11 @@ client.on(Events.InteractionCreate, async interaction => {
           content: '❌ Tu ne peux pas supprimer ce ticket.',
           ephemeral: true
         });
+      }
+
+      if (requests.tickets[interaction.channel.id]) {
+        delete requests.tickets[interaction.channel.id];
+        saveRequests();
       }
 
       await interaction.reply({
@@ -504,6 +568,11 @@ client.on(Events.InteractionCreate, async interaction => {
         permissionOverwrites: ticketPermissionOverwrites(interaction.guild, interaction.user.id)
       });
 
+      const request = createRequest('recharge', ticket.id, interaction.user.id, {
+        amount,
+        method
+      });
+
       let paymentText = '';
 
       if (method === 'paypal') {
@@ -529,6 +598,7 @@ ${NO_NOTE_TEXT}`;
       await ticket.send({
         content: `🎫 Ticket recharge
 
+🧾 Demande : #${request.id}
 👤 Client : <@${interaction.user.id}>
 💰 Montant : ${amount}
 💳 Moyen de paiement : ${method}
@@ -538,7 +608,7 @@ ${paymentText}`,
       });
 
       return replyTemp(interaction, {
-        content: `✅ Ticket recharge créé pour ${amount}.`,
+        content: `✅ Ticket recharge créé pour ${amount}.\n🧾 Demande : #${request.id}`,
         ephemeral: true
       });
     }
@@ -576,11 +646,17 @@ ${paymentText}`,
       permissionOverwrites: ticketPermissionOverwrites(interaction.guild, interaction.user.id)
     });
 
+    const request = createRequest('commande', ticket.id, interaction.user.id, {
+      product: product.label,
+      price: prix
+    });
+
     await ticket.send({
       content: `<@&${STAFF_ROLE_ID}>
 
 🎫 Nouvelle commande à traiter
 
+🧾 Demande : #${request.id}
 👤 Client : <@${interaction.user.id}>
 📦 Produit : ${product.label}
 💰 Payé : ${prix}€
@@ -590,7 +666,7 @@ ${paymentText}`,
     });
 
     return replyTemp(interaction, {
-      content: '✅ Commande envoyée au staff.',
+      content: `✅ Commande envoyée au staff.\n🧾 Demande : #${request.id}`,
       ephemeral: true
     });
   }
