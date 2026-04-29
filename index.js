@@ -31,6 +31,11 @@ const DELETE_DELAY = 10_000;
 const SHOP_EMOJI = '<:4964mcdonalds:1498440076257136830>';
 const INFO_IMAGE = 'https://images-ext-1.discordapp.net/external/PDwpqnH8rd9lL2CwVonbWngM9hLKFtpxOZ_da1iKy50/https/img.draftbot.fr/1776700160616-f67ef3f129b6a57b.png?format=webp&quality=lossless&width=623&height=944';
 
+const PAYPAL_LINK = 'https://www.paypal.com/paypalme/AntoninChenot';
+const REVOLUT_LINK = 'https://revolut.me/arthur23320/pocket/vNrIna0VcG';
+const IBAN = 'FR76 2823 3000 0176 1307 4771 273';
+const NO_NOTE_TEXT = '❗❗ Ne mettre aucune note lors du paiement ❗❗';
+
 let wallets = {};
 if (fs.existsSync('wallets.json')) {
   wallets = JSON.parse(fs.readFileSync('wallets.json'));
@@ -129,10 +134,10 @@ client.on('messageCreate', async message => {
     const embed = new EmbedBuilder()
       .setColor(0xD4AF37)
       .setAuthor({
-        name: 'Boutique',
+        name: 'Le Renta McDonalds',
         iconURL: message.guild.iconURL({ dynamic: true })
       })
-      .setTitle(`${SHOP_EMOJI} Tarifs`)
+      .setTitle(`${SHOP_EMOJI} Tarifs points MCDO`)
       .setDescription([
         'Pour commander, recharge d’abord ton solde avec le bouton ci-dessous.',
         '',
@@ -171,7 +176,7 @@ client.on('messageCreate', async message => {
 
       new ButtonBuilder()
         .setCustomId('infos_points')
-        .setLabel('Infos')
+        .setLabel('Programme fidélité McDo')
         .setEmoji('ℹ️')
         .setStyle(ButtonStyle.Secondary)
     );
@@ -183,12 +188,22 @@ client.on('messageCreate', async message => {
   }
 
   if (message.content.startsWith('!addmoney')) {
+    message.delete().catch(() => {});
+
     const isAdmin =
       message.member.roles.cache.has(ADMIN_ROLE_ID) ||
       message.member.permissions.has(PermissionFlagsBits.Administrator);
 
     if (!isAdmin) {
-      const reply = await message.reply('❌ Permission refusée.');
+      const reply = await message.channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0xE74C3C)
+            .setTitle('❌ Permission refusée')
+            .setDescription('Tu n’as pas la permission d’utiliser cette commande.')
+        ]
+      });
+
       return deleteLater(reply);
     }
 
@@ -197,7 +212,15 @@ client.on('messageCreate', async message => {
     const amount = parseFloat(args[2]);
 
     if (!user || !Number.isFinite(amount)) {
-      const reply = await message.reply('❌ Utilisation : `!addmoney @user montant`');
+      const reply = await message.channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0xE74C3C)
+            .setTitle('❌ Commande invalide')
+            .setDescription('Utilisation : `!addmoney @user montant`')
+        ]
+      });
+
       return deleteLater(reply);
     }
 
@@ -205,17 +228,35 @@ client.on('messageCreate', async message => {
     wallets[user.id].balance += amount;
     saveWallets();
 
-    const reply = await message.reply(`${amount} euros ajoutés.`);
+    const reply = await message.channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0x2ECC71)
+          .setTitle('✅ Solde ajouté')
+          .setDescription(`**${amount}€** ont été ajoutés au portefeuille de ${user}.`)
+      ]
+    });
+
     return deleteLater(reply);
   }
 
   if (message.content.startsWith('!removemoney')) {
+    message.delete().catch(() => {});
+
     const isAdmin =
       message.member.roles.cache.has(ADMIN_ROLE_ID) ||
       message.member.permissions.has(PermissionFlagsBits.Administrator);
 
     if (!isAdmin) {
-      const reply = await message.reply('❌ Permission refusée.');
+      const reply = await message.channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0xE74C3C)
+            .setTitle('❌ Permission refusée')
+            .setDescription('Tu n’as pas la permission d’utiliser cette commande.')
+        ]
+      });
+
       return deleteLater(reply);
     }
 
@@ -224,7 +265,15 @@ client.on('messageCreate', async message => {
     const amount = parseFloat(args[2]);
 
     if (!user || !Number.isFinite(amount)) {
-      const reply = await message.reply('❌ Utilisation : `!removemoney @user montant`');
+      const reply = await message.channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0xE74C3C)
+            .setTitle('❌ Commande invalide')
+            .setDescription('Utilisation : `!removemoney @user montant`')
+        ]
+      });
+
       return deleteLater(reply);
     }
 
@@ -232,7 +281,15 @@ client.on('messageCreate', async message => {
     wallets[user.id].balance -= amount;
     saveWallets();
 
-    const reply = await message.reply(`${amount} euros retirés.`);
+    const reply = await message.channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0xE67E22)
+          .setTitle('✅ Solde retiré')
+          .setDescription(`**${amount}€** ont été retirés du portefeuille de ${user}.`)
+      ]
+    });
+
     return deleteLater(reply);
   }
 });
@@ -251,7 +308,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.customId === 'infos_points') {
       const infoEmbed = new EmbedBuilder()
         .setColor(0xD4AF37)
-        .setTitle('Informations')
+        .setTitle('Programme fidélité McDo+')
         .setImage(INFO_IMAGE);
 
       return replyTemp(interaction, {
@@ -375,19 +432,23 @@ client.on(Events.InteractionCreate, async interaction => {
       let paymentText = '';
 
       if (method === 'paypal') {
-        paymentText = '🅿️ Paiement PayPal : https://www.paypal.com/paypalme/AntoninChenot';
+        paymentText = `🅿️ Paiement PayPal : ${PAYPAL_LINK}
+
+${NO_NOTE_TEXT}`;
       }
 
       if (method === 'revolut') {
-        paymentText = '💳 Paiement Revolut : https://revolut.me/arthur23320/pocket/vNrIna0VcG';
+        paymentText = `💳 Paiement Revolut : ${REVOLUT_LINK}
+
+${NO_NOTE_TEXT}`;
       }
 
       if (method === 'virement') {
         paymentText = `🏦 Virement bancaire
 
-IBAN : FR76 2823 3000 0176 1307 4771 273
+IBAN : ${IBAN}
 
-Référence paiement : pseudo Discord`;
+${NO_NOTE_TEXT}`;
       }
 
       await ticket.send(`🎫 Ticket recharge
@@ -413,7 +474,7 @@ ${paymentText}`);
     const product = products.find(item => item.value === productId);
     const prix = prices[productId];
 
-    if (!product || !prix) {
+    if (!product || prix === undefined) {
       return replyTemp(interaction, {
         content: '❌ Produit introuvable.',
         ephemeral: true
@@ -445,7 +506,7 @@ ${paymentText}`);
 📦 Produit : ${product.label}
 💰 Payé : ${prix}€
 
-📌 Envoyer le code barre au client.`);
+📌 Envoyer le produit au client.`);
 
     return replyTemp(interaction, {
       content: '✅ Commande envoyée au staff.',
