@@ -12,15 +12,18 @@ const {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
-  PermissionFlagsBits
+  PermissionFlagsBits,
+  Partials
 } = require('discord.js');
 
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.DirectMessages,
     GatewayIntentBits.MessageContent
-  ]
+  ],
+  partials: [Partials.Channel]
 });
 
 const ADMIN_ROLE_ID = '1310984358991106120';
@@ -31,9 +34,9 @@ const DELETE_DELAY = 10_000;
 
 const SHOP_EMOJI = '🛒';
 const INFO_IMAGE = process.env.INFO_IMAGE || '';
-const PAYPAL_LINK = process.env.PAYPAL_LINK || 'A_CONFIGURER';
-const REVOLUT_LINK = process.env.REVOLUT_LINK || 'A_CONFIGURER';
-const IBAN = process.env.IBAN || 'A_CONFIGURER';
+const PAYPAL_LINK = 'https://paypal.me/AntoninChenot';
+const REVOLUT_LINK = 'https://revolut.me/antoni7mcq';
+const IBAN = 'FR76 2823 3000 0199 9815 8391 677';
 const NO_NOTE_TEXT = '❗❗ Ne mettre aucune note lors du paiement ❗❗';
 
 let wallets = fs.existsSync('wallets.json')
@@ -59,7 +62,6 @@ function isAdminMember(member) {
 function createRequest(type, channelId, userId, data = {}) {
   requests.counter += 1;
   const prefix = type === 'recharge' ? 'R' : type === 'support' ? 'S' : 'C';
-
   const request = {
     id: `${prefix}-${String(requests.counter).padStart(4, '0')}`,
     type,
@@ -76,6 +78,12 @@ function createRequest(type, channelId, userId, data = {}) {
 
 function getTicketRequest(channelId) {
   return requests.tickets[channelId] || null;
+}
+
+function findOpenRechargeRequestByUser(userId) {
+  return Object.values(requests.tickets)
+    .reverse()
+    .find(request => request.type === 'recharge' && request.userId === userId && !request.paidAt) || null;
 }
 
 const products = [
@@ -97,7 +105,6 @@ const products = [
 ];
 
 const prices = Object.fromEntries(products.map(product => [product.value, product.price]));
-
 const ticketAllow = [
   PermissionFlagsBits.ViewChannel,
   PermissionFlagsBits.SendMessages,
@@ -109,6 +116,13 @@ function ticketPermissionOverwrites(guild, userId) {
     { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
     { id: userId, allow: ticketAllow },
     { id: STAFF_ROLE_ID, allow: ticketAllow },
+    { id: ADMIN_ROLE_ID, allow: ticketAllow }
+  ];
+}
+
+function adminTicketPermissionOverwrites(guild) {
+  return [
+    { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
     { id: ADMIN_ROLE_ID, allow: ticketAllow }
   ];
 }
@@ -151,6 +165,43 @@ function formatAmount(cents) {
   return `${(cents / 100).toFixed(2)}€`;
 }
 
+function paymentLabel(method) {
+  return {
+    paypal: 'PayPal',
+    revolut: 'Revolut',
+    virement: 'Virement'
+  }[method] || method;
+}
+
+function paymentInstruction(method) {
+  if (method === 'paypal') {
+    return `ENVOIE ICI EN AMI PROCHE & SANS NOTES : ${PAYPAL_LINK} | Puis réponds à ce message en joignant ton screenshot PayPal (capture d'écran du paiement).`;
+  }
+
+  if (method === 'revolut') {
+    return `ENVOIE ICI SANS NOTES : ${REVOLUT_LINK} | Puis réponds à ce message en joignant ton screenshot Revolut (capture d'écran du paiement).`;
+  }
+
+  if (method === 'virement') {
+    return `EFFECTUE LE VIREMENT SANS NOTES : IBAN ${IBAN} | Puis réponds à ce message en joignant ton screenshot du virement.`;
+  }
+
+  return 'Puis réponds à ce message en joignant ton screenshot du paiement.';
+}
+
+function rechargeInstructionMessage(request) {
+  const methodName = paymentLabel(request.method);
+
+  return [
+    `🧭 **Recharge ${methodName} — Étape 2/2**`,
+    '',
+    `Montant déclaré : **${request.amount}** | Demande n°**${request.id}**`,
+    '',
+    `**${paymentInstruction(request.method)}**`,
+    '⏳ Tu as **24h** pour l\'envoyer.'
+  ].join('\n');
+}
+
 function deleteLater(message, delay = DELETE_DELAY) {
   setTimeout(() => {
     message.delete().catch(() => {});
@@ -176,7 +227,41 @@ client.once('ready', () => {
 
 client.on('messageCreate', async message => {
   if (message.author.bot) return;
-  if (!message.guild) return;
+
+  if (!message.guild) {
+    const dmRequest = findOpenRechargeRequestByUser(message.author.id);
+
+    if (!dmRequest) return;
+
+    if (message.attachments.size === 0) {
+      return message.channel.send('📸 Envoie ici le screenshot de ton paiement pour ta recharge en cours.');
+    }
+
+    const screenshotUrl = message.attachments.first()?.url || null;
+    dmRequest.screenshotReceivedAt = Date.now();
+    dmRequest.screenshotUrl = screenshotUrl;
+    saveRequests();
+
+    const adminChannel = await client.channels.fetch(dmRequest.channelId).catch(() => null);
+
+    if (adminChannel) {
+      await adminChannel.send([
+        '✅ **Screenshot reçu !**',
+        `💶 Montant : **${dmRequest.amount}** | Demande n°**${dmRequest.id}**`,
+        `👤 Client : <@${dmRequest.userId}>`,
+        screenshotUrl ? `📎 Screenshot : ${screenshotUrl}` : null,
+        '',
+        '⏳ Un administrateur va vérifier le paiement et créditer le solde.'
+      ].filter(Boolean).join('\n'));
+    }
+
+    return message.channel.send([
+      '✅ **Screenshot reçu !**',
+      `💶 Montant : **${dmRequest.amount}** | Demande n°**${dmRequest.id}**`,
+      '',
+      '⏳ Un administrateur va vérifier ton paiement et créditer ton solde.'
+    ].join('\n'));
+  }
 
   if (message.content.startsWith('!')) {
     await message.delete().catch(error => {
@@ -270,12 +355,8 @@ client.on('messageCreate', async message => {
       .setFooter({ text: 'Solde obligatoire avant commande' });
 
     await message.channel.send({ embeds: [embed] });
-
     const confirm = await message.channel.send('✅ Tarifs envoyés.');
-    setTimeout(() => {
-      confirm.delete().catch(() => {});
-    }, 2000);
-
+    setTimeout(() => confirm.delete().catch(() => {}), 2000);
     return;
   }
 
@@ -357,25 +438,26 @@ client.on('messageCreate', async message => {
     saveWallets();
 
     if (ticketRequest && ticketRequest.type === 'recharge' && ticketRequest.userId === user.id) {
+      const amountText = `${amount.toFixed(2)}€`;
+      const newBalanceText = `${wallets[user.id].balance.toFixed(2)}€`;
+      const methodName = paymentLabel(ticketRequest.method);
+
       const dmEmbed = new EmbedBuilder()
         .setColor(0x2ECC71)
         .setTitle('✅ Recharge validée')
         .setDescription([
           'Ta recharge a été validée avec succès.',
           '',
-          `🧾 Demande : #${ticketRequest.id}`,
-          `💰 Montant ajouté : **${amount}€**`,
+          `🧾 Demande : n°${ticketRequest.id}`,
+          `💰 Montant ajouté : **${amountText}**`,
           `👤 Pris en charge par : **${message.author.tag}**`,
           '',
           'Ton solde est maintenant disponible sur la boutique.'
         ].join('\n'));
 
       let dmSent = false;
-
       await user.send({ embeds: [dmEmbed] })
-        .then(() => {
-          dmSent = true;
-        })
+        .then(() => { dmSent = true; })
         .catch(async () => {
           const warn = await message.channel.send('⚠️ Impossible d’envoyer un MP au client. Le ticket reste ouvert.');
           deleteLater(warn);
@@ -385,10 +467,11 @@ client.on('messageCreate', async message => {
         embeds: [
           new EmbedBuilder()
             .setColor(0x2ECC71)
-            .setTitle('✅ Solde ajouté')
+            .setTitle(`✅ Paiement ${methodName} validé !`)
             .setDescription([
-              `**${amount}€** ont été ajoutés au portefeuille de ${user}.`,
-              `🧾 Demande : #${ticketRequest.id}`,
+              `💶 Montant crédité : **${amountText}**`,
+              `💰 Nouveau solde : **${newBalanceText}**`,
+              `🆔 Demande : **n°${ticketRequest.id}**`,
               dmSent ? '📩 MP envoyé au client.' : '⚠️ MP non envoyé au client.'
             ].join('\n'))
         ]
@@ -398,10 +481,7 @@ client.on('messageCreate', async message => {
         await message.channel.send('✅ Le ticket se fermera dans 10 secondes.');
         delete requests.tickets[message.channel.id];
         saveRequests();
-
-        setTimeout(() => {
-          message.channel.delete().catch(() => {});
-        }, 10_000);
+        setTimeout(() => message.channel.delete().catch(() => {}), 10_000);
       }
 
       return;
@@ -454,12 +534,8 @@ client.on(Events.InteractionCreate, async interaction => {
   if (interaction.isButton()) {
     if (interaction.customId.startsWith('delete_ticket:')) {
       const ownerId = interaction.customId.split(':')[1];
-
       if (!canManageTicket(interaction, ownerId)) {
-        return interaction.reply({
-          content: '❌ Tu ne peux pas supprimer ce ticket.',
-          ephemeral: true
-        });
+        return interaction.reply({ content: '❌ Tu ne peux pas supprimer ce ticket.', ephemeral: true });
       }
 
       const confirmRow = new ActionRowBuilder().addComponents(
@@ -476,34 +552,19 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (interaction.customId.startsWith('confirm_delete_ticket:')) {
       const ownerId = interaction.customId.split(':')[1];
-
       if (!canManageTicket(interaction, ownerId)) {
-        return interaction.reply({
-          content: '❌ Tu ne peux pas supprimer ce ticket.',
-          ephemeral: true
-        });
+        return interaction.reply({ content: '❌ Tu ne peux pas supprimer ce ticket.', ephemeral: true });
       }
 
       delete requests.tickets[interaction.channel.id];
       saveRequests();
-
-      await interaction.reply({
-        content: '🗑️ Ticket supprimé dans 5 secondes...',
-        ephemeral: true
-      });
-
-      setTimeout(() => {
-        interaction.channel.delete().catch(() => {});
-      }, 5000);
-
+      await interaction.reply({ content: '🗑️ Ticket supprimé dans 5 secondes...', ephemeral: true });
+      setTimeout(() => interaction.channel.delete().catch(() => {}), 5000);
       return;
     }
 
     if (interaction.customId === 'cancel_delete_ticket') {
-      return interaction.update({
-        content: '✅ Suppression annulée.',
-        components: []
-      });
+      return interaction.update({ content: '✅ Suppression annulée.', components: [] });
     }
 
     if (interaction.customId === 'open_support_ticket') {
@@ -515,7 +576,6 @@ client.on(Events.InteractionCreate, async interaction => {
       });
 
       const request = createRequest('support', ticket.id, interaction.user.id);
-
       await ticket.send({
         content: `🎫 Ticket support
 
@@ -535,7 +595,6 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (interaction.customId === 'wallet') {
       if (!wallets[interaction.user.id]) wallets[interaction.user.id] = { balance: 0 };
-
       return replyTemp(interaction, {
         content: `💳 Solde actuel : ${wallets[interaction.user.id].balance.toFixed(2)}€`,
         ephemeral: true
@@ -543,23 +602,13 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.customId === 'infos_points') {
-      const infoEmbed = new EmbedBuilder()
-        .setColor(0xD4AF37)
-        .setTitle('Informations');
-
+      const infoEmbed = new EmbedBuilder().setColor(0xD4AF37).setTitle('Informations');
       if (INFO_IMAGE) infoEmbed.setImage(INFO_IMAGE);
-
-      return replyTemp(interaction, {
-        embeds: [infoEmbed],
-        ephemeral: true
-      }, 30_000);
+      return replyTemp(interaction, { embeds: [infoEmbed], ephemeral: true }, 30_000);
     }
 
     if (interaction.customId === 'recharger') {
-      const modal = new ModalBuilder()
-        .setCustomId('recharge_amount')
-        .setTitle('Recharge de solde');
-
+      const modal = new ModalBuilder().setCustomId('recharge_amount').setTitle('Recharge de solde');
       const amountInput = new TextInputBuilder()
         .setCustomId('amount')
         .setLabel('Montant entre 1€ et 200€')
@@ -577,13 +626,7 @@ client.on(Events.InteractionCreate, async interaction => {
       const orderEmbed = new EmbedBuilder()
         .setColor(0xD4AF37)
         .setTitle('🎫 Fenêtre de commande')
-        .setDescription([
-          'Choisis ton produit dans le menu ci-dessous.',
-          '',
-          '```',
-          productListText(),
-          '```'
-        ].join('\n'))
+        .setDescription(['Choisis ton produit dans le menu ci-dessous.', '', '```', productListText(), '```'].join('\n'))
         .setFooter({ text: 'Cette fenêtre disparaît automatiquement.' });
 
       const menu = new ActionRowBuilder().addComponents(
@@ -598,17 +641,12 @@ client.on(Events.InteractionCreate, async interaction => {
           })))
       );
 
-      return replyTemp(interaction, {
-        embeds: [orderEmbed],
-        components: [menu],
-        ephemeral: true
-      });
+      return replyTemp(interaction, { embeds: [orderEmbed], components: [menu], ephemeral: true });
     }
   }
 
   if (interaction.isModalSubmit() && interaction.customId === 'recharge_amount') {
     const cents = parseAmountToCents(interaction.fields.getTextInputValue('amount'));
-
     if (cents === null) {
       return replyTemp(interaction, {
         content: '❌ Montant invalide. Entrez un montant entre 1€ et 200€.',
@@ -644,34 +682,38 @@ client.on(Events.InteractionCreate, async interaction => {
         name: `recharge-${sanitizeChannelName(interaction.user.username)}`,
         parent: TICKET_CATEGORY,
         type: ChannelType.GuildText,
-        permissionOverwrites: ticketPermissionOverwrites(interaction.guild, interaction.user.id)
+        permissionOverwrites: adminTicketPermissionOverwrites(interaction.guild)
       });
 
-      const request = createRequest('recharge', ticket.id, interaction.user.id, {
-        amount,
-        method
-      });
+      const request = createRequest('recharge', ticket.id, interaction.user.id, { amount, method });
+      const methodName = paymentLabel(method);
+      let dmSent = false;
 
-      const paymentText = {
-        paypal: `🅿️ Paiement PayPal : ${https://paypal.me/AntoninChenot}\n\n${NO_NOTE_TEXT}`,
-        revolut: `💳 Paiement Revolut : ${https://revolut.me/antoni7mcq}\n\n${NO_NOTE_TEXT}`,
-        virement: `🏦 Virement bancaire\n\nIBAN : ${FR76 2823 3000 0199 9815 8391 677}\n\n${NO_NOTE_TEXT}`
-      }[method];
+      await interaction.user.send(rechargeInstructionMessage(request))
+        .then(() => {
+          dmSent = true;
+        })
+        .catch(() => {});
 
       await ticket.send({
-        content: `🎫 Ticket recharge
+        content: `<@&${STAFF_ROLE_ID}>
 
-🧾 Demande : #${request.id}
+🧾 **Nouvelle demande de recharge ${methodName}**
+
+Demande n°**${request.id}**
 👤 Client : <@${interaction.user.id}>
-💰 Montant : ${amount}
-💳 Moyen de paiement : ${method}
+💶 Montant déclaré : **${amount}**
+💳 Moyen de paiement : **${methodName}**
 
-${paymentText}`,
+${dmSent ? '📩 Instructions envoyées au client en MP.' : '⚠️ Impossible d’envoyer les instructions en MP au client.'}
+⏳ En attente du screenshot du paiement.`,
         components: [ticketButtons(interaction.user.id)]
       });
 
       return replyTemp(interaction, {
-        content: `✅ Ticket recharge créé pour ${amount}.\n🧾 Demande : #${request.id}`,
+        content: dmSent
+          ? `✅ Demande de recharge créée pour ${amount}.\n📩 Les instructions ont été envoyées en MP.\n🧾 Demande : #${request.id}`
+          : `⚠️ Demande créée, mais impossible de t’envoyer un MP. Contacte le staff.\n🧾 Demande : #${request.id}`,
         ephemeral: true
       });
     }
@@ -686,10 +728,7 @@ ${paymentText}`,
     const prix = prices[productId];
 
     if (!product || prix === undefined) {
-      return replyTemp(interaction, {
-        content: '❌ Produit introuvable.',
-        ephemeral: true
-      });
+      return replyTemp(interaction, { content: '❌ Produit introuvable.', ephemeral: true });
     }
 
     if (wallets[uid].balance < prix) {
