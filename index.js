@@ -188,6 +188,25 @@ function formatReferralDate(timestamp) {
   return `<t:${Math.floor(timestamp / 1000)}:f>`;
 }
 
+function findPersonalInviteOwner(inviteCode) {
+  return Object.entries(referrals.inviteLinks || {})
+    .find(([, invite]) => invite?.code === inviteCode)?.[0] || null;
+}
+
+function normalizeReferralOwnersFromPersonalLinks() {
+  let changed = false;
+
+  Object.values(referrals.invitedBy).forEach(referral => {
+    const ownerId = findPersonalInviteOwner(referral.inviteCode);
+    if (ownerId && referral.inviterId !== ownerId) {
+      referral.inviterId = ownerId;
+      changed = true;
+    }
+  });
+
+  if (changed) saveReferrals();
+}
+
 async function getOrCreatePersonalInvite(guild, user) {
   const existing = referrals.inviteLinks[user.id];
 
@@ -262,14 +281,21 @@ async function recordMemberInvite(member) {
   });
   guildInviteUses.set(member.guild.id, newUses);
 
-  if (!usedInvite || !usedInvite.inviter || usedInvite.inviter.id === member.id) {
+  if (!usedInvite) {
+    return null;
+  }
+
+  const personalInviteOwnerId = findPersonalInviteOwner(usedInvite.code);
+  const inviterId = personalInviteOwnerId || usedInvite.inviter?.id;
+
+  if (!inviterId || inviterId === member.id || (!personalInviteOwnerId && inviterId === client.user?.id)) {
     return null;
   }
 
   if (!referrals.invitedBy[member.id]) {
     referrals.invitedBy[member.id] = {
       guildId: member.guild.id,
-      inviterId: usedInvite.inviter.id,
+      inviterId,
       inviteCode: usedInvite.code,
       joinedAt: Date.now(),
       validated: false,
@@ -639,6 +665,7 @@ async function sendInviteAdminAnnouncement(member, referral) {
 
 client.once('ready', async () => {
   console.log('Bot connecte');
+  normalizeReferralOwnersFromPersonalLinks();
   await Promise.all(client.guilds.cache.map(guild => cacheGuildInvites(guild)));
   sendBotLog('🟢 Bot connecté', `Connecté en tant que **${client.user.tag}**`, 0x2ECC71);
 });
