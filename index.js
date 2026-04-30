@@ -32,6 +32,8 @@ const TICKET_CATEGORY = '1495800617204187216';
 const ORDER_CATEGORY = '1495800432776446063';
 const SUPPORT_CATEGORY = '1499036733986308146';
 const SHOP_CHANNEL_ID = '1310381741218988122';
+const SUPPORT_CHANNEL_ID = '1498434089450078258';
+const LOG_CHANNEL_ID = '1310354201704136747';
 const RULES_ROLE_ID = '1310359454377840650';
 const DELETE_DELAY = 10_000;
 
@@ -39,7 +41,7 @@ const SHOP_EMOJI = '🛒';
 const INFO_IMAGE = process.env.INFO_IMAGE || 'https://media.discordapp.net/attachments/1499072550985269268/1499121030491541585/IMG_1333.jpg?ex=69f4f641&is=69f3a4c1&hm=1f19f9ceb27d07466a27fcb29c1fe6fd35d2699006a35d395e827735eb547bee&=&format=webp&width=623&height=944';
 const PAYPAL_LINK = 'https://paypal.me/AntoninChenot';
 const REVOLUT_LINK = 'https://revolut.me/antoni7mcq';
-const IBAN = 'FR76 2823 3000 0199 9815 8391 677';
+const IBAN = 'FR76 2823 3000 0176 1307 4771 273';
 const NO_NOTE_TEXT = '❗❗ Ne mettre aucune note lors du paiement ❗❗';
 
 let wallets = fs.existsSync('wallets.json')
@@ -244,8 +246,38 @@ function productListText() {
     .join('\n\n');
 }
 
+async function sendBotLog(title, lines, color = 0x3498DB) {
+  const channel = client.channels.cache.get(LOG_CHANNEL_ID)
+    || await client.channels.fetch(LOG_CHANNEL_ID).catch(() => null);
+
+  if (!channel || typeof channel.send !== 'function') return;
+
+  const description = Array.isArray(lines)
+    ? lines.filter(Boolean).join('\n')
+    : String(lines || 'Aucun détail.');
+
+  await channel.send({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(color)
+        .setTitle(title)
+        .setDescription(description.slice(0, 4096))
+        .setTimestamp()
+    ]
+  }).catch(() => {});
+}
+
+function logUser(user) {
+  return `${user} (${user.tag})`;
+}
+
+function logChannel(channel) {
+  return `${channel} (${channel.id})`;
+}
+
 client.once('ready', () => {
   console.log('Bot connecte');
+  sendBotLog('🟢 Bot connecté', `Connecté en tant que **${client.user.tag}**`, 0x2ECC71);
 });
 
 client.on('messageCreate', async message => {
@@ -280,6 +312,16 @@ client.on('messageCreate', async message => {
       ].filter(Boolean).join('\n'));
     }
 
+    await sendBotLog('📸 Screenshot recharge reçu', [
+      `Client : ${logUser(message.author)}`,
+      `Demande : **${dmRequest.id}**`,
+      `Montant : **${dmRequest.amount}**`,
+      `Date indiquée : **${dmRequest.paymentDate || 'Non précisée'}**`,
+      `Heure indiquée : **${dmRequest.paymentTime || 'Non précisée'}**`,
+      adminChannel ? `Ticket : ${logChannel(adminChannel)}` : 'Ticket : introuvable',
+      screenshotUrl ? `Screenshot : ${screenshotUrl}` : null
+    ], 0x2ECC71);
+
     return message.channel.send([
       '✅ **Screenshot reçu !**',
       `💶 Montant : **${dmRequest.amount}** | Demande n°**${dmRequest.id}**`,
@@ -303,8 +345,20 @@ client.on('messageCreate', async message => {
         ]
       });
 
+      await sendBotLog('⛔ Commande refusée', [
+        `Utilisateur : ${logUser(message.author)}`,
+        `Salon : ${logChannel(message.channel)}`,
+        `Commande : \`${message.content.slice(0, 1000)}\``
+      ], 0xE74C3C);
+
       return deleteLater(reply);
     }
+
+    await sendBotLog('🛠️ Commande admin utilisée', [
+      `Admin : ${logUser(message.author)}`,
+      `Salon : ${logChannel(message.channel)}`,
+      `Commande : \`${message.content.slice(0, 1000)}\``
+    ], 0x95A5A6);
   }
 
   if (message.content === '!setup') {
@@ -374,30 +428,43 @@ client.on('messageCreate', async message => {
     const guideEmbed = new EmbedBuilder()
       .setColor(0xD4AF37)
       .setAuthor({ name: 'Guide boutique', iconURL: message.guild.iconURL({ dynamic: true }) })
-      .setTitle('📖 Guide pour commander')
+      .setTitle('Guide pour commander 📖')
       .setDescription([
-        '👋 Ce guide explique comment utiliser la boutique, même si tu débutes sur Discord.',
+        'Ce guide explique comment utiliser la boutique, même si tu débutes sur Discord. 👋',
         '',
-        `🛒 Tout se passe dans le salon <#${SHOP_CHANNEL_ID}>.`,
+        `Tout se passe dans le salon <#${SHOP_CHANNEL_ID}>.`,
         '',
-        '💳 **Recharger son solde**',
+        '**Recharger le solde 💳**',
+        '',
         `1. Va dans <#${SHOP_CHANNEL_ID}>.`,
-        '2. Clique sur **➕ Recharger**.',
+        '',
+        '2. Clique sur **Recharger ➕**.',
+        '',
         '3. Indique le montant, la date du paiement et l’heure si possible.',
-        '4. Choisis ton moyen de paiement : 🅿️ PayPal, 💳 Revolut ou 🏦 Virement.',
+        '',
+        '4. Choisis ton moyen de paiement : PayPal 🅿️, Revolut 💳 ou Virement 🏦.',
+        '',
         '5. Le bot t’envoie les instructions en message privé.',
+        '',
         '6. Envoie ton screenshot de paiement au bot en message privé.',
+        '',
         '7. Un administrateur vérifie puis crédite ton portefeuille.',
         '',
-        '🎫 **Commander**',
+        '**Commander 🎫**',
+        '',
         `1. Va dans <#${SHOP_CHANNEL_ID}>.`,
-        '2. Clique sur **👛 Portefeuille** pour vérifier ton solde.',
-        '3. Clique sur **🎫 Commander**.',
+        '',
+        '2. Clique sur **Portefeuille 👛** pour vérifier ton solde.',
+        '',
+        '3. Clique sur **Commander 🎫**.',
+        '',
         '4. Choisis ton McDonald’s dans le menu.',
+        '',
         '5. Si ton solde est suffisant, un ticket privé est créé pour ta commande.',
         '',
-        '🆘 **Besoin d’aide ?**',
-        'Ouvre un ticket support et explique ton problème.'
+        '**Besoin d’aide ? 🆘**',
+        '',
+        `Ouvre un ticket support ici : <#${SUPPORT_CHANNEL_ID}>.`
       ].join('\n'))
       .setThumbnail(message.guild.iconURL({ dynamic: true }))
       .setFooter({ text: 'Guide • Recharge • Commande • Support' });
@@ -481,6 +548,45 @@ client.on('messageCreate', async message => {
     return;
   }
 
+  if (message.content === '!mdp') {
+    const paymentEmbed = new EmbedBuilder()
+      .setColor(0xD4AF37)
+      .setAuthor({ name: 'Boutique McDonald\'s', iconURL: message.guild.iconURL({ dynamic: true }) })
+      .setTitle('Moyens de paiement 💳')
+      .setDescription([
+        '**Voici les moyens de paiement disponibles pour recharger ton solde.**',
+        `Pour recharger ton solde, va ici : <#${SHOP_CHANNEL_ID}>.`,
+        '',
+        `**${NO_NOTE_TEXT}**`,
+        '',
+        'Après le paiement, envoie ton screenshot au bot en message privé.'
+      ].join('\n'))
+      .addFields(
+        {
+          name: 'PayPal 🅿️',
+          value: `[Ouvrir le lien PayPal](${PAYPAL_LINK})`,
+          inline: false
+        },
+        {
+          name: 'Revolut 💳',
+          value: `[Ouvrir le lien Revolut](${REVOLUT_LINK})`,
+          inline: false
+        },
+        {
+          name: 'Virement bancaire 🏦',
+          value: `Disponible lors de la recharge dans <#${SHOP_CHANNEL_ID}>.`,
+          inline: false
+        }
+      )
+      .setThumbnail(message.guild.iconURL({ dynamic: true }))
+      .setFooter({ text: 'Paiement • Recharge • Solde boutique' });
+
+    await message.channel.send({ embeds: [paymentEmbed] });
+    const confirm = await message.channel.send('✅ Moyens de paiement envoyés.');
+    setTimeout(() => confirm.delete().catch(() => {}), 2000);
+    return;
+  }
+
   if (message.content === '!avis') {
     const avisEmbed = new EmbedBuilder()
       .setColor(0xD4AF37)
@@ -518,6 +624,13 @@ client.on('messageCreate', async message => {
       wallets[user.id] = { balance: 0 };
       saveWallets();
     }
+
+    await sendBotLog('👛 Portefeuille consulté', [
+      `Admin : ${logUser(message.author)}`,
+      `Membre : ${logUser(user)}`,
+      `Solde : **${wallets[user.id].balance.toFixed(2)}€**`,
+      `Salon : ${logChannel(message.channel)}`
+    ], 0x3498DB);
 
     return message.channel.send({
       embeds: [
@@ -598,6 +711,17 @@ client.on('messageCreate', async message => {
         ]
       });
 
+      await sendBotLog('✅ Recharge validée', [
+        `Admin : ${logUser(message.author)}`,
+        `Client : ${logUser(user)}`,
+        `Demande : **${ticketRequest.id}**`,
+        `Méthode : **${methodName}**`,
+        `Montant ajouté : **${amountText}**`,
+        `Nouveau solde : **${newBalanceText}**`,
+        `Ticket : ${logChannel(message.channel)}`,
+        dmSent ? 'MP client : envoyé' : 'MP client : non envoyé'
+      ], dmSent ? 0x2ECC71 : 0xF1C40F);
+
       if (dmSent) {
         await message.channel.send('✅ Le ticket se fermera dans 10 secondes.');
         delete requests.tickets[message.channel.id];
@@ -607,6 +731,14 @@ client.on('messageCreate', async message => {
 
       return;
     }
+
+    await sendBotLog('💰 Solde ajouté', [
+      `Admin : ${logUser(message.author)}`,
+      `Membre : ${logUser(user)}`,
+      `Montant ajouté : **${amount.toFixed(2)}€**`,
+      `Nouveau solde : **${wallets[user.id].balance.toFixed(2)}€**`,
+      `Salon : ${logChannel(message.channel)}`
+    ], 0x2ECC71);
 
     return message.channel.send({
       embeds: [
@@ -639,6 +771,14 @@ client.on('messageCreate', async message => {
     if (!wallets[user.id]) wallets[user.id] = { balance: 0 };
     wallets[user.id].balance -= amount;
     saveWallets();
+
+    await sendBotLog('💸 Solde retiré', [
+      `Admin : ${logUser(message.author)}`,
+      `Membre : ${logUser(user)}`,
+      `Montant retiré : **${amount.toFixed(2)}€**`,
+      `Nouveau solde : **${wallets[user.id].balance.toFixed(2)}€**`,
+      `Salon : ${logChannel(message.channel)}`
+    ], 0xE67E22);
 
     return message.channel.send({
       embeds: [
@@ -679,6 +819,11 @@ client.on(Events.InteractionCreate, async interaction => {
 
       if (interaction.replied) return;
 
+      sendBotLog('✅ Règlement accepté', [
+        `Membre : ${logUser(interaction.user)}`,
+        `Rôle donné : <@&${RULES_ROLE_ID}>`
+      ], 0x2ECC71);
+
       return interaction.reply({
         content: '✅ Règlement accepté, tu as maintenant accès au serveur.',
         ephemeral: true
@@ -708,6 +853,15 @@ client.on(Events.InteractionCreate, async interaction => {
       if (!canManageTicket(interaction, ownerId)) {
         return interaction.reply({ content: '❌ Tu ne peux pas supprimer ce ticket.', ephemeral: true });
       }
+
+      const ticketRequest = getTicketRequest(interaction.channel.id);
+      sendBotLog('🗑️ Ticket supprimé', [
+        `Par : ${logUser(interaction.user)}`,
+        `Ticket : ${logChannel(interaction.channel)}`,
+        ticketRequest ? `Demande : **${ticketRequest.id}**` : 'Demande : inconnue',
+        ticketRequest ? `Type : **${ticketRequest.type}**` : null,
+        ticketRequest ? `Client : <@${ticketRequest.userId}>` : null
+      ], 0xE74C3C);
 
       delete requests.tickets[interaction.channel.id];
       saveRequests();
@@ -740,6 +894,12 @@ client.on(Events.InteractionCreate, async interaction => {
         components: [ticketButtons(interaction.user.id)]
       });
 
+      sendBotLog('🚨 Ticket support créé', [
+        `Client : ${logUser(interaction.user)}`,
+        `Demande : **${request.id}**`,
+        `Ticket : ${logChannel(ticket)}`
+      ], 0xF1C40F);
+
       return replyTemp(interaction, {
         content: `✅ Ticket support créé : ${ticket}\n🧾 Demande : #${request.id}`,
         ephemeral: true
@@ -748,6 +908,12 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (interaction.customId === 'wallet') {
       if (!wallets[interaction.user.id]) wallets[interaction.user.id] = { balance: 0 };
+      sendBotLog('👛 Portefeuille consulté', [
+        `Membre : ${logUser(interaction.user)}`,
+        `Solde : **${wallets[interaction.user.id].balance.toFixed(2)}€**`,
+        `Salon : ${logChannel(interaction.channel)}`
+      ], 0x3498DB);
+
       return replyTemp(interaction, {
         content: `💳 Solde actuel : ${wallets[interaction.user.id].balance.toFixed(2)}€`,
         ephemeral: true
@@ -759,10 +925,20 @@ client.on(Events.InteractionCreate, async interaction => {
         .setColor(0xD4AF37)
         .setTitle('Programme de Fidélité Mcdo');
       if (INFO_IMAGE) infoEmbed.setImage(INFO_IMAGE);
+      sendBotLog('🎁 Fidélité Mcdo consultée', [
+        `Membre : ${logUser(interaction.user)}`,
+        `Salon : ${logChannel(interaction.channel)}`
+      ], 0x3498DB);
+
       return replyTemp(interaction, { embeds: [infoEmbed], ephemeral: true }, 30_000);
     }
 
     if (interaction.customId === 'recharger') {
+      sendBotLog('➕ Recharge ouverte', [
+        `Membre : ${logUser(interaction.user)}`,
+        `Salon : ${logChannel(interaction.channel)}`
+      ], 0x3498DB);
+
       const modal = new ModalBuilder().setCustomId('recharge_amount').setTitle('Recharge de solde');
       const amountInput = new TextInputBuilder()
         .setCustomId('amount')
@@ -797,6 +973,11 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.customId === 'commande') {
+      sendBotLog('🎫 Fenêtre commande ouverte', [
+        `Membre : ${logUser(interaction.user)}`,
+        `Salon : ${logChannel(interaction.channel)}`
+      ], 0x3498DB);
+
       const orderEmbed = new EmbedBuilder()
         .setColor(0xD4AF37)
         .setTitle('🎫 Fenêtre de commande')
@@ -841,6 +1022,13 @@ client.on(Events.InteractionCreate, async interaction => {
     const rechargeKey = pendingRechargeKey(interaction);
     pendingRecharges.set(rechargeKey, { paymentDate, paymentTime });
     setTimeout(() => pendingRecharges.delete(rechargeKey), 15 * 60_000);
+
+    sendBotLog('🧾 Recharge renseignée', [
+      `Membre : ${logUser(interaction.user)}`,
+      `Montant : **${formatAmount(cents)}**`,
+      `Date indiquée : **${paymentDate}**`,
+      `Heure indiquée : **${paymentTime}**`
+    ], 0x3498DB);
 
     const paymentMenu = new ActionRowBuilder().addComponents(
       new StringSelectMenuBuilder()
@@ -921,6 +1109,17 @@ ${dmSent ? '📩 Instructions envoyées au client en MP.' : '⚠️ Impossible d
         components: [ticketButtons(interaction.user.id)]
       });
 
+      sendBotLog('💳 Demande de recharge créée', [
+        `Client : ${logUser(interaction.user)}`,
+        `Demande : **${request.id}**`,
+        `Montant : **${amount}**`,
+        `Méthode : **${methodName}**`,
+        `Date indiquée : **${request.paymentDate}**`,
+        `Heure indiquée : **${request.paymentTime}**`,
+        `Ticket : ${logChannel(ticket)}`,
+        dmSent ? 'MP instructions : envoyé' : 'MP instructions : non envoyé'
+      ], dmSent ? 0x2ECC71 : 0xF1C40F);
+
       return replyTemp(interaction, {
         content: dmSent
           ? `✅ Demande de recharge créée pour ${amount}.\n📩 Les instructions ont été envoyées en MP.\n🧾 Demande : #${request.id}`
@@ -943,6 +1142,13 @@ ${dmSent ? '📩 Instructions envoyées au client en MP.' : '⚠️ Impossible d
     }
 
     if (wallets[uid].balance < prix) {
+      sendBotLog('⚠️ Commande refusée - solde insuffisant', [
+        `Client : ${logUser(interaction.user)}`,
+        `Produit : **${product.label}**`,
+        `Prix : **${prix}€**`,
+        `Solde : **${wallets[uid].balance.toFixed(2)}€**`
+      ], 0xF1C40F);
+
       return replyTemp(interaction, {
         content: `❌ Solde insuffisant\n💰 Prix : ${prix}€\n👛 Solde : ${wallets[uid].balance.toFixed(2)}€`,
         ephemeral: true
@@ -977,6 +1183,15 @@ ${dmSent ? '📩 Instructions envoyées au client en MP.' : '⚠️ Impossible d
 📌 Envoyer le produit au client.`,
       components: [ticketButtons(interaction.user.id)]
     });
+
+    sendBotLog('🎫 Commande créée', [
+      `Client : ${logUser(interaction.user)}`,
+      `Demande : **${request.id}**`,
+      `Produit : **${product.label}**`,
+      `Prix payé : **${prix}€**`,
+      `Nouveau solde : **${wallets[uid].balance.toFixed(2)}€**`,
+      `Ticket : ${logChannel(ticket)}`
+    ], 0x2ECC71);
 
     return replyTemp(interaction, {
       content: `✅ Commande envoyée au staff.\n🧾 Demande : #${request.id}`,
