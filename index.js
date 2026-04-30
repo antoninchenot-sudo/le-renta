@@ -516,6 +516,13 @@ function logChannel(channel) {
   return `${channel} (${channel.id})`;
 }
 
+function formatRuntimeError(error) {
+  if (!error) return 'Erreur inconnue';
+  if (error.stack) return error.stack.slice(0, 1800);
+  if (error.message) return error.message;
+  return String(error).slice(0, 1800);
+}
+
 function randomInviteColor() {
   const colors = [
     0xD4AF37,
@@ -598,6 +605,27 @@ client.once('ready', async () => {
   console.log('Bot connecte');
   await Promise.all(client.guilds.cache.map(guild => cacheGuildInvites(guild)));
   sendBotLog('🟢 Bot connecté', `Connecté en tant que **${client.user.tag}**`, 0x2ECC71);
+});
+
+client.on('error', error => {
+  console.error('Erreur client Discord :', error);
+  if (client.isReady()) {
+    sendBotLog('🔴 Erreur client Discord', `\`\`\`\n${formatRuntimeError(error)}\n\`\`\``, 0xE74C3C);
+  }
+});
+
+process.on('unhandledRejection', error => {
+  console.error('Promesse rejetée non gérée :', error);
+  if (client.isReady()) {
+    sendBotLog('🔴 Erreur non gérée', `\`\`\`\n${formatRuntimeError(error)}\n\`\`\``, 0xE74C3C);
+  }
+});
+
+process.on('uncaughtException', error => {
+  console.error('Exception non capturée :', error);
+  if (client.isReady()) {
+    sendBotLog('🔴 Exception non capturée', `\`\`\`\n${formatRuntimeError(error)}\n\`\`\``, 0xE74C3C);
+  }
 });
 
 client.on(Events.InviteCreate, invite => {
