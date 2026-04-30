@@ -87,21 +87,26 @@ function findOpenRechargeRequestByUser(userId) {
 }
 
 const products = [
-  { label: 'Produit 50-74', description: '2€', value: '50_74', price: 2 },
-  { label: 'Produit 75-99', description: '4€', value: '75_99', price: 4 },
-  { label: 'Produit 100-124', description: '6€', value: '100_124', price: 6 },
-  { label: 'Produit 125-149', description: '7€', value: '125_149', price: 7 },
-  { label: 'Produit 150-174', description: '8€', value: '150_174', price: 8 },
-  { label: 'Produit 175-199', description: '10€', value: '175_199', price: 10 },
-  { label: 'Produit 200-224', description: '11€', value: '200_224', price: 11 },
-  { label: 'Produit 225-249', description: '12€', value: '225_249', price: 12 },
-  { label: 'Produit 250-274', description: '13€', value: '250_274', price: 13 },
-  { label: 'Produit 275-299', description: '14€', value: '275_299', price: 14 },
-  { label: 'Produit 300-324', description: '15€', value: '300_324', price: 15 },
-  { label: 'Produit 325-349', description: '16€', value: '325_349', price: 16 },
-  { label: 'Produit 350-374', description: '17€', value: '350_374', price: 17 },
-  { label: 'Produit 400-499', description: '18€', value: '400_499', price: 18 },
-  { label: 'Produit 500-599', description: '21€', value: '500_599', price: 21 }
+  { label: 'McDonald\'s 50-74', description: '2€', value: '50_74', price: 2 },
+  { label: 'McDonald\'s 75-99', description: '4€', value: '75_99', price: 4 },
+  { label: 'McDonald\'s 100-124', description: '6€', value: '100_124', price: 6 },
+  { label: 'McDonald\'s 125-149', description: '7€', value: '125_149', price: 7 },
+  { label: 'McDonald\'s 150-174', description: '8€', value: '150_174', price: 8 },
+  { label: 'McDonald\'s 175-199', description: '10€', value: '175_199', price: 10 },
+  { label: 'McDonald\'s 200-224', description: '11€', value: '200_224', price: 11 },
+  { label: 'McDonald\'s 225-249', description: '12€', value: '225_249', price: 12 },
+  { label: 'McDonald\'s 250-274', description: '13€', value: '250_274', price: 13 },
+  { label: 'McDonald\'s 275-299', description: '14€', value: '275_299', price: 14 },
+  { label: 'McDonald\'s 300-324', description: '15€', value: '300_324', price: 15 },
+  { label: 'McDonald\'s 325-349', description: '16€', value: '325_349', price: 16 },
+  { label: 'McDonald\'s 350-374', description: '17€', value: '350_374', price: 17 },
+  { label: 'McDonald\'s 400-499', description: '18€', value: '400_499', price: 18 },
+  { label: 'McDonald\'s 500-599', description: '21€', value: '500_599', price: 21 },
+  { label: 'McDonald\'s 600-699', description: '30€', value: '600_699', price: 30 },
+  { label: 'McDonald\'s 700-799', description: '34€', value: '700_799', price: 34 },
+  { label: 'McDonald\'s 800-899', description: '40€', value: '800_899', price: 40 },
+  { label: 'McDonald\'s 1000-1099', description: '51€', value: '1000_1099', price: 51 },
+  { label: 'McDonald\'s 1100-1199', description: '67€', value: '1100_1199', price: 67 }
 ];
 
 const prices = Object.fromEntries(products.map(product => [product.value, product.price]));
@@ -286,30 +291,32 @@ client.on('messageCreate', async message => {
     const embed = new EmbedBuilder()
       .setColor(0xD4AF37)
       .setAuthor({ name: 'Boutique', iconURL: message.guild.iconURL({ dynamic: true }) })
-      .setTitle(`Tarifs boutique ${SHOP_EMOJI}`)
+      .setTitle(`${SHOP_EMOJI} Boutique`)
       .setDescription([
-        'Pour commander, recharge d’abord ton solde avec le bouton ci-dessous.',
+        '**Bienvenue sur la boutique.**',
+        'Recharge ton portefeuille, choisis ton produit, puis le staff traite ta commande en ticket privé.',
         '',
-        'Moyens de paiement disponibles :',
+        '**Comment commander**',
+        '1. Clique sur **Portefeuille** pour vérifier ton solde.',
+        '2. Clique sur **Recharger** si ton solde est insuffisant.',
+        '3. Clique sur **Commander** et sélectionne ton produit.',
         '',
-        '🅿️ PayPal',
-        '💳 Revolut',
-        '🏦 Virement bancaire',
+        '**Moyens de paiement**',
+        '🅿️ PayPal  •  💳 Revolut  •  🏦 Virement bancaire',
         '',
+        '**Tarifs**',
         '```',
         productListText(),
-        '```',
-        '',
-        'Une fois ton solde rechargé, clique sur Commander.'
+        '```'
       ].join('\n'))
       .setThumbnail(message.guild.iconURL({ dynamic: true }))
-      .setFooter({ text: 'Portefeuille • Recharge • Commande' });
+      .setFooter({ text: 'Portefeuille • Recharge • Commande • Support' });
 
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('wallet').setLabel('Portefeuille').setEmoji('👛').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('recharger').setLabel('Recharger le solde').setEmoji('➕').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('recharger').setLabel('Recharger').setEmoji('➕').setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId('commande').setLabel('Commander').setEmoji('🎫').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId('infos_points').setLabel('Informations').setEmoji('ℹ️').setStyle(ButtonStyle.Secondary)
+      new ButtonBuilder().setCustomId('infos_points').setLabel('Infos').setEmoji('ℹ️').setStyle(ButtonStyle.Secondary)
     );
 
     return message.channel.send({ embeds: [embed], components: [row] });
