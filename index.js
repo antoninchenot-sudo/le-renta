@@ -797,9 +797,10 @@ client.on('messageCreate', async message => {
     const embed = new EmbedBuilder()
       .setColor(0xD4AF37)
       .setAuthor({ name: 'Boutique', iconURL: message.guild.iconURL({ dynamic: true }) })
-      .setTitle(`${SHOP_EMOJI} Boutique`)
+      .setTitle(`Boutique ${SHOP_EMOJI}`)
       .setDescription([
         '**Bienvenue sur la boutique.**',
+        '',
         'Recharge ton portefeuille, choisis ton produit, puis le staff traite ta commande en ticket privé.',
         '',
         '**Comment commander**',
@@ -808,7 +809,8 @@ client.on('messageCreate', async message => {
         '3. Clique sur **Commander** et sélectionne ton produit.',
         '',
         '**Moyens de paiement**',
-        '🅿️ PayPal  •  💳 Revolut  •  🏦 Virement bancaire',
+        '',
+        'PayPal 🅿️ • Revolut 💳 • Virement bancaire 🏦',
         '',
         '**Tarifs**',
         '```',
@@ -874,7 +876,13 @@ client.on('messageCreate', async message => {
         '',
         '3. Indique le montant, la date du paiement et l’heure si possible.',
         '',
-        '4. Choisis ton moyen de paiement : PayPal 🅿️, Revolut 💳 ou Virement 🏦.',
+        '4. Choisis ton moyen de paiement :',
+        '',
+        'PayPal 🅿️',
+        '',
+        'Revolut 💳',
+        '',
+        'Virement bancaire 🏦',
         '',
         '5. Le bot t’envoie les instructions en message privé.',
         '',
@@ -960,9 +968,10 @@ client.on('messageCreate', async message => {
     const embed = new EmbedBuilder()
       .setColor(0xD4AF37)
       .setAuthor({ name: 'Boutique', iconURL: message.guild.iconURL({ dynamic: true }) })
-      .setTitle(`${SHOP_EMOJI} Tarifs McDonald's`)
+      .setTitle('Tarifs <:4964mcdonalds:1498440076257136830> McDonald\'s')
       .setDescription([
         '**Grille des tarifs disponibles.**',
+        '',
         'Recharge ton solde puis utilise le bouton **Commander** sur le message boutique.',
         '',
         '**Tarifs**',
@@ -986,28 +995,33 @@ client.on('messageCreate', async message => {
       .setAuthor({ name: 'Boutique McDonald\'s', iconURL: message.guild.iconURL({ dynamic: true }) })
       .setTitle('Moyens de paiement 💳')
       .setDescription([
-        '**Voici les moyens de paiement disponibles pour recharger ton solde.**',
-        `Pour recharger ton solde, va ici : <#${SHOP_CHANNEL_ID}>.`,
+        '**Voici les moyens disponibles pour recharger ton solde.**',
         '',
-        `**${NO_NOTE_TEXT}**`,
+        'Pour recharger, rends-toi dans le salon boutique :',
+        `<#${SHOP_CHANNEL_ID}>`,
         '',
-        'Clique sur **Recharger** pour recevoir les informations de paiement en message privé.',
+        '**❗❗ Ne mets aucune note lors du paiement. ❗❗**',
+        '',
+        'Les informations de paiement ne sont pas affichées ici.',
+        '',
+        'Clique sur **Recharger** pour recevoir les détails en message privé.',
+        '',
         'Après le paiement, envoie ton screenshot au bot en message privé.'
       ].join('\n'))
       .addFields(
         {
           name: 'PayPal 🅿️',
-          value: 'Disponible via le bouton **Recharger**.',
+          value: 'Disponible via **Recharger**.',
           inline: false
         },
         {
           name: 'Revolut 💳',
-          value: 'Disponible via le bouton **Recharger**.',
+          value: 'Disponible via **Recharger**.',
           inline: false
         },
         {
           name: 'Virement bancaire 🏦',
-          value: 'Disponible via le bouton **Recharger**.',
+          value: 'Disponible via **Recharger**.',
           inline: false
         }
       )
