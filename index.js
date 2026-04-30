@@ -58,7 +58,9 @@ let requests = fs.existsSync('requests.json')
 
 let referrals = fs.existsSync('referrals.json')
   ? JSON.parse(fs.readFileSync('referrals.json'))
-  : { invitedBy: {}, stats: {} };
+  : { invitedBy: {}, stats: {}, inviteLinks: {} };
+
+if (!referrals.inviteLinks) referrals.inviteLinks = {};
 
 const pendingRecharges = new Map();
 const guildInviteUses = new Map();
@@ -184,6 +186,40 @@ function buildReferralLeaderboard() {
 function formatReferralDate(timestamp) {
   if (!timestamp) return 'Non connue';
   return `<t:${Math.floor(timestamp / 1000)}:f>`;
+}
+
+async function getOrCreatePersonalInvite(guild, user) {
+  const existing = referrals.inviteLinks[user.id];
+
+  if (existing?.code) {
+    const invite = await client.fetchInvite(existing.code).catch(() => null);
+    if (invite) return invite;
+  }
+
+  const channel = guild.channels.cache.get(SHOP_CHANNEL_ID)
+    || await guild.channels.fetch(SHOP_CHANNEL_ID).catch(() => null);
+
+  if (!channel || typeof channel.createInvite !== 'function') {
+    throw new Error('Salon boutique introuvable ou invitations impossibles.');
+  }
+
+  const invite = await channel.createInvite({
+    maxAge: 0,
+    maxUses: 0,
+    unique: true,
+    reason: `Lien de parrainage pour ${user.tag}`
+  });
+
+  referrals.inviteLinks[user.id] = {
+    code: invite.code,
+    url: invite.url,
+    channelId: channel.id,
+    createdAt: Date.now()
+  };
+  saveReferrals();
+
+  await cacheGuildInvites(guild);
+  return invite;
 }
 
 async function cacheGuildInvites(guild) {
@@ -957,6 +993,42 @@ client.on('messageCreate', async message => {
     return;
   }
 
+  if (message.content === '!parrainage') {
+    const referralEmbed = new EmbedBuilder()
+      .setColor(0xD4AF37)
+      .setAuthor({ name: 'Parrainage', iconURL: message.guild.iconURL({ dynamic: true }) })
+      .setTitle('Parrainage 🎁')
+      .setDescription([
+        'Invite tes amis avec ton lien personnel et gagne du solde boutique. 👥',
+        '',
+        '**Récompenses 🎁**',
+        '',
+        '1 filleul validé = **+1€** 💰',
+        '',
+        '5 filleuls validés = **bonus +5€** ⭐',
+        '',
+        '10 filleuls validés = **bonus +7€** 🏆',
+        '',
+        '**Validation ✅**',
+        '',
+        'Un filleul est validé uniquement après sa première recharge de solde. 💳',
+        '',
+        'Clique sur le bouton ci-dessous pour afficher ton lien personnel. 🔗'
+      ].join('\n'))
+      .setThumbnail(message.guild.iconURL({ dynamic: true }))
+      .setFooter({ text: 'Parrainage • Invitations • Récompenses' });
+
+    const referralRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('get_referral_invite')
+        .setLabel('Obtenir mon lien')
+        .setEmoji('🔗')
+        .setStyle(ButtonStyle.Primary)
+    );
+
+    return message.channel.send({ embeds: [referralEmbed], components: [referralRow] });
+  }
+
   if (message.content === '!avis') {
     const avisEmbed = new EmbedBuilder()
       .setColor(0xD4AF37)
@@ -1282,6 +1354,49 @@ client.on('messageCreate', async message => {
 
 client.on(Events.InteractionCreate, async interaction => {
   if (interaction.isButton()) {
+    if (interaction.customId === 'get_referral_invite') {
+      const invite = await getOrCreatePersonalInvite(interaction.guild, interaction.user).catch(async error => {
+        console.error('Impossible de créer le lien de parrainage :', error.message);
+        await interaction.reply({
+          content: '❌ Impossible de créer ton lien pour le moment. Contacte un administrateur.',
+          ephemeral: true
+        });
+        return null;
+      });
+
+      if (!invite) return;
+
+      const stats = getReferralSummary(interaction.user.id);
+      const inviteEmbed = new EmbedBuilder()
+        .setColor(0xD4AF37)
+        .setTitle('Ton lien de parrainage 🔗')
+        .setDescription([
+          'Partage ce lien avec tes amis pour les inviter sur le serveur.',
+          '',
+          invite.url,
+          '',
+          '**Récompenses**',
+          '1 filleul validé = **+1€**',
+          '5 filleuls validés = **bonus +5€**',
+          '10 filleuls validés = **bonus +7€**',
+          '',
+          `✅ Filleuls validés : **${stats.validated.length}**`,
+          `⏳ Filleuls en attente : **${stats.pending.length}**`
+        ].join('\n'))
+        .setFooter({ text: 'Un filleul est validé après sa première recharge.' });
+
+      sendBotLog('🎟️ Lien parrainage demandé', [
+        `Membre : ${logUser(interaction.user)}`,
+        `Lien : ${invite.url}`,
+        `Affichage : message éphémère dans ${logChannel(interaction.channel)}`
+      ], 0x2ECC71);
+
+      return interaction.reply({
+        embeds: [inviteEmbed],
+        ephemeral: true
+      });
+    }
+
     if (interaction.customId === 'accept_rules') {
       const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
 
