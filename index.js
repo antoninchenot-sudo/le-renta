@@ -653,9 +653,9 @@ client.on(Events.InteractionCreate, async interaction => {
       });
 
       const paymentText = {
-        paypal: `🅿️ Paiement PayPal : ${PAYPAL_LINK}\n\n${NO_NOTE_TEXT}`,
-        revolut: `💳 Paiement Revolut : ${REVOLUT_LINK}\n\n${NO_NOTE_TEXT}`,
-        virement: `🏦 Virement bancaire\n\nIBAN : ${IBAN}\n\n${NO_NOTE_TEXT}`
+        paypal: `🅿️ Paiement PayPal : ${https://paypal.me/AntoninChenot}\n\n${NO_NOTE_TEXT}`,
+        revolut: `💳 Paiement Revolut : ${https://revolut.me/antoni7mcq}\n\n${NO_NOTE_TEXT}`,
+        virement: `🏦 Virement bancaire\n\nIBAN : ${FR76 2823 3000 0199 9815 8391 677}\n\n${NO_NOTE_TEXT}`
       }[method];
 
       await ticket.send({
