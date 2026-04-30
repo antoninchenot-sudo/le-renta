@@ -968,7 +968,7 @@ client.on('messageCreate', async message => {
     const embed = new EmbedBuilder()
       .setColor(0xD4AF37)
       .setAuthor({ name: 'Boutique', iconURL: message.guild.iconURL({ dynamic: true }) })
-      .setTitle('Tarifs <:4964mcdonalds:1498440076257136830> McDonald\'s')
+      .setTitle('Tarifs McDonald\'s <:4964mcdonalds:1498440076257136830>')
       .setDescription([
         '**Grille des tarifs disponibles.**',
         '',
