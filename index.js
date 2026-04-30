@@ -29,11 +29,12 @@ const client = new Client({
 const ADMIN_ROLE_ID = '1310984358991106120';
 const STAFF_ROLE_ID = '1310342652058800138';
 const TICKET_CATEGORY = '1495800617204187216';
+const ORDER_CATEGORY = '1495800432776446063';
 const SUPPORT_CATEGORY = '1499036733986308146';
 const DELETE_DELAY = 10_000;
 
 const SHOP_EMOJI = '🛒';
-const INFO_IMAGE = process.env.INFO_IMAGE || '';
+const INFO_IMAGE = process.env.INFO_IMAGE || 'https://media.discordapp.net/attachments/1499072550985269268/1499121030491541585/IMG_1333.jpg?ex=69f4f641&is=69f3a4c1&hm=1f19f9ceb27d07466a27fcb29c1fe6fd35d2699006a35d395e827735eb547bee&=&format=webp&width=623&height=944';
 const PAYPAL_LINK = 'https://paypal.me/AntoninChenot';
 const REVOLUT_LINK = 'https://revolut.me/antoni7mcq';
 const IBAN = 'FR76 2823 3000 0199 9815 8391 677';
@@ -46,6 +47,8 @@ let wallets = fs.existsSync('wallets.json')
 let requests = fs.existsSync('requests.json')
   ? JSON.parse(fs.readFileSync('requests.json'))
   : { counter: 0, tickets: {} };
+
+const pendingRecharges = new Map();
 
 function saveWallets() {
   fs.writeFileSync('wallets.json', JSON.stringify(wallets, null, 2));
@@ -84,6 +87,10 @@ function findOpenRechargeRequestByUser(userId) {
   return Object.values(requests.tickets)
     .reverse()
     .find(request => request.type === 'recharge' && request.userId === userId && !request.paidAt) || null;
+}
+
+function pendingRechargeKey(interaction) {
+  return `${interaction.guildId}:${interaction.user.id}`;
 }
 
 const products = [
@@ -201,6 +208,7 @@ function rechargeInstructionMessage(request) {
     `🧭 **Recharge ${methodName} — Étape 2/2**`,
     '',
     `Montant déclaré : **${request.amount}** | Demande n°**${request.id}**`,
+    `Date indiquée : **${request.paymentDate || 'Non précisée'}** | Heure : **${request.paymentTime || 'Non précisée'}**`,
     '',
     `**${paymentInstruction(request.method)}**`,
     '⏳ Tu as **24h** pour l\'envoyer.'
@@ -254,6 +262,8 @@ client.on('messageCreate', async message => {
         '✅ **Screenshot reçu !**',
         `💶 Montant : **${dmRequest.amount}** | Demande n°**${dmRequest.id}**`,
         `👤 Client : <@${dmRequest.userId}>`,
+        `📅 Date indiquée : **${dmRequest.paymentDate || 'Non précisée'}**`,
+        `🕒 Heure indiquée : **${dmRequest.paymentTime || 'Non précisée'}**`,
         screenshotUrl ? `📎 Screenshot : ${screenshotUrl}` : null,
         '',
         '⏳ Un administrateur va vérifier le paiement et créditer le solde.'
@@ -316,7 +326,7 @@ client.on('messageCreate', async message => {
       new ButtonBuilder().setCustomId('wallet').setLabel('Portefeuille').setEmoji('👛').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('recharger').setLabel('Recharger').setEmoji('➕').setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId('commande').setLabel('Commander').setEmoji('🎫').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId('infos_points').setLabel('Infos').setEmoji('ℹ️').setStyle(ButtonStyle.Secondary)
+      new ButtonBuilder().setCustomId('infos_points').setLabel('Fidélité Mcdo').setEmoji('🎁').setStyle(ButtonStyle.Secondary)
     );
 
     return message.channel.send({ embeds: [embed], components: [row] });
@@ -349,17 +359,19 @@ client.on('messageCreate', async message => {
     const embed = new EmbedBuilder()
       .setColor(0xD4AF37)
       .setAuthor({ name: 'Boutique', iconURL: message.guild.iconURL({ dynamic: true }) })
-      .setTitle(`Tarifs boutique ${SHOP_EMOJI}`)
+      .setTitle(`${SHOP_EMOJI} Tarifs McDonald's`)
       .setDescription([
-        'Voici la grille des tarifs disponibles.',
-        'Pour commander, recharge ton solde puis utilise le bouton **Commander** sur la boutique.',
+        '**Grille des tarifs disponibles.**',
+        'Recharge ton solde puis utilise le bouton **Commander** sur le message boutique.',
+        '',
+        '**Tarifs**',
         '',
         '```',
         productListText(),
         '```'
       ].join('\n'))
       .setThumbnail(message.guild.iconURL({ dynamic: true }))
-      .setFooter({ text: 'Solde obligatoire avant commande' });
+      .setFooter({ text: 'McDonald\'s • Solde obligatoire avant commande' });
 
     await message.channel.send({ embeds: [embed] });
     const confirm = await message.channel.send('✅ Tarifs envoyés.');
@@ -609,7 +621,9 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.customId === 'infos_points') {
-      const infoEmbed = new EmbedBuilder().setColor(0xD4AF37).setTitle('Informations');
+      const infoEmbed = new EmbedBuilder()
+        .setColor(0xD4AF37)
+        .setTitle('Programme de Fidélité Mcdo');
       if (INFO_IMAGE) infoEmbed.setImage(INFO_IMAGE);
       return replyTemp(interaction, { embeds: [infoEmbed], ephemeral: true }, 30_000);
     }
@@ -624,8 +638,27 @@ client.on(Events.InteractionCreate, async interaction => {
         .setRequired(true)
         .setMinLength(1)
         .setMaxLength(6);
+      const dateInput = new TextInputBuilder()
+        .setCustomId('payment_date')
+        .setLabel('Date du paiement/virement')
+        .setPlaceholder('Exemple : 30/04/2026')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMinLength(4)
+        .setMaxLength(30);
+      const timeInput = new TextInputBuilder()
+        .setCustomId('payment_time')
+        .setLabel('Heure approximative (si possible)')
+        .setPlaceholder('Exemple : 14h30')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setMaxLength(20);
 
-      modal.addComponents(new ActionRowBuilder().addComponents(amountInput));
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(amountInput),
+        new ActionRowBuilder().addComponents(dateInput),
+        new ActionRowBuilder().addComponents(timeInput)
+      );
       return interaction.showModal(modal);
     }
 
@@ -654,12 +687,26 @@ client.on(Events.InteractionCreate, async interaction => {
 
   if (interaction.isModalSubmit() && interaction.customId === 'recharge_amount') {
     const cents = parseAmountToCents(interaction.fields.getTextInputValue('amount'));
+    const paymentDate = interaction.fields.getTextInputValue('payment_date').trim();
+    const paymentTime = interaction.fields.getTextInputValue('payment_time').trim() || 'Non précisée';
+
     if (cents === null) {
       return replyTemp(interaction, {
         content: '❌ Montant invalide. Entrez un montant entre 1€ et 200€.',
         ephemeral: true
       });
     }
+
+    if (!paymentDate) {
+      return replyTemp(interaction, {
+        content: '❌ Date invalide. Indique la date du paiement ou du virement.',
+        ephemeral: true
+      });
+    }
+
+    const rechargeKey = pendingRechargeKey(interaction);
+    pendingRecharges.set(rechargeKey, { paymentDate, paymentTime });
+    setTimeout(() => pendingRecharges.delete(rechargeKey), 15 * 60_000);
 
     const paymentMenu = new ActionRowBuilder().addComponents(
       new StringSelectMenuBuilder()
@@ -673,7 +720,13 @@ client.on(Events.InteractionCreate, async interaction => {
     );
 
     return replyTemp(interaction, {
-      content: `💰 Montant choisi : ${formatAmount(cents)}\nChoisissez un moyen de paiement :`,
+      content: [
+        `💰 Montant choisi : ${formatAmount(cents)}`,
+        `📅 Date indiquée : ${paymentDate}`,
+        `🕒 Heure indiquée : ${paymentTime}`,
+        '',
+        'Choisissez un moyen de paiement :'
+      ].join('\n'),
       components: [paymentMenu],
       ephemeral: true
     });
@@ -684,6 +737,16 @@ client.on(Events.InteractionCreate, async interaction => {
       const cents = Number(interaction.customId.split(':')[1]);
       const method = interaction.values[0];
       const amount = formatAmount(cents);
+      const pendingRecharge = pendingRecharges.get(pendingRechargeKey(interaction));
+
+      if (!pendingRecharge) {
+        return replyTemp(interaction, {
+          content: '❌ Les détails de recharge ont expiré. Relance une recharge.',
+          ephemeral: true
+        });
+      }
+
+      pendingRecharges.delete(pendingRechargeKey(interaction));
 
       const ticket = await interaction.guild.channels.create({
         name: `recharge-${sanitizeChannelName(interaction.user.username)}`,
@@ -692,7 +755,12 @@ client.on(Events.InteractionCreate, async interaction => {
         permissionOverwrites: adminTicketPermissionOverwrites(interaction.guild)
       });
 
-      const request = createRequest('recharge', ticket.id, interaction.user.id, { amount, method });
+      const request = createRequest('recharge', ticket.id, interaction.user.id, {
+        amount,
+        method,
+        paymentDate: pendingRecharge.paymentDate,
+        paymentTime: pendingRecharge.paymentTime
+      });
       const methodName = paymentLabel(method);
       let dmSent = false;
 
@@ -711,6 +779,8 @@ Demande n°**${request.id}**
 👤 Client : <@${interaction.user.id}>
 💶 Montant déclaré : **${amount}**
 💳 Moyen de paiement : **${methodName}**
+📅 Date indiquée : **${request.paymentDate}**
+🕒 Heure indiquée : **${request.paymentTime}**
 
 ${dmSent ? '📩 Instructions envoyées au client en MP.' : '⚠️ Impossible d’envoyer les instructions en MP au client.'}
 ⏳ En attente du screenshot du paiement.`,
@@ -750,7 +820,7 @@ ${dmSent ? '📩 Instructions envoyées au client en MP.' : '⚠️ Impossible d
 
     const ticket = await interaction.guild.channels.create({
       name: `commande-${sanitizeChannelName(interaction.user.username)}`,
-      parent: TICKET_CATEGORY,
+      parent: ORDER_CATEGORY,
       type: ChannelType.GuildText,
       permissionOverwrites: ticketPermissionOverwrites(interaction.guild, interaction.user.id)
     });
