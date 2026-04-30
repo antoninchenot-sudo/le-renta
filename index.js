@@ -30,6 +30,7 @@ const client = new Client({
 
 const ADMIN_ROLE_ID = '1310984358991106120';
 const STAFF_ROLE_ID = '1310342652058800138';
+const TICKET_ACCESS_ROLE_ID = '1310384527952056401';
 const TICKET_CATEGORY = '1495800617204187216';
 const ORDER_CATEGORY = '1495800432776446063';
 const SUPPORT_CATEGORY = '1499036733986308146';
@@ -450,6 +451,7 @@ function supportTicketPermissionOverwrites(guild, userId) {
   return [
     { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
     { id: userId, allow: ticketAllow },
+    { id: TICKET_ACCESS_ROLE_ID, allow: ticketAllow },
     { id: ADMIN_ROLE_ID, allow: ticketAllow }
   ];
 }
