@@ -49,7 +49,7 @@ const MCDONALDS_EMOJI = `<:${MCDONALDS_EMOJI_NAME}:${MCDONALDS_EMOJI_ID}>`;
 const MCDONALDS_BUTTON_EMOJI = { id: MCDONALDS_EMOJI_ID, name: MCDONALDS_EMOJI_NAME };
 const INFO_IMAGE = process.env.INFO_IMAGE || 'https://media.discordapp.net/attachments/1499072550985269268/1499121030491541585/IMG_1333.jpg?ex=69f4f641&is=69f3a4c1&hm=1f19f9ceb27d07466a27fcb29c1fe6fd35d2699006a35d395e827735eb547bee&=&format=webp&width=623&height=944';
 const PAYPAL_LINK = 'https://paypal.me/AntoninChenot';
-const REVOLUT_LINK = 'https://revolut.me/antoni7mcq';
+const REVOLUT_LINK = 'https://revolut.me/arthur23320/pocket/vNrIna0VcG';
 const IBAN = 'FR76 2823 3000 0176 1307 4771 273';
 const NO_NOTE_TEXT = '❗❗ Ne mettre aucune note lors du paiement ❗❗';
 
