@@ -308,13 +308,13 @@ async function validateReferralReward(user, ticketRequest, amountText) {
   if (stats.validated === 5 && !stats.milestones.five) {
     bonusReward += 5;
     stats.milestones.five = true;
-    bonusLines.push('Bonus 5 filleuls : **+5.00€**');
+    bonusLines.push('5 filleuls validés : **+5.00€**');
   }
 
   if (stats.validated === 10 && !stats.milestones.ten) {
     bonusReward += 7;
     stats.milestones.ten = true;
-    bonusLines.push('Bonus 10 filleuls : **+7.00€**');
+    bonusLines.push('10 filleuls validés : **+7.00€**');
   }
 
   const totalReward = baseReward + bonusReward;
@@ -997,7 +997,7 @@ client.on('messageCreate', async message => {
     const referralEmbed = new EmbedBuilder()
       .setColor(0xD4AF37)
       .setAuthor({ name: 'Parrainage', iconURL: message.guild.iconURL({ dynamic: true }) })
-      .setTitle('Parrainage 🎁')
+      .setTitle('Parrainage 📨')
       .setDescription([
         'Invite tes amis avec ton lien personnel et gagne du solde boutique. 👥',
         '',
@@ -1005,9 +1005,9 @@ client.on('messageCreate', async message => {
         '',
         '1 filleul validé = **+1€** 💰',
         '',
-        '5 filleuls validés = **bonus +5€** ⭐',
+        '5 filleuls validés = **+5€** ⭐',
         '',
-        '10 filleuls validés = **bonus +7€** 🏆',
+        '10 filleuls validés = **+7€** 🏆',
         '',
         '**Validation ✅**',
         '',
@@ -1377,8 +1377,8 @@ client.on(Events.InteractionCreate, async interaction => {
           '',
           '**Récompenses**',
           '1 filleul validé = **+1€**',
-          '5 filleuls validés = **bonus +5€**',
-          '10 filleuls validés = **bonus +7€**',
+          '5 filleuls validés = **+5€**',
+          '10 filleuls validés = **+7€**',
           '',
           `✅ Filleuls validés : **${stats.validated.length}**`,
           `⏳ Filleuls en attente : **${stats.pending.length}**`
