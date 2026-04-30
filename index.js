@@ -43,6 +43,10 @@ const RULES_ROLE_ID = '1310359454377840650';
 const DELETE_DELAY = 10_000;
 
 const SHOP_EMOJI = '🛒';
+const MCDONALDS_EMOJI_ID = '1498440076257136830';
+const MCDONALDS_EMOJI_NAME = '4964mcdonalds';
+const MCDONALDS_EMOJI = `<:${MCDONALDS_EMOJI_NAME}:${MCDONALDS_EMOJI_ID}>`;
+const MCDONALDS_BUTTON_EMOJI = { id: MCDONALDS_EMOJI_ID, name: MCDONALDS_EMOJI_NAME };
 const INFO_IMAGE = process.env.INFO_IMAGE || 'https://media.discordapp.net/attachments/1499072550985269268/1499121030491541585/IMG_1333.jpg?ex=69f4f641&is=69f3a4c1&hm=1f19f9ceb27d07466a27fcb29c1fe6fd35d2699006a35d395e827735eb547bee&=&format=webp&width=623&height=944';
 const PAYPAL_LINK = 'https://paypal.me/AntoninChenot';
 const REVOLUT_LINK = 'https://revolut.me/antoni7mcq';
@@ -823,9 +827,9 @@ client.on('messageCreate', async message => {
       .setFooter({ text: 'Portefeuille • Recharge • Commande • Support' });
 
     const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('wallet').setLabel('Portefeuille').setEmoji('👛').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('recharger').setLabel('Recharger').setEmoji('➕').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId('commande').setLabel('Commander').setEmoji('🎫').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('wallet').setLabel('Portefeuille').setEmoji('👛').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId('recharger').setLabel('Recharger le solde').setEmoji('➕').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('commande').setLabel('Commander').setEmoji(MCDONALDS_BUTTON_EMOJI).setStyle(ButtonStyle.Success),
       new ButtonBuilder().setCustomId('infos_points').setLabel('Fidélité Mcdo').setEmoji('🎁').setStyle(ButtonStyle.Secondary)
     );
 
@@ -930,13 +934,13 @@ client.on('messageCreate', async message => {
         '',
         '7. Un administrateur vérifie puis crédite ton portefeuille.',
         '',
-        '**Commander 🎫**',
+        `**Commander ${MCDONALDS_EMOJI}**`,
         '',
         `1. Va dans <#${SHOP_CHANNEL_ID}>.`,
         '',
         '2. Clique sur **Portefeuille 👛** pour vérifier ton solde.',
         '',
-        '3. Clique sur **Commander 🎫**.',
+        `3. Clique sur **Commander ${MCDONALDS_EMOJI}**.`,
         '',
         '4. Choisis ton McDonald’s dans le menu.',
         '',
@@ -1008,7 +1012,7 @@ client.on('messageCreate', async message => {
     const embed = new EmbedBuilder()
       .setColor(0xD4AF37)
       .setAuthor({ name: 'Boutique', iconURL: message.guild.iconURL({ dynamic: true }) })
-      .setTitle('Tarifs McDonald\'s <:4964mcdonalds:1498440076257136830>')
+      .setTitle(`Tarifs McDonald\'s ${MCDONALDS_EMOJI}`)
       .setDescription([
         '**Grille des tarifs disponibles.**',
         '',
@@ -1665,7 +1669,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
       const orderEmbed = new EmbedBuilder()
         .setColor(0xD4AF37)
-        .setTitle('🎫 Fenêtre de commande')
+        .setTitle(`${MCDONALDS_EMOJI} Fenêtre de commande`)
         .setDescription(['Choisis ton produit dans le menu ci-dessous.', '', '```', productListText(), '```'].join('\n'))
         .setFooter({ text: 'Cette fenêtre disparaît automatiquement.' });
 
