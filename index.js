@@ -32,6 +32,7 @@ const TICKET_CATEGORY = '1495800617204187216';
 const ORDER_CATEGORY = '1495800432776446063';
 const SUPPORT_CATEGORY = '1499036733986308146';
 const SHOP_CHANNEL_ID = '1310381741218988122';
+const RULES_ROLE_ID = '1310359454377840650';
 const DELETE_DELAY = 10_000;
 
 const SHOP_EMOJI = '🛒';
@@ -404,6 +405,58 @@ client.on('messageCreate', async message => {
     return message.channel.send({ embeds: [guideEmbed] });
   }
 
+  if (message.content === '!regles') {
+    const rulesEmbed = new EmbedBuilder()
+      .setColor(0xD4AF37)
+      .setAuthor({ name: 'Règlement', iconURL: message.guild.iconURL({ dynamic: true }) })
+      .setTitle('📜 Règlement du serveur')
+      .setDescription([
+        '👋 Bienvenue sur le serveur.',
+        'Merci de lire et respecter les règles avant d’utiliser la boutique.',
+        '',
+        '🤝 **1. Respect**',
+        'Reste poli avec les membres et le staff.',
+        'Les insultes, provocations et comportements toxiques ne sont pas acceptés.',
+        '',
+        '🚫 **2. Publicité interdite**',
+        'Toute publicité est interdite.',
+        '**PUB INTERDIT SOUS PEINE DE BAN.**',
+        '',
+        '🔞 **3. Contenu NSFW interdit**',
+        'Le contenu NSFW, choquant, violent ou inapproprié est interdit sur le serveur.',
+        '',
+        '🔁 **4. Spam**',
+        'Le spam, les mentions abusives et les messages répétés sont interdits.',
+        '',
+        '🛒 **5. Boutique**',
+        'Pour commander ou recharger ton solde, utilise uniquement le salon boutique prévu pour ça.',
+        '',
+        '💳 **6. Recharges**',
+        'Indique les bonnes informations lors d’une recharge : montant, date du paiement et heure si possible.',
+        'N’envoie jamais de fausse preuve de paiement.',
+        '',
+        '🎫 **7. Tickets**',
+        'Ouvre un ticket seulement si tu as une vraie demande : support, commande, recharge ou problème de portefeuille.',
+        '',
+        '🔐 **8. Sécurité**',
+        'Ne partage pas tes informations personnelles, tes identifiants ou tes moyens de paiement avec d’autres membres.',
+        '',
+        '**✅ Pour avoir accès à l’intégralité du serveur, veuillez accepter le règlement.**'
+      ].join('\n'))
+      .setThumbnail(message.guild.iconURL({ dynamic: true }))
+      .setFooter({ text: 'Règlement • Accès serveur' });
+
+    const rulesRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('accept_rules')
+        .setLabel('Accepter le règlement')
+        .setEmoji('✅')
+        .setStyle(ButtonStyle.Success)
+    );
+
+    return message.channel.send({ embeds: [rulesEmbed], components: [rulesRow] });
+  }
+
   if (message.content === '!tarifs') {
     const embed = new EmbedBuilder()
       .setColor(0xD4AF37)
@@ -600,6 +653,38 @@ client.on('messageCreate', async message => {
 
 client.on(Events.InteractionCreate, async interaction => {
   if (interaction.isButton()) {
+    if (interaction.customId === 'accept_rules') {
+      const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+
+      if (!member) {
+        return interaction.reply({
+          content: '❌ Impossible de trouver ton profil sur le serveur.',
+          ephemeral: true
+        });
+      }
+
+      if (member.roles.cache.has(RULES_ROLE_ID)) {
+        return interaction.reply({
+          content: '✅ Tu as déjà accepté le règlement.',
+          ephemeral: true
+        });
+      }
+
+      await member.roles.add(RULES_ROLE_ID).catch(async () => {
+        await interaction.reply({
+          content: '❌ Impossible de te donner le rôle. Contacte un administrateur.',
+          ephemeral: true
+        });
+      });
+
+      if (interaction.replied) return;
+
+      return interaction.reply({
+        content: '✅ Règlement accepté, tu as maintenant accès au serveur.',
+        ephemeral: true
+      });
+    }
+
     if (interaction.customId.startsWith('delete_ticket:')) {
       const ownerId = interaction.customId.split(':')[1];
       if (!canManageTicket(interaction, ownerId)) {
