@@ -31,6 +31,7 @@ const STAFF_ROLE_ID = '1310342652058800138';
 const TICKET_CATEGORY = '1495800617204187216';
 const ORDER_CATEGORY = '1495800432776446063';
 const SUPPORT_CATEGORY = '1499036733986308146';
+const SHOP_CHANNEL_ID = '1310381741218988122';
 const DELETE_DELAY = 10_000;
 
 const SHOP_EMOJI = '🛒';
@@ -353,6 +354,41 @@ client.on('messageCreate', async message => {
     );
 
     return message.channel.send({ embeds: [supportEmbed], components: [supportRow] });
+  }
+
+  if (message.content === '!guide') {
+    const guideEmbed = new EmbedBuilder()
+      .setColor(0xD4AF37)
+      .setAuthor({ name: 'Guide boutique', iconURL: message.guild.iconURL({ dynamic: true }) })
+      .setTitle('📖 Guide pour commander')
+      .setDescription([
+        '👋 Ce guide explique comment utiliser la boutique, même si tu débutes sur Discord.',
+        '',
+        `🛒 Tout se passe dans le salon <#${SHOP_CHANNEL_ID}>.`,
+        '',
+        '💳 **Recharger son solde**',
+        `1. Va dans <#${SHOP_CHANNEL_ID}>.`,
+        '2. Clique sur **➕ Recharger**.',
+        '3. Indique le montant, la date du paiement et l’heure si possible.',
+        '4. Choisis ton moyen de paiement : 🅿️ PayPal, 💳 Revolut ou 🏦 Virement.',
+        '5. Le bot t’envoie les instructions en message privé.',
+        '6. Envoie ton screenshot de paiement au bot en message privé.',
+        '7. Un administrateur vérifie puis crédite ton portefeuille.',
+        '',
+        '🎫 **Commander**',
+        `1. Va dans <#${SHOP_CHANNEL_ID}>.`,
+        '2. Clique sur **👛 Portefeuille** pour vérifier ton solde.',
+        '3. Clique sur **🎫 Commander**.',
+        '4. Choisis ton McDonald’s dans le menu.',
+        '5. Si ton solde est suffisant, un ticket privé est créé pour ta commande.',
+        '',
+        '🆘 **Besoin d’aide ?**',
+        'Ouvre un ticket support et explique ton problème.'
+      ].join('\n'))
+      .setThumbnail(message.guild.iconURL({ dynamic: true }))
+      .setFooter({ text: 'Guide • Recharge • Commande • Support' });
+
+    return message.channel.send({ embeds: [guideEmbed] });
   }
 
   if (message.content === '!tarifs') {
