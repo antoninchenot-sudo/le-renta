@@ -19,6 +19,8 @@ const {
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildInvites,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.DirectMessages,
     GatewayIntentBits.MessageContent
@@ -34,6 +36,8 @@ const SUPPORT_CATEGORY = '1499036733986308146';
 const SHOP_CHANNEL_ID = '1310381741218988122';
 const SUPPORT_CHANNEL_ID = '1498434089450078258';
 const LOG_CHANNEL_ID = '1310354201704136747';
+const INVITE_ANNOUNCE_CHANNEL_ID = '1310355769824383059';
+const INVITE_ADMIN_CHANNEL_ID = '1499523428112142568';
 const RULES_ROLE_ID = '1310359454377840650';
 const DELETE_DELAY = 10_000;
 
@@ -52,7 +56,12 @@ let requests = fs.existsSync('requests.json')
   ? JSON.parse(fs.readFileSync('requests.json'))
   : { counter: 0, tickets: {} };
 
+let referrals = fs.existsSync('referrals.json')
+  ? JSON.parse(fs.readFileSync('referrals.json'))
+  : { invitedBy: {}, stats: {} };
+
 const pendingRecharges = new Map();
+const guildInviteUses = new Map();
 
 function saveWallets() {
   fs.writeFileSync('wallets.json', JSON.stringify(wallets, null, 2));
@@ -60,6 +69,10 @@ function saveWallets() {
 
 function saveRequests() {
   fs.writeFileSync('requests.json', JSON.stringify(requests, null, 2));
+}
+
+function saveReferrals() {
+  fs.writeFileSync('referrals.json', JSON.stringify(referrals, null, 2));
 }
 
 function isAdminMember(member) {
@@ -95,6 +108,234 @@ function findOpenRechargeRequestByUser(userId) {
 
 function pendingRechargeKey(interaction) {
   return `${interaction.guildId}:${interaction.user.id}`;
+}
+
+function ensureReferralStats(userId) {
+  if (!referrals.stats[userId]) {
+    referrals.stats[userId] = {
+      validated: 0,
+      invitedUsers: [],
+      milestones: {}
+    };
+  }
+
+  if (!Array.isArray(referrals.stats[userId].invitedUsers)) {
+    referrals.stats[userId].invitedUsers = [];
+  }
+
+  if (!referrals.stats[userId].milestones) {
+    referrals.stats[userId].milestones = {};
+  }
+
+  return referrals.stats[userId];
+}
+
+function getReferralSummary(userId) {
+  const invited = Object.entries(referrals.invitedBy)
+    .filter(([, referral]) => referral.inviterId === userId)
+    .map(([invitedUserId, referral]) => ({ invitedUserId, ...referral }));
+
+  const validated = invited.filter(referral => referral.validated);
+  const pending = invited.filter(referral => !referral.validated);
+
+  return {
+    invited,
+    validated,
+    pending,
+    stats: ensureReferralStats(userId)
+  };
+}
+
+function buildReferralLeaderboard() {
+  const leaderboard = new Map();
+
+  Object.values(referrals.invitedBy).forEach(referral => {
+    if (!referral.inviterId) return;
+
+    if (!leaderboard.has(referral.inviterId)) {
+      leaderboard.set(referral.inviterId, { inviterId: referral.inviterId, validated: 0, pending: 0 });
+    }
+
+    const row = leaderboard.get(referral.inviterId);
+    if (referral.validated) {
+      row.validated += 1;
+    } else {
+      row.pending += 1;
+    }
+  });
+
+  Object.entries(referrals.stats).forEach(([userId, stats]) => {
+    if (!leaderboard.has(userId)) {
+      leaderboard.set(userId, { inviterId: userId, validated: 0, pending: 0 });
+    }
+
+    leaderboard.get(userId).validated = Math.max(
+      leaderboard.get(userId).validated,
+      Number(stats.validated) || 0
+    );
+  });
+
+  return [...leaderboard.values()]
+    .filter(row => row.validated > 0 || row.pending > 0)
+    .sort((a, b) => b.validated - a.validated || b.pending - a.pending)
+    .slice(0, 10);
+}
+
+function formatReferralDate(timestamp) {
+  if (!timestamp) return 'Non connue';
+  return `<t:${Math.floor(timestamp / 1000)}:f>`;
+}
+
+async function cacheGuildInvites(guild) {
+  const invites = await guild.invites.fetch().catch(error => {
+    console.error('Impossible de charger les invitations :', error.message);
+    return null;
+  });
+
+  if (!invites) return null;
+
+  const uses = new Map();
+  invites.forEach(invite => {
+    uses.set(invite.code, invite.uses || 0);
+  });
+
+  guildInviteUses.set(guild.id, uses);
+  return invites;
+}
+
+async function recordMemberInvite(member) {
+  const beforeUses = guildInviteUses.get(member.guild.id) || new Map();
+  const invites = await member.guild.invites.fetch().catch(error => {
+    console.error('Impossible de vérifier l’invitation utilisée :', error.message);
+    return null;
+  });
+
+  if (!invites) return null;
+
+  let usedInvite = null;
+  invites.forEach(invite => {
+    const previousUses = beforeUses.get(invite.code) || 0;
+    if ((invite.uses || 0) > previousUses) {
+      usedInvite = invite;
+    }
+  });
+
+  const newUses = new Map();
+  invites.forEach(invite => {
+    newUses.set(invite.code, invite.uses || 0);
+  });
+  guildInviteUses.set(member.guild.id, newUses);
+
+  if (!usedInvite || !usedInvite.inviter || usedInvite.inviter.id === member.id) {
+    return null;
+  }
+
+  if (!referrals.invitedBy[member.id]) {
+    referrals.invitedBy[member.id] = {
+      guildId: member.guild.id,
+      inviterId: usedInvite.inviter.id,
+      inviteCode: usedInvite.code,
+      joinedAt: Date.now(),
+      validated: false,
+      rewardedAt: null
+    };
+    saveReferrals();
+  }
+
+  return referrals.invitedBy[member.id];
+}
+
+async function validateReferralReward(user, ticketRequest, amountText) {
+  const referral = referrals.invitedBy[user.id];
+  if (!referral || referral.validated || !referral.inviterId || referral.inviterId === user.id) {
+    return null;
+  }
+
+  const inviter = await client.users.fetch(referral.inviterId).catch(() => null);
+  if (!inviter) return null;
+
+  const stats = ensureReferralStats(inviter.id);
+  stats.validated += 1;
+  if (!stats.invitedUsers.includes(user.id)) {
+    stats.invitedUsers.push(user.id);
+  }
+
+  referral.validated = true;
+  referral.rewardedAt = Date.now();
+  referral.rechargeRequestId = ticketRequest.id;
+  referral.firstRechargeAmount = amountText;
+
+  let baseReward = 1;
+  let bonusReward = 0;
+  const bonusLines = [];
+
+  if (stats.validated === 5 && !stats.milestones.five) {
+    bonusReward += 5;
+    stats.milestones.five = true;
+    bonusLines.push('Bonus 5 filleuls : **+5.00€**');
+  }
+
+  if (stats.validated === 10 && !stats.milestones.ten) {
+    bonusReward += 7;
+    stats.milestones.ten = true;
+    bonusLines.push('Bonus 10 filleuls : **+7.00€**');
+  }
+
+  const totalReward = baseReward + bonusReward;
+  if (!wallets[inviter.id]) wallets[inviter.id] = { balance: 0 };
+  wallets[inviter.id].balance += totalReward;
+
+  saveWallets();
+  saveReferrals();
+
+  const newBalanceText = `${wallets[inviter.id].balance.toFixed(2)}€`;
+  const rewardText = `${totalReward.toFixed(2)}€`;
+
+  const dmEmbed = new EmbedBuilder()
+    .setColor(0x2ECC71)
+    .setTitle('🎁 Parrainage validé')
+    .setDescription([
+      'Un de tes filleuls vient de valider sa première recharge.',
+      '',
+      `👤 Filleul : **${user.tag}**`,
+      `🧾 Demande : n°${ticketRequest.id}`,
+      `💰 Récompense de base : **+${baseReward.toFixed(2)}€**`,
+      ...bonusLines,
+      '',
+      `🎁 Total ajouté : **+${rewardText}**`,
+      `👥 Filleuls validés : **${stats.validated}**`,
+      `👛 Nouveau solde : **${newBalanceText}**`
+    ].join('\n'));
+
+  await inviter.send({ embeds: [dmEmbed] }).catch(() => {});
+
+  await user.send({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(0x2ECC71)
+        .setTitle('✅ Parrainage confirmé')
+        .setDescription([
+          'Ta première recharge a validé ton parrainage.',
+          `Ton parrain **${inviter.tag}** a reçu sa récompense automatiquement.`
+        ].join('\n'))
+    ]
+  }).catch(() => {});
+
+  sendBotLog('🎁 Parrainage récompensé', [
+    `Parrain : ${logUser(inviter)}`,
+    `Filleul : ${logUser(user)}`,
+    `Demande recharge : **${ticketRequest.id}**`,
+    `Filleuls validés : **${stats.validated}**`,
+    `Récompense totale : **${rewardText}**`,
+    `Nouveau solde parrain : **${newBalanceText}**`
+  ], 0x2ECC71);
+
+  return {
+    inviter,
+    stats,
+    totalReward,
+    newBalanceText
+  };
 }
 
 const products = [
@@ -275,9 +516,109 @@ function logChannel(channel) {
   return `${channel} (${channel.id})`;
 }
 
-client.once('ready', () => {
+function randomInviteColor() {
+  const colors = [
+    0xD4AF37,
+    0x2ECC71,
+    0x3498DB,
+    0x9B59B6,
+    0xE67E22,
+    0xE91E63,
+    0x1ABC9C
+  ];
+
+  return colors[Math.floor(Math.random() * colors.length)];
+}
+
+async function sendInviteJoinAnnouncement(member, referral) {
+  const channel = client.channels.cache.get(INVITE_ANNOUNCE_CHANNEL_ID)
+    || await client.channels.fetch(INVITE_ANNOUNCE_CHANNEL_ID).catch(() => null);
+
+  if (!channel || typeof channel.send !== 'function') return;
+
+  const description = referral
+    ? [
+        `👋 Bienvenue ${member} sur le serveur !`,
+        '',
+        `👥 Invité par : <@${referral.inviterId}>`
+      ]
+    : [
+        `👋 Bienvenue ${member} sur le serveur !`,
+        '',
+        '👥 Invité par : **non détecté**',
+        '',
+        'Le bot n’a pas pu identifier l’invitation utilisée.'
+      ];
+
+  await channel.send({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(randomInviteColor())
+        .setTitle('Nouvelle arrivée 🎉')
+        .setDescription(description.join('\n'))
+        .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
+        .setFooter({ text: 'Invitations • Parrainage • Boutique' })
+        .setTimestamp()
+    ]
+  }).catch(() => {});
+}
+
+async function sendInviteAdminAnnouncement(member, referral) {
+  const channel = client.channels.cache.get(INVITE_ADMIN_CHANNEL_ID)
+    || await client.channels.fetch(INVITE_ADMIN_CHANNEL_ID).catch(() => null);
+
+  if (!channel || typeof channel.send !== 'function') return;
+
+  const description = referral
+    ? [
+        `👤 Nouveau membre : ${member} (${member.user.tag})`,
+        `👥 Invité par : <@${referral.inviterId}>`,
+        '',
+        'Statut : invitation enregistrée, récompense en attente de la première recharge.'
+      ]
+    : [
+        `👤 Nouveau membre : ${member} (${member.user.tag})`,
+        '',
+        '👥 Invité par : non détecté'
+      ];
+
+  await channel.send({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(referral ? 0x3498DB : 0x95A5A6)
+        .setTitle('Suivi invitation 👥')
+        .setDescription(description.join('\n'))
+        .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
+        .setTimestamp()
+    ]
+  }).catch(() => {});
+}
+
+client.once('ready', async () => {
   console.log('Bot connecte');
+  await Promise.all(client.guilds.cache.map(guild => cacheGuildInvites(guild)));
   sendBotLog('🟢 Bot connecté', `Connecté en tant que **${client.user.tag}**`, 0x2ECC71);
+});
+
+client.on(Events.InviteCreate, invite => {
+  if (invite.guild) cacheGuildInvites(invite.guild);
+});
+
+client.on(Events.InviteDelete, invite => {
+  if (invite.guild) cacheGuildInvites(invite.guild);
+});
+
+client.on(Events.GuildMemberAdd, async member => {
+  const referral = await recordMemberInvite(member);
+
+  if (!referral) {
+    sendInviteJoinAnnouncement(member, null);
+    sendInviteAdminAnnouncement(member, null);
+    return;
+  }
+
+  sendInviteJoinAnnouncement(member, referral);
+  sendInviteAdminAnnouncement(member, referral);
 });
 
 client.on('messageCreate', async message => {
@@ -559,22 +900,23 @@ client.on('messageCreate', async message => {
         '',
         `**${NO_NOTE_TEXT}**`,
         '',
+        'Clique sur **Recharger** pour recevoir les informations de paiement en message privé.',
         'Après le paiement, envoie ton screenshot au bot en message privé.'
       ].join('\n'))
       .addFields(
         {
           name: 'PayPal 🅿️',
-          value: `[Ouvrir le lien PayPal](${PAYPAL_LINK})`,
+          value: 'Disponible via le bouton **Recharger**.',
           inline: false
         },
         {
           name: 'Revolut 💳',
-          value: `[Ouvrir le lien Revolut](${REVOLUT_LINK})`,
+          value: 'Disponible via le bouton **Recharger**.',
           inline: false
         },
         {
           name: 'Virement bancaire 🏦',
-          value: `Disponible lors de la recharge dans <#${SHOP_CHANNEL_ID}>.`,
+          value: 'Disponible via le bouton **Recharger**.',
           inline: false
         }
       )
@@ -642,6 +984,108 @@ client.on('messageCreate', async message => {
             `💰 Solde : **${wallets[user.id].balance.toFixed(2)}€**`
           ].join('\n'))
           .setThumbnail(user.displayAvatarURL({ dynamic: true }))
+      ]
+    });
+  }
+
+  if (message.content.startsWith('!invites')) {
+    const user = message.mentions.users.first();
+
+    if (!user) {
+      const reply = await message.channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0xE74C3C)
+            .setTitle('❌ Commande invalide')
+            .setDescription('Utilisation : `!invites @membre`')
+        ]
+      });
+
+      return deleteLater(reply);
+    }
+
+    const summary = getReferralSummary(user.id);
+    const invitedBy = referrals.invitedBy[user.id] || null;
+    const recentValidated = summary.validated
+      .slice(-10)
+      .map(referral => `✅ <@${referral.invitedUserId}>`)
+      .join('\n') || 'Aucun filleul validé.';
+    const recentPending = summary.pending
+      .slice(-10)
+      .map(referral => `⏳ <@${referral.invitedUserId}>`)
+      .join('\n') || 'Aucun filleul en attente.';
+
+    const invitedByText = invitedBy
+      ? [
+          `Parrain : <@${invitedBy.inviterId}>`,
+          `Statut : **${invitedBy.validated ? 'Validé' : 'En attente de première recharge'}**`,
+          `Arrivée : ${formatReferralDate(invitedBy.joinedAt)}`
+        ].join('\n')
+      : 'Aucun parrain détecté pour ce membre.';
+
+    await sendBotLog('👥 Parrainage consulté', [
+      `Admin : ${logUser(message.author)}`,
+      `Membre : ${logUser(user)}`,
+      `Validés : **${summary.validated.length}**`,
+      `En attente : **${summary.pending.length}**`
+    ], 0x3498DB);
+
+    return message.channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0x3498DB)
+          .setTitle('👥 Statistiques parrainage')
+          .setDescription([
+            `👤 Membre : ${user}`,
+            '',
+            `✅ Filleuls validés : **${summary.validated.length}**`,
+            `⏳ Filleuls en attente : **${summary.pending.length}**`,
+            '',
+            '**Invité par**',
+            invitedByText
+          ].join('\n'))
+          .addFields(
+            { name: 'Derniers filleuls validés', value: recentValidated, inline: false },
+            { name: 'Filleuls en attente', value: recentPending, inline: false }
+          )
+          .setThumbnail(user.displayAvatarURL({ dynamic: true }))
+          .setFooter({ text: 'Parrainage • Invitations • Boutique' })
+      ]
+    });
+  }
+
+  if (message.content === '!topinvites') {
+    const leaderboard = buildReferralLeaderboard();
+
+    if (leaderboard.length === 0) {
+      return message.channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0xE67E22)
+            .setTitle('🏆 Top parrainage')
+            .setDescription('Aucune invitation enregistrée pour le moment.')
+        ]
+      });
+    }
+
+    const medal = ['🥇', '🥈', '🥉'];
+    const lines = leaderboard.map((row, index) => [
+      `${medal[index] || `**${index + 1}.**`} <@${row.inviterId}>`,
+      `✅ Validés : **${row.validated}** • ⏳ En attente : **${row.pending}**`
+    ].join('\n'));
+
+    await sendBotLog('🏆 Top parrainage consulté', [
+      `Admin : ${logUser(message.author)}`,
+      `Salon : ${logChannel(message.channel)}`
+    ], 0x3498DB);
+
+    return message.channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0xD4AF37)
+          .setTitle('🏆 Top parrainage')
+          .setDescription(lines.join('\n\n'))
+          .setFooter({ text: 'Classement par filleuls validés' })
       ]
     });
   }
@@ -721,6 +1165,23 @@ client.on('messageCreate', async message => {
         `Ticket : ${logChannel(message.channel)}`,
         dmSent ? 'MP client : envoyé' : 'MP client : non envoyé'
       ], dmSent ? 0x2ECC71 : 0xF1C40F);
+
+      const referralReward = await validateReferralReward(user, ticketRequest, amountText);
+      if (referralReward) {
+        await message.channel.send({
+          embeds: [
+            new EmbedBuilder()
+              .setColor(0x2ECC71)
+              .setTitle('🎁 Parrainage validé')
+              .setDescription([
+                `👤 Parrain : ${referralReward.inviter}`,
+                `💰 Récompense ajoutée : **${referralReward.totalReward.toFixed(2)}€**`,
+                `👥 Filleuls validés : **${referralReward.stats.validated}**`,
+                `👛 Nouveau solde parrain : **${referralReward.newBalanceText}**`
+              ].join('\n'))
+          ]
+        });
+      }
 
       if (dmSent) {
         await message.channel.send('✅ Le ticket se fermera dans 10 secondes.');
