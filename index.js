@@ -140,6 +140,14 @@ function adminTicketPermissionOverwrites(guild) {
   ];
 }
 
+function supportTicketPermissionOverwrites(guild, userId) {
+  return [
+    { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+    { id: userId, allow: ticketAllow },
+    { id: ADMIN_ROLE_ID, allow: ticketAllow }
+  ];
+}
+
 function canManageTicket(interaction, ownerId) {
   return (
     interaction.user.id === ownerId ||
@@ -336,20 +344,25 @@ client.on('messageCreate', async message => {
   if (message.content === '!support') {
     const supportEmbed = new EmbedBuilder()
       .setColor(0xD4AF37)
-      .setTitle('🎫 Support')
+      .setTitle('🚨 Support')
       .setDescription([
-        '📩 Besoin d’aide ou une question sur une commande ?',
+        '📩 Besoin d’aide ?',
+        'Tu peux ouvrir un ticket avec le staff si tu as :',
         '',
-        'Clique sur le bouton ci-dessous pour ouvrir un ticket support.',
-        '👥 Un membre du staff te répondra dès que possible.'
+        '• une question sur une commande',
+        '• un problème de recharge',
+        '• un souci avec ton portefeuille',
+        '• besoin d’aide pour utiliser la boutique',
+        '',
+        'Clique sur le bouton ci-dessous pour ouvrir un ticket.'
       ].join('\n'))
-      .setFooter({ text: 'Support • Boutique' });
+      .setFooter({ text: 'Support • Boutique McDonald\'s' });
 
     const supportRow = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId('open_support_ticket')
         .setLabel('Ouvrir un ticket')
-        .setEmoji('🎫')
+        .setEmoji('🚨')
         .setStyle(ButtonStyle.Primary)
     );
 
@@ -627,18 +640,18 @@ client.on(Events.InteractionCreate, async interaction => {
         name: `support-${sanitizeChannelName(interaction.user.username)}`,
         parent: SUPPORT_CATEGORY,
         type: ChannelType.GuildText,
-        permissionOverwrites: ticketPermissionOverwrites(interaction.guild, interaction.user.id)
+        permissionOverwrites: supportTicketPermissionOverwrites(interaction.guild, interaction.user.id)
       });
 
       const request = createRequest('support', ticket.id, interaction.user.id);
       await ticket.send({
-        content: `🎫 Ticket support
+        content: `🚨 Ticket support
 
 🧾 Demande : #${request.id}
 👤 Client : <@${interaction.user.id}>
 
 📩 Explique ton problème ici.
-👥 Un membre du staff va te répondre dès que possible.`,
+👥 Un administrateur va te répondre dès que possible.`,
         components: [ticketButtons(interaction.user.id)]
       });
 
