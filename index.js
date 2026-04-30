@@ -830,6 +830,44 @@ client.on('messageCreate', async message => {
     return message.channel.send({ embeds: [embed], components: [row] });
   }
 
+  if (message.content === '!clear') {
+    if (typeof message.channel.bulkDelete !== 'function') {
+      const reply = await message.channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0xE74C3C)
+            .setTitle('❌ Salon incompatible')
+            .setDescription('Cette commande ne peut être utilisée que dans un salon texte.')
+        ]
+      });
+
+      return deleteLater(reply);
+    }
+
+    let deletedCount = 0;
+
+    while (true) {
+      const messages = await message.channel.messages.fetch({ limit: 100 }).catch(() => null);
+      if (!messages || messages.size === 0) break;
+
+      const deleted = await message.channel.bulkDelete(messages, true).catch(() => null);
+      if (!deleted || deleted.size === 0) break;
+
+      deletedCount += deleted.size;
+      if (messages.size < 100) break;
+    }
+
+    await sendBotLog('🧹 Salon nettoyé', [
+      `Admin : ${logUser(message.author)}`,
+      `Salon : ${logChannel(message.channel)}`,
+      `Messages supprimés : **${deletedCount}**`
+    ], 0xE67E22);
+
+    const confirm = await message.channel.send(`✅ Salon nettoyé. **${deletedCount}** message(s) supprimé(s).`);
+    setTimeout(() => confirm.delete().catch(() => {}), 5000);
+    return;
+  }
+
   if (message.content === '!support') {
     const supportEmbed = new EmbedBuilder()
       .setColor(0xD4AF37)
