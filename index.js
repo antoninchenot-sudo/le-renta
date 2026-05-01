@@ -1,4 +1,5 @@
 const fs = require('fs');
+const path = require('path');
 const {
   Client,
   GatewayIntentBits,
@@ -54,38 +55,168 @@ const PAYPAL_LINK = 'https://paypal.me/AntoninChenot';
 const REVOLUT_LINK = 'https://revolut.me/arthur23320/pocket/vNrIna0VcG';
 const IBAN = 'FR76 2823 3000 0165 8385 8232 516';
 const NO_NOTE_TEXT = '❗❗ Ne mettre aucune note lors du paiement ❗❗';
+const WALLET_FILE = 'wallets.json';
+const WALLET_BACKUP_DIR = path.join('backups', 'wallets');
+const WALLET_BACKUP_LIMIT = 50;
 
-let wallets = fs.existsSync('wallets.json')
-  ? JSON.parse(fs.readFileSync('wallets.json'))
-  : {};
+function ensureDirectory(dirPath) {
+  if (!fs.existsSync(dirPath)) {
+    fs.mkdirSync(dirPath, { recursive: true });
+  }
+}
 
-let requests = fs.existsSync('requests.json')
-  ? JSON.parse(fs.readFileSync('requests.json'))
-  : { counter: 0, tickets: {} };
+function backupTimestamp() {
+  return `${new Date().toISOString().replace(/[:.]/g, '-')}-${Math.random().toString(36).slice(2, 8)}`;
+}
 
-let referrals = fs.existsSync('referrals.json')
-  ? JSON.parse(fs.readFileSync('referrals.json'))
-  : { invitedBy: {}, stats: {}, inviteLinks: {} };
+function listJsonBackups(backupDir) {
+  if (!fs.existsSync(backupDir)) return [];
+
+  return fs.readdirSync(backupDir)
+    .filter(file => file.endsWith('.json'))
+    .map(file => {
+      const filePath = path.join(backupDir, file);
+      try {
+        return {
+          filePath,
+          mtimeMs: fs.statSync(filePath).mtimeMs
+        };
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+}
+
+function cleanupBackups(backupDir, limit) {
+  listJsonBackups(backupDir)
+    .slice(limit)
+    .forEach(backup => {
+      try {
+        fs.unlinkSync(backup.filePath);
+      } catch (error) {
+        console.error(`Impossible de supprimer une ancienne sauvegarde : ${backup.filePath}`, error);
+      }
+    });
+}
+
+function backupJsonSnapshot(fileName, backupDir) {
+  if (!fs.existsSync(fileName)) return null;
+
+  ensureDirectory(backupDir);
+
+  const parsed = path.parse(fileName);
+  const backupPath = path.join(backupDir, `${parsed.name}-${backupTimestamp()}.json`);
+  fs.copyFileSync(fileName, backupPath);
+  cleanupBackups(backupDir, WALLET_BACKUP_LIMIT);
+  return backupPath;
+}
+
+function loadLatestJsonBackup(backupDir) {
+  for (const backup of listJsonBackups(backupDir)) {
+    try {
+      return JSON.parse(fs.readFileSync(backup.filePath, 'utf8'));
+    } catch (error) {
+      console.error(`Sauvegarde illisible ignorée : ${backup.filePath}`, error);
+    }
+  }
+
+  return null;
+}
+
+function loadJsonFile(fileName, fallback, options = {}) {
+  if (!fs.existsSync(fileName)) return fallback;
+
+  try {
+    return JSON.parse(fs.readFileSync(fileName, 'utf8'));
+  } catch (error) {
+    const backupName = `${fileName}.broken-${Date.now()}`;
+    console.error(`Impossible de lire ${fileName}. Copie de secours : ${backupName}`, error);
+
+    try {
+      fs.copyFileSync(fileName, backupName);
+    } catch (backupError) {
+      console.error(`Impossible de créer la copie de secours ${backupName}`, backupError);
+    }
+
+    if (options.backupDir) {
+      const backupData = loadLatestJsonBackup(options.backupDir);
+
+      if (backupData) {
+        console.log(`Récupération de ${fileName} depuis la dernière sauvegarde valide.`);
+        return backupData;
+      }
+    }
+
+    return fallback;
+  }
+}
+
+function saveJsonFile(fileName, data, options = {}) {
+  let tempFile = null;
+
+  try {
+    tempFile = `${fileName}.tmp-${Date.now()}`;
+    fs.writeFileSync(tempFile, JSON.stringify(data, null, 2));
+    fs.renameSync(tempFile, fileName);
+
+    if (options.backupDir) {
+      backupJsonSnapshot(fileName, options.backupDir);
+    }
+
+    return true;
+  } catch (error) {
+    if (tempFile && fs.existsSync(tempFile)) {
+      try {
+        fs.unlinkSync(tempFile);
+      } catch (cleanupError) {
+        console.error(`Impossible de supprimer le fichier temporaire ${tempFile}`, cleanupError);
+      }
+    }
+
+    console.error(`Impossible de sauvegarder ${fileName}`, error);
+    reportCrash('Sauvegarde JSON impossible', error, [`Fichier : \`${fileName}\``]);
+    return false;
+  }
+}
+
+let wallets = loadJsonFile(WALLET_FILE, {}, { backupDir: WALLET_BACKUP_DIR });
+let requests = loadJsonFile('requests.json', { counter: 0, tickets: {} });
+let referrals = loadJsonFile('referrals.json', { invitedBy: {}, stats: {}, inviteLinks: {} });
+
+if (fs.existsSync(WALLET_FILE)) {
+  try {
+    backupJsonSnapshot(WALLET_FILE, WALLET_BACKUP_DIR);
+  } catch (error) {
+    console.error('Impossible de créer la sauvegarde initiale du portefeuille.', error);
+  }
+}
 
 if (!referrals.inviteLinks) referrals.inviteLinks = {};
 
 const pendingRecharges = new Map();
 const guildInviteUses = new Map();
+const crashReportCooldowns = new Map();
+const CRASH_LOG_COOLDOWN = 60_000;
 
 function saveWallets() {
-  fs.writeFileSync('wallets.json', JSON.stringify(wallets, null, 2));
+  saveJsonFile(WALLET_FILE, wallets, { backupDir: WALLET_BACKUP_DIR });
 }
 
 function saveRequests() {
-  fs.writeFileSync('requests.json', JSON.stringify(requests, null, 2));
+  saveJsonFile('requests.json', requests);
 }
 
 function saveReferrals() {
-  fs.writeFileSync('referrals.json', JSON.stringify(referrals, null, 2));
+  saveJsonFile('referrals.json', referrals);
 }
 
 function isAdminMember(member) {
-  return member.roles.cache.has(ADMIN_ROLE_ID) || member.permissions.has(PermissionFlagsBits.Administrator);
+  return Boolean(
+    member?.roles?.cache?.has(ADMIN_ROLE_ID) ||
+    member?.permissions?.has?.(PermissionFlagsBits.Administrator)
+  );
 }
 
 function createRequest(type, channelId, userId, data = {}) {
@@ -390,7 +521,7 @@ async function validateReferralReward(user, ticketRequest, amountText) {
     ]
   }).catch(() => {});
 
-  sendBotLog('🎁 Parrainage récompensé', [
+  sendAdminLog('🎁 Parrainage récompensé', [
     `Parrain : ${logUser(inviter)}`,
     `Filleul : ${logUser(user)}`,
     `Demande recharge : **${ticketRequest.id}**`,
@@ -734,6 +865,22 @@ function sendAdminCommandLog(title, lines, color = 0x95A5A6) {
   return sendAdminLog(title, lines, color);
 }
 
+function shouldUseStaffLog(member) {
+  const roles = member?.roles?.cache;
+
+  return Boolean(
+    roles?.has(ADMIN_ROLE_ID) ||
+    roles?.has(TICKET_ACCESS_ROLE_ID) ||
+    member?.permissions?.has?.(PermissionFlagsBits.Administrator)
+  );
+}
+
+function sendActionLog(member, title, lines, color = 0x3498DB) {
+  return shouldUseStaffLog(member)
+    ? sendAdminLog(title, lines, color)
+    : sendBotLog(title, lines, color);
+}
+
 function logUser(user) {
   return `${user} (${user.tag})`;
 }
@@ -747,6 +894,72 @@ function formatRuntimeError(error) {
   if (error.stack) return error.stack.slice(0, 1800);
   if (error.message) return error.message;
   return String(error).slice(0, 1800);
+}
+
+function crashFingerprint(title, error) {
+  return `${title}:${error?.message || String(error)}`.slice(0, 500);
+}
+
+function shouldSendCrashReport(title, error) {
+  const key = crashFingerprint(title, error);
+  const now = Date.now();
+  const lastSentAt = crashReportCooldowns.get(key) || 0;
+
+  if (now - lastSentAt < CRASH_LOG_COOLDOWN) return false;
+
+  crashReportCooldowns.set(key, now);
+  return true;
+}
+
+async function reportCrash(title, error, context = []) {
+  console.error(title, error);
+
+  if (!client.isReady() || !shouldSendCrashReport(title, error)) return;
+
+  await sendAdminLog(`🛡️ Anti-crash - ${title}`, [
+    ...context,
+    '',
+    '```',
+    formatRuntimeError(error),
+    '```'
+  ], 0xE74C3C).catch(() => {});
+}
+
+async function handleMessageError(message, error) {
+  await reportCrash('Erreur messageCreate', error, [
+    `Utilisateur : ${message?.author ? logUser(message.author) : 'Inconnu'}`,
+    message?.channel ? `Salon : ${logChannel(message.channel)}` : 'Salon : inconnu',
+    message?.content ? `Message : \`${message.content.slice(0, 500)}\`` : null
+  ]);
+
+  if (!message?.channel || typeof message.channel.send !== 'function') return;
+  if (message.guild && !message.content?.startsWith('!')) return;
+
+  const reply = await message.channel.send('⚠️ Une erreur est survenue, mais le bot reste en ligne.').catch(() => null);
+  if (reply) deleteLater(reply, 5000);
+}
+
+async function handleInteractionError(interaction, error) {
+  await reportCrash('Erreur interactionCreate', error, [
+    `Utilisateur : ${interaction?.user ? logUser(interaction.user) : 'Inconnu'}`,
+    interaction?.channel ? `Salon : ${logChannel(interaction.channel)}` : 'Salon : inconnu',
+    interaction?.customId ? `Action : \`${interaction.customId}\`` : null,
+    interaction?.commandName ? `Commande slash : \`${interaction.commandName}\`` : null
+  ]);
+
+  const payload = {
+    content: '⚠️ Une erreur est survenue, mais le bot reste en ligne.',
+    ephemeral: true
+  };
+
+  if (!interaction || typeof interaction.reply !== 'function') return;
+
+  if (interaction.replied || interaction.deferred) {
+    await interaction.followUp(payload).catch(() => {});
+    return;
+  }
+
+  await interaction.reply(payload).catch(() => {});
 }
 
 function randomInviteColor() {
@@ -828,57 +1041,91 @@ async function sendInviteAdminAnnouncement(member, referral) {
 }
 
 client.once('ready', async () => {
-  console.log('Bot connecte');
-  normalizeReferralOwnersFromPersonalLinks();
-  await Promise.all(client.guilds.cache.map(guild => cacheGuildInvites(guild)));
-  sendBotLog('🟢 Bot connecté', `Connecté en tant que **${client.user.tag}**`, 0x2ECC71);
+  try {
+    console.log('Bot connecte');
+    normalizeReferralOwnersFromPersonalLinks();
+    await Promise.all(client.guilds.cache.map(guild => cacheGuildInvites(guild)));
+    sendBotLog('🟢 Bot connecté', `Connecté en tant que **${client.user.tag}**`, 0x2ECC71);
+  } catch (error) {
+    await reportCrash('Erreur au démarrage ready', error);
+  }
 });
 
 client.on('error', error => {
-  console.error('Erreur client Discord :', error);
-  if (client.isReady()) {
-    sendBotLog('🔴 Erreur client Discord', `\`\`\`\n${formatRuntimeError(error)}\n\`\`\``, 0xE74C3C);
-  }
+  reportCrash('Erreur client Discord', error);
 });
 
 process.on('unhandledRejection', error => {
-  console.error('Promesse rejetée non gérée :', error);
-  if (client.isReady()) {
-    sendBotLog('🔴 Erreur non gérée', `\`\`\`\n${formatRuntimeError(error)}\n\`\`\``, 0xE74C3C);
-  }
+  reportCrash('Promesse rejetée non gérée', error);
 });
 
 process.on('uncaughtException', error => {
-  console.error('Exception non capturée :', error);
-  if (client.isReady()) {
-    sendBotLog('🔴 Exception non capturée', `\`\`\`\n${formatRuntimeError(error)}\n\`\`\``, 0xE74C3C);
-  }
+  reportCrash('Exception non capturée', error);
+});
+
+process.on('warning', warning => {
+  reportCrash('Avertissement Node.js', warning);
+});
+
+client.on('warn', warning => {
+  reportCrash('Avertissement Discord.js', warning);
+});
+
+client.on('shardError', error => {
+  reportCrash('Erreur shard Discord', error);
+});
+
+client.on('shardDisconnect', (event, shardId) => {
+  reportCrash('Shard déconnecté', new Error(`Shard ${shardId} déconnecté avec le code ${event?.code || 'inconnu'}`));
+});
+
+client.on('shardReconnecting', shardId => {
+  reportCrash('Shard en reconnexion', new Error(`Shard ${shardId} tente une reconnexion.`));
+});
+
+client.on('shardResume', (shardId, replayedEvents) => {
+  sendAdminLog('🟢 Shard reconnecté', [
+    `Shard : **${shardId}**`,
+    `Événements rejoués : **${replayedEvents || 0}**`
+  ], 0x2ECC71);
 });
 
 client.on(Events.InviteCreate, invite => {
-  if (invite.guild) cacheGuildInvites(invite.guild);
+  if (invite.guild) cacheGuildInvites(invite.guild).catch(error => reportCrash('Erreur InviteCreate', error));
 });
 
 client.on(Events.InviteDelete, invite => {
-  if (invite.guild) cacheGuildInvites(invite.guild);
+  if (invite.guild) cacheGuildInvites(invite.guild).catch(error => reportCrash('Erreur InviteDelete', error));
 });
 
 client.on(Events.GuildMemberAdd, async member => {
-  const referral = await recordMemberInvite(member);
+  try {
+    const referral = await recordMemberInvite(member);
 
-  if (!referral) {
-    sendInviteJoinAnnouncement(member, null);
-    sendInviteAdminAnnouncement(member, null);
-    return;
+    if (!referral) {
+      await Promise.all([
+        sendInviteJoinAnnouncement(member, null),
+        sendInviteAdminAnnouncement(member, null)
+      ]);
+      return;
+    }
+
+    await Promise.all([
+      sendInviteJoinAnnouncement(member, referral),
+      sendInviteAdminAnnouncement(member, referral)
+    ]);
+  } catch (error) {
+    await reportCrash('Erreur arrivée membre', error, [
+      `Membre : ${member?.user ? logUser(member.user) : 'Inconnu'}`,
+      `Serveur : ${member?.guild?.name || 'Inconnu'}`
+    ]);
   }
-
-  sendInviteJoinAnnouncement(member, referral);
-  sendInviteAdminAnnouncement(member, referral);
 });
 
 client.on('messageCreate', async message => {
   if (message.author.bot) return;
 
+  try {
   if (!message.guild) {
     const dmRequest = findOpenRechargeRequestByUser(message.author.id);
 
@@ -908,7 +1155,7 @@ client.on('messageCreate', async message => {
       ].filter(Boolean).join('\n'));
     }
 
-    await sendBotLog('📸 Screenshot recharge reçu', [
+    await sendAdminLog('📸 Screenshot recharge reçu', [
       `Client : ${logUser(message.author)}`,
       `Demande : **${dmRequest.id}**`,
       `Montant : **${dmRequest.amount}**`,
@@ -965,7 +1212,7 @@ client.on('messageCreate', async message => {
         ]
       });
 
-      await sendBotLog('⛔ Commande refusée', [
+      await sendActionLog(message.member, '⛔ Commande refusée', [
         `Utilisateur : ${logUser(message.author)}`,
         `Salon : ${logChannel(message.channel)}`,
         `Commande : \`${message.content.slice(0, 1000)}\``
@@ -1618,9 +1865,13 @@ client.on('messageCreate', async message => {
       ]
     });
   }
+  } catch (error) {
+    await handleMessageError(message, error);
+  }
 });
 
 client.on(Events.InteractionCreate, async interaction => {
+  try {
   if (interaction.isButton()) {
     if (interaction.customId === 'get_referral_invite') {
       const invite = await getOrCreatePersonalInvite(interaction.guild, interaction.user).catch(async error => {
@@ -1653,7 +1904,7 @@ client.on(Events.InteractionCreate, async interaction => {
         ].join('\n'))
         .setFooter({ text: 'Un filleul est validé après sa première recharge.' });
 
-      sendBotLog('🎟️ Lien parrainage demandé', [
+      sendActionLog(interaction.member, '🎟️ Lien parrainage demandé', [
         `Membre : ${logUser(interaction.user)}`,
         `Lien : ${invite.url}`,
         `Affichage : message éphémère dans ${logChannel(interaction.channel)}`
@@ -1691,7 +1942,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
       if (interaction.replied) return;
 
-      sendBotLog('✅ Règlement accepté', [
+      sendActionLog(member, '✅ Règlement accepté', [
         `Membre : ${logUser(interaction.user)}`,
         `Rôle donné : <@&${RULES_ROLE_ID}>`
       ], 0x2ECC71);
@@ -1739,7 +1990,7 @@ client.on(Events.InteractionCreate, async interaction => {
       }
 
       if (archived) {
-        sendBotLog('🗑️ Ticket supprimé définitivement', [
+        sendAdminLog('🗑️ Ticket supprimé définitivement', [
           `Par : ${logUser(interaction.user)}`,
           `Ticket : ${logChannel(interaction.channel)}`,
           ticketRequest ? `Demande : **${ticketRequest.id}**` : 'Demande : inconnue',
@@ -1772,7 +2023,7 @@ client.on(Events.InteractionCreate, async interaction => {
         return;
       }
 
-      sendBotLog('📁 Ticket déplacé dans les tickets supprimés', [
+      sendAdminLog('📁 Ticket déplacé dans les tickets supprimés', [
         `Par : ${logUser(interaction.user)}`,
         `Ticket : ${logChannel(interaction.channel)}`,
         ticketRequest ? `Demande : **${ticketRequest.id}**` : 'Demande : inconnue',
@@ -1819,7 +2070,7 @@ client.on(Events.InteractionCreate, async interaction => {
         return;
       }
 
-      sendBotLog('🔓 Ticket réouvert', [
+      sendAdminLog('🔓 Ticket réouvert', [
         `Par : ${logUser(interaction.user)}`,
         `Ticket : ${logChannel(interaction.channel)}`,
         `Demande : **${ticketRequest.id}**`,
@@ -1850,7 +2101,7 @@ client.on(Events.InteractionCreate, async interaction => {
         components: [ticketButtons(interaction.user.id)]
       });
 
-      sendBotLog('🚨 Ticket support créé', [
+      sendAdminLog('🚨 Ticket support créé', [
         `Client : ${logUser(interaction.user)}`,
         `Demande : **${request.id}**`,
         `Ticket : ${logChannel(ticket)}`
@@ -1864,7 +2115,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (interaction.customId === 'wallet') {
       if (!wallets[interaction.user.id]) wallets[interaction.user.id] = { balance: 0 };
-      sendBotLog('👛 Portefeuille consulté', [
+      sendActionLog(interaction.member, '👛 Portefeuille consulté', [
         `Membre : ${logUser(interaction.user)}`,
         `Solde : **${wallets[interaction.user.id].balance.toFixed(2)}€**`,
         `Salon : ${logChannel(interaction.channel)}`
@@ -1881,7 +2132,7 @@ client.on(Events.InteractionCreate, async interaction => {
         .setColor(0xD4AF37)
         .setTitle('Programme de Fidélité Mcdo');
       if (INFO_IMAGE) infoEmbed.setImage(INFO_IMAGE);
-      sendBotLog('🎁 Fidélité Mcdo consultée', [
+      sendActionLog(interaction.member, '🎁 Fidélité Mcdo consultée', [
         `Membre : ${logUser(interaction.user)}`,
         `Salon : ${logChannel(interaction.channel)}`
       ], 0x3498DB);
@@ -1890,7 +2141,7 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.customId === 'recharger') {
-      sendBotLog('➕ Recharge ouverte', [
+      sendActionLog(interaction.member, '➕ Recharge ouverte', [
         `Membre : ${logUser(interaction.user)}`,
         `Salon : ${logChannel(interaction.channel)}`
       ], 0x3498DB);
@@ -1929,7 +2180,7 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.customId === 'commande') {
-      sendBotLog('🎫 Fenêtre commande ouverte', [
+      sendActionLog(interaction.member, '🎫 Fenêtre commande ouverte', [
         `Membre : ${logUser(interaction.user)}`,
         `Salon : ${logChannel(interaction.channel)}`
       ], 0x3498DB);
@@ -1979,7 +2230,7 @@ client.on(Events.InteractionCreate, async interaction => {
     pendingRecharges.set(rechargeKey, { paymentDate, paymentTime });
     setTimeout(() => pendingRecharges.delete(rechargeKey), 15 * 60_000);
 
-    sendBotLog('🧾 Recharge renseignée', [
+    sendActionLog(interaction.member, '🧾 Recharge renseignée', [
       `Membre : ${logUser(interaction.user)}`,
       `Montant : **${formatAmount(cents)}**`,
       `Date indiquée : **${paymentDate}**`,
@@ -2065,7 +2316,7 @@ ${dmSent ? '📩 Instructions envoyées au client en MP.' : '⚠️ Impossible d
         components: [ticketButtons(interaction.user.id)]
       });
 
-      sendBotLog('💳 Demande de recharge créée', [
+      sendAdminLog('💳 Demande de recharge créée', [
         `Client : ${logUser(interaction.user)}`,
         `Demande : **${request.id}**`,
         `Montant : **${amount}**`,
@@ -2098,7 +2349,7 @@ ${dmSent ? '📩 Instructions envoyées au client en MP.' : '⚠️ Impossible d
     }
 
     if (wallets[uid].balance < prix) {
-      sendBotLog('⚠️ Commande refusée - solde insuffisant', [
+      sendActionLog(interaction.member, '⚠️ Commande refusée - solde insuffisant', [
         `Client : ${logUser(interaction.user)}`,
         `Produit : **${product.label}**`,
         `Prix : **${prix}€**`,
@@ -2140,7 +2391,7 @@ ${dmSent ? '📩 Instructions envoyées au client en MP.' : '⚠️ Impossible d
       components: [ticketButtons(interaction.user.id)]
     });
 
-    sendBotLog('🎫 Commande créée', [
+    sendAdminLog('🎫 Commande créée', [
       `Client : ${logUser(interaction.user)}`,
       `Demande : **${request.id}**`,
       `Produit : **${product.label}**`,
@@ -2154,6 +2405,13 @@ ${dmSent ? '📩 Instructions envoyées au client en MP.' : '⚠️ Impossible d
       ephemeral: true
     });
   }
+  } catch (error) {
+    await handleInteractionError(interaction, error);
+  }
 });
 
-client.login(process.env.DISCORD_TOKEN);
+client.login(process.env.DISCORD_TOKEN).catch(error => {
+  reportCrash('Connexion Discord impossible', error, [
+    'Vérifie que `DISCORD_TOKEN` est bien configuré.'
+  ]);
+});
