@@ -37,6 +37,7 @@ const SUPPORT_CATEGORY = '1499036733986308146';
 const SHOP_CHANNEL_ID = '1310381741218988122';
 const SUPPORT_CHANNEL_ID = '1498434089450078258';
 const LOG_CHANNEL_ID = '1310354201704136747';
+const ADMIN_COMMAND_LOG_CHANNEL_ID = '1499758004797702225';
 const INVITE_ANNOUNCE_CHANNEL_ID = '1310355769824383059';
 const INVITE_ADMIN_CHANNEL_ID = '1499523428112142568';
 const RULES_ROLE_ID = '1310359454377840650';
@@ -406,26 +407,26 @@ async function validateReferralReward(user, ticketRequest, amountText) {
 }
 
 const products = [
-  { label: 'McDonald\'s 50-74', description: '2€', value: '50_74', price: 2 },
-  { label: 'McDonald\'s 75-99', description: '4€', value: '75_99', price: 4 },
-  { label: 'McDonald\'s 100-124', description: '6€', value: '100_124', price: 6 },
-  { label: 'McDonald\'s 125-149', description: '7€', value: '125_149', price: 7 },
-  { label: 'McDonald\'s 150-174', description: '8€', value: '150_174', price: 8 },
-  { label: 'McDonald\'s 175-199', description: '10€', value: '175_199', price: 10 },
-  { label: 'McDonald\'s 200-224', description: '11€', value: '200_224', price: 11 },
-  { label: 'McDonald\'s 225-249', description: '12€', value: '225_249', price: 12 },
-  { label: 'McDonald\'s 250-274', description: '13€', value: '250_274', price: 13 },
-  { label: 'McDonald\'s 275-299', description: '14€', value: '275_299', price: 14 },
-  { label: 'McDonald\'s 300-324', description: '15€', value: '300_324', price: 15 },
-  { label: 'McDonald\'s 325-349', description: '16€', value: '325_349', price: 16 },
-  { label: 'McDonald\'s 350-374', description: '17€', value: '350_374', price: 17 },
-  { label: 'McDonald\'s 400-499', description: '18€', value: '400_499', price: 18 },
-  { label: 'McDonald\'s 500-599', description: '21€', value: '500_599', price: 21 },
-  { label: 'McDonald\'s 600-699', description: '30€', value: '600_699', price: 30 },
-  { label: 'McDonald\'s 700-799', description: '34€', value: '700_799', price: 34 },
-  { label: 'McDonald\'s 800-899', description: '40€', value: '800_899', price: 40 },
-  { label: 'McDonald\'s 1000-1099', description: '51€', value: '1000_1099', price: 51 },
-  { label: 'McDonald\'s 1100-1199', description: '67€', value: '1100_1199', price: 67 }
+  { label: 'McDonald\'s 50-74 points', description: '2€', value: '50_74', price: 2 },
+  { label: 'McDonald\'s 75-99 points', description: '4€', value: '75_99', price: 4 },
+  { label: 'McDonald\'s 100-124 points', description: '6€', value: '100_124', price: 6 },
+  { label: 'McDonald\'s 125-149 points', description: '7€', value: '125_149', price: 7 },
+  { label: 'McDonald\'s 150-174 points', description: '8€', value: '150_174', price: 8 },
+  { label: 'McDonald\'s 175-199 points', description: '10€', value: '175_199', price: 10 },
+  { label: 'McDonald\'s 200-224 points', description: '11€', value: '200_224', price: 11 },
+  { label: 'McDonald\'s 225-249 points', description: '12€', value: '225_249', price: 12 },
+  { label: 'McDonald\'s 250-274 points', description: '13€', value: '250_274', price: 13 },
+  { label: 'McDonald\'s 275-299 points', description: '14€', value: '275_299', price: 14 },
+  { label: 'McDonald\'s 300-324 points', description: '15€', value: '300_324', price: 15 },
+  { label: 'McDonald\'s 325-349 points', description: '16€', value: '325_349', price: 16 },
+  { label: 'McDonald\'s 350-374 points', description: '17€', value: '350_374', price: 17 },
+  { label: 'McDonald\'s 400-499 points', description: '18€', value: '400_499', price: 18 },
+  { label: 'McDonald\'s 500-599 points', description: '21€', value: '500_599', price: 21 },
+  { label: 'McDonald\'s 600-699 points', description: '30€', value: '600_699', price: 30 },
+  { label: 'McDonald\'s 700-799 points', description: '34€', value: '700_799', price: 34 },
+  { label: 'McDonald\'s 800-899 points', description: '40€', value: '800_899', price: 40 },
+  { label: 'McDonald\'s 1000-1099 points', description: '51€', value: '1000_1099', price: 51 },
+  { label: 'McDonald\'s 1100-1199 points', description: '67€', value: '1100_1199', price: 67 }
 ];
 
 const prices = Object.fromEntries(products.map(product => [product.value, product.price]));
@@ -549,15 +550,38 @@ async function replyTemp(interaction, options, delay = DELETE_DELAY) {
   }, delay);
 }
 
-function productListText() {
+function productListText(options = {}) {
+  const { boldPoints = false } = options;
+
   return products
-    .map(product => `💰  ${product.label.padEnd(15, ' ')} →   ${product.description}`)
+    .map(product => {
+      const label = boldPoints
+        ? product.label.replace(/\bpoints\b/g, '**points**')
+        : product.label;
+
+      return `💰  ${label.padEnd(15, ' ')} →   ${product.description}`;
+    })
     .join('\n\n');
 }
 
-async function sendBotLog(title, lines, color = 0x3498DB) {
-  const channel = client.channels.cache.get(LOG_CHANNEL_ID)
-    || await client.channels.fetch(LOG_CHANNEL_ID).catch(() => null);
+function buildAvisEmbed() {
+  return new EmbedBuilder()
+    .setColor(0xD4AF37)
+    .setTitle('Merci pour ta commande')
+    .setDescription([
+      'Ta commande est terminée, merci pour ta confiance !',
+      '',
+      'N’hésite pas à laisser un avis ici : <#1497652398259306516>',
+      'Et si tu as apprécié le service, parle-en autour de toi !',
+      '',
+      'Bon appétit 😋'
+    ].join('\n'))
+    .setFooter({ text: 'Boutique' });
+}
+
+async function sendLogToChannel(channelId, title, lines, color = 0x3498DB) {
+  const channel = client.channels.cache.get(channelId)
+    || await client.channels.fetch(channelId).catch(() => null);
 
   if (!channel || typeof channel.send !== 'function') return;
 
@@ -574,6 +598,14 @@ async function sendBotLog(title, lines, color = 0x3498DB) {
         .setTimestamp()
     ]
   }).catch(() => {});
+}
+
+function sendBotLog(title, lines, color = 0x3498DB) {
+  return sendLogToChannel(LOG_CHANNEL_ID, title, lines, color);
+}
+
+function sendAdminCommandLog(title, lines, color = 0x95A5A6) {
+  return sendLogToChannel(ADMIN_COMMAND_LOG_CHANNEL_ID, title, lines, color);
 }
 
 function logUser(user) {
@@ -768,6 +800,30 @@ client.on('messageCreate', async message => {
     ].join('\n'));
   }
 
+  const ticketRequest = getTicketRequest(message.channel.id);
+
+  if (
+    ticketRequest?.type === 'commande' &&
+    message.attachments.size > 0 &&
+    message.member?.roles.cache.has(ADMIN_ROLE_ID) &&
+    !ticketRequest.avisSentAt
+  ) {
+    ticketRequest.avisSentAt = Date.now();
+    ticketRequest.productSentBy = message.author.id;
+    ticketRequest.productSentMessageId = message.id;
+    saveRequests();
+
+    await message.channel.send({ embeds: [buildAvisEmbed()] });
+
+    await sendBotLog('📦 Produit envoyé - avis automatique', [
+      `Admin : ${logUser(message.author)}`,
+      `Ticket : ${logChannel(message.channel)}`,
+      `Demande : **${ticketRequest.id}**`,
+      `Client : <@${ticketRequest.userId}>`,
+      `Produit : **${ticketRequest.product || 'Non précisé'}**`
+    ], 0x2ECC71);
+  }
+
   if (message.content.startsWith('!')) {
     await message.delete().catch(error => {
       console.error('Impossible de supprimer la commande :', error.message);
@@ -792,7 +848,7 @@ client.on('messageCreate', async message => {
       return deleteLater(reply);
     }
 
-    await sendBotLog('🛠️ Commande admin utilisée', [
+    await sendAdminCommandLog('🛠️ Commande admin utilisée', [
       `Admin : ${logUser(message.author)}`,
       `Salon : ${logChannel(message.channel)}`,
       `Commande : \`${message.content.slice(0, 1000)}\``
@@ -819,9 +875,7 @@ client.on('messageCreate', async message => {
         'PayPal 🅿️ • Revolut 💳 • Virement bancaire 🏦',
         '',
         '**Tarifs**',
-        '```',
-        productListText(),
-        '```'
+        productListText({ boldPoints: true })
       ].join('\n'))
       .setThumbnail(message.guild.iconURL({ dynamic: true }))
       .setFooter({ text: 'Portefeuille • Recharge • Commande • Support' });
@@ -1115,20 +1169,7 @@ client.on('messageCreate', async message => {
   }
 
   if (message.content === '!avis') {
-    const avisEmbed = new EmbedBuilder()
-      .setColor(0xD4AF37)
-      .setTitle('Merci pour ta commande')
-      .setDescription([
-        'Ta commande est terminée, merci pour ta confiance !',
-        '',
-        'N’hésite pas à laisser un avis ici : <#1497652398259306516>',
-        'Et si tu as apprécié le service, parle-en autour de toi !',
-        '',
-        'Bon appétit 😋'
-      ].join('\n'))
-      .setFooter({ text: 'Boutique' });
-
-    return message.channel.send({ embeds: [avisEmbed] });
+    return message.channel.send({ embeds: [buildAvisEmbed()] });
   }
 
   if (message.content.startsWith('!wallet')) {
