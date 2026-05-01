@@ -407,26 +407,26 @@ async function validateReferralReward(user, ticketRequest, amountText) {
 }
 
 const products = [
-  { label: 'McDonald\'s 50-74 points', description: '2€', value: '50_74', price: 2 },
-  { label: 'McDonald\'s 75-99 points', description: '4€', value: '75_99', price: 4 },
-  { label: 'McDonald\'s 100-124 points', description: '6€', value: '100_124', price: 6 },
-  { label: 'McDonald\'s 125-149 points', description: '7€', value: '125_149', price: 7 },
-  { label: 'McDonald\'s 150-174 points', description: '8€', value: '150_174', price: 8 },
-  { label: 'McDonald\'s 175-199 points', description: '10€', value: '175_199', price: 10 },
-  { label: 'McDonald\'s 200-224 points', description: '11€', value: '200_224', price: 11 },
-  { label: 'McDonald\'s 225-249 points', description: '12€', value: '225_249', price: 12 },
-  { label: 'McDonald\'s 250-274 points', description: '13€', value: '250_274', price: 13 },
-  { label: 'McDonald\'s 275-299 points', description: '14€', value: '275_299', price: 14 },
-  { label: 'McDonald\'s 300-324 points', description: '15€', value: '300_324', price: 15 },
-  { label: 'McDonald\'s 325-349 points', description: '16€', value: '325_349', price: 16 },
-  { label: 'McDonald\'s 350-374 points', description: '17€', value: '350_374', price: 17 },
-  { label: 'McDonald\'s 400-499 points', description: '18€', value: '400_499', price: 18 },
-  { label: 'McDonald\'s 500-599 points', description: '21€', value: '500_599', price: 21 },
-  { label: 'McDonald\'s 600-699 points', description: '30€', value: '600_699', price: 30 },
-  { label: 'McDonald\'s 700-799 points', description: '34€', value: '700_799', price: 34 },
-  { label: 'McDonald\'s 800-899 points', description: '40€', value: '800_899', price: 40 },
-  { label: 'McDonald\'s 1000-1099 points', description: '51€', value: '1000_1099', price: 51 },
-  { label: 'McDonald\'s 1100-1199 points', description: '67€', value: '1100_1199', price: 67 }
+  { label: 'McDonald\'s 50-74 Points', description: '2€', value: '50_74', price: 2 },
+  { label: 'McDonald\'s 75-99 Points', description: '4€', value: '75_99', price: 4 },
+  { label: 'McDonald\'s 100-124 Points', description: '6€', value: '100_124', price: 6 },
+  { label: 'McDonald\'s 125-149 Points', description: '7€', value: '125_149', price: 7 },
+  { label: 'McDonald\'s 150-174 Points', description: '8€', value: '150_174', price: 8 },
+  { label: 'McDonald\'s 175-199 Points', description: '10€', value: '175_199', price: 10 },
+  { label: 'McDonald\'s 200-224 Points', description: '11€', value: '200_224', price: 11 },
+  { label: 'McDonald\'s 225-249 Points', description: '12€', value: '225_249', price: 12 },
+  { label: 'McDonald\'s 250-274 Points', description: '13€', value: '250_274', price: 13 },
+  { label: 'McDonald\'s 275-299 Points', description: '14€', value: '275_299', price: 14 },
+  { label: 'McDonald\'s 300-324 Points', description: '15€', value: '300_324', price: 15 },
+  { label: 'McDonald\'s 325-349 Points', description: '16€', value: '325_349', price: 16 },
+  { label: 'McDonald\'s 350-374 Points', description: '17€', value: '350_374', price: 17 },
+  { label: 'McDonald\'s 400-499 Points', description: '18€', value: '400_499', price: 18 },
+  { label: 'McDonald\'s 500-599 Points', description: '21€', value: '500_599', price: 21 },
+  { label: 'McDonald\'s 600-699 Points', description: '30€', value: '600_699', price: 30 },
+  { label: 'McDonald\'s 700-799 Points', description: '34€', value: '700_799', price: 34 },
+  { label: 'McDonald\'s 800-899 Points', description: '40€', value: '800_899', price: 40 },
+  { label: 'McDonald\'s 1000-1099 Points', description: '51€', value: '1000_1099', price: 51 },
+  { label: 'McDonald\'s 1100-1199 Points', description: '67€', value: '1100_1199', price: 67 }
 ];
 
 const prices = Object.fromEntries(products.map(product => [product.value, product.price]));
@@ -551,12 +551,12 @@ async function replyTemp(interaction, options, delay = DELETE_DELAY) {
 }
 
 function productListText(options = {}) {
-  const { boldPoints = false } = options;
+  const { boldRanges = false } = options;
 
   return products
     .map(product => {
-      const label = boldPoints
-        ? product.label.replace(/\bpoints\b/g, '**points**')
+      const label = boldRanges
+        ? product.label.replace(/\b\d+-\d+\b/g, match => `**${match}**`)
         : product.label;
 
       return `💰  ${label.padEnd(15, ' ')} →   ${product.description}`;
@@ -604,8 +604,12 @@ function sendBotLog(title, lines, color = 0x3498DB) {
   return sendLogToChannel(LOG_CHANNEL_ID, title, lines, color);
 }
 
-function sendAdminCommandLog(title, lines, color = 0x95A5A6) {
+function sendAdminLog(title, lines, color = 0x95A5A6) {
   return sendLogToChannel(ADMIN_COMMAND_LOG_CHANNEL_ID, title, lines, color);
+}
+
+function sendAdminCommandLog(title, lines, color = 0x95A5A6) {
+  return sendAdminLog(title, lines, color);
 }
 
 function logUser(user) {
@@ -815,7 +819,7 @@ client.on('messageCreate', async message => {
 
     await message.channel.send({ embeds: [buildAvisEmbed()] });
 
-    await sendBotLog('📦 Produit envoyé - avis automatique', [
+    await sendAdminLog('📦 Produit envoyé - avis automatique', [
       `Admin : ${logUser(message.author)}`,
       `Ticket : ${logChannel(message.channel)}`,
       `Demande : **${ticketRequest.id}**`,
@@ -875,7 +879,7 @@ client.on('messageCreate', async message => {
         'PayPal 🅿️ • Revolut 💳 • Virement bancaire 🏦',
         '',
         '**Tarifs**',
-        productListText({ boldPoints: true })
+        productListText({ boldRanges: true })
       ].join('\n'))
       .setThumbnail(message.guild.iconURL({ dynamic: true }))
       .setFooter({ text: 'Portefeuille • Recharge • Commande • Support' });
@@ -917,7 +921,7 @@ client.on('messageCreate', async message => {
       if (messages.size < 100) break;
     }
 
-    await sendBotLog('🧹 Salon nettoyé', [
+    await sendAdminLog('🧹 Salon nettoyé', [
       `Admin : ${logUser(message.author)}`,
       `Salon : ${logChannel(message.channel)}`,
       `Messages supprimés : **${deletedCount}**`
@@ -1193,7 +1197,7 @@ client.on('messageCreate', async message => {
       saveWallets();
     }
 
-    await sendBotLog('👛 Portefeuille consulté', [
+    await sendAdminLog('👛 Portefeuille consulté', [
       `Admin : ${logUser(message.author)}`,
       `Membre : ${logUser(user)}`,
       `Solde : **${wallets[user.id].balance.toFixed(2)}€**`,
@@ -1249,7 +1253,7 @@ client.on('messageCreate', async message => {
         ].join('\n')
       : 'Aucun parrain détecté pour ce membre.';
 
-    await sendBotLog('👥 Parrainage consulté', [
+    await sendAdminLog('👥 Parrainage consulté', [
       `Admin : ${logUser(message.author)}`,
       `Membre : ${logUser(user)}`,
       `Validés : **${summary.validated.length}**`,
@@ -1300,7 +1304,7 @@ client.on('messageCreate', async message => {
       `✅ Validés : **${row.validated}** • ⏳ En attente : **${row.pending}**`
     ].join('\n'));
 
-    await sendBotLog('🏆 Top parrainage consulté', [
+    await sendAdminLog('🏆 Top parrainage consulté', [
       `Admin : ${logUser(message.author)}`,
       `Salon : ${logChannel(message.channel)}`
     ], 0x3498DB);
@@ -1381,7 +1385,7 @@ client.on('messageCreate', async message => {
         ]
       });
 
-      await sendBotLog('✅ Recharge validée', [
+      await sendAdminLog('✅ Recharge validée', [
         `Admin : ${logUser(message.author)}`,
         `Client : ${logUser(user)}`,
         `Demande : **${ticketRequest.id}**`,
@@ -1419,7 +1423,7 @@ client.on('messageCreate', async message => {
       return;
     }
 
-    await sendBotLog('💰 Solde ajouté', [
+    await sendAdminLog('💰 Solde ajouté', [
       `Admin : ${logUser(message.author)}`,
       `Membre : ${logUser(user)}`,
       `Montant ajouté : **${amount.toFixed(2)}€**`,
@@ -1459,7 +1463,7 @@ client.on('messageCreate', async message => {
     wallets[user.id].balance -= amount;
     saveWallets();
 
-    await sendBotLog('💸 Solde retiré', [
+    await sendAdminLog('💸 Solde retiré', [
       `Admin : ${logUser(message.author)}`,
       `Membre : ${logUser(user)}`,
       `Montant retiré : **${amount.toFixed(2)}€**`,
