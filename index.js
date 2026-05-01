@@ -59,6 +59,77 @@ const NO_NOTE_TEXT = '❗❗ Ne mettre aucune note lors du paiement ❗❗';
 const WALLET_FILE = 'wallets.json';
 const WALLET_BACKUP_DIR = path.join('backups', 'wallets');
 const WALLET_BACKUP_LIMIT = 50;
+const WARNINGS_FILE = 'warnings.json';
+const AUTO_MOD_NOTICE_DELAY = 7_000;
+const WARNING_SANCTIONS = [
+  { warns: 1, label: 'Rappel en MP', timeout: 0 },
+  { warns: 2, label: 'Timeout 10 minutes', timeout: 10 * 60 * 1000 },
+  { warns: 3, label: 'Timeout 1 heure', timeout: 60 * 60 * 1000 },
+  { warns: 4, label: 'Timeout 24 heures', timeout: 24 * 60 * 60 * 1000 },
+  { warns: 5, label: 'Ban définitif', ban: true }
+];
+
+const DISCORD_AD_REGEXES = [
+  /(?:https?:\/\/)?(?:www\.)?(?:discord\.gg|discord(?:app)?\.com\/invite)\/[a-z0-9-]+/i,
+  /\b(?:rejoins?|venez|viens|join)\b.{0,40}\b(?:mon|notre|un)?\s*(?:serveur|discord)\b/i,
+  /\bmp\s+pour\s+(?:serveur|discord)\b/i,
+  /\b(?:mon|notre)\s+serveur\s+discord\b/i
+];
+
+const SOCIAL_LINK_REGEX = /(?:https?:\/\/)?(?:www\.)?(?:tiktok\.com|vm\.tiktok\.com|instagram\.com|instagr\.am|snapchat\.com|youtube\.com|youtu\.be|x\.com|twitter\.com|telegram\.me|t\.me|whatsapp\.com|wa\.me|facebook\.com|fb\.com|twitch\.tv|kick\.com|linktr\.ee|guns\.lol|bio\.link|beacons\.ai|solo\.to)\b/i;
+const SOCIAL_COMPACT_DOMAINS = [
+  'tiktokcom',
+  'vmtiktokcom',
+  'instagramcom',
+  'instagram',
+  'snapchatcom',
+  'youtubecom',
+  'youtubebe',
+  'twittercom',
+  'telegramme',
+  'whatsappcom',
+  'facebookcom',
+  'twitchtv',
+  'kickcom',
+  'linktree',
+  'gunslol',
+  'biolink',
+  'beaconsai',
+  'soloto'
+];
+const SOCIAL_AD_REGEXES = [
+  /\b(?:mon|ma|mes)\s+(?:snap|snapchat|insta|instagram|tiktok|youtube|chaine|chaîne|telegram|twitter|twitch|kick)\b/i,
+  /\b(?:ajoute|ajoutez)\s+moi\s+sur\s+(?:snap|snapchat|insta|instagram|tiktok|telegram|twitter)\b/i,
+  /\b(?:abonne|abonnez|follow)\s+(?:toi|moi)\b/i,
+  /\b(?:va|allez)\s+voir\s+(?:mon|ma)\s+(?:tiktok|insta|instagram|chaine|chaîne|youtube)\b/i
+];
+
+const SEVERE_INSULT_REGEXES = [
+  /\b(?:fils\s+de\s+p(?:ute)?)\b/i,
+  /\b(?:fdp|ntm)\b/i,
+  /\bpute\b/i,
+  /\bsalope\b/i,
+  /\bpetasse\b/i,
+  /\bchiennasse\b/i,
+  /\bencule(?:e|es|s)?\b/i,
+  /\bbatard(?:e|es|s)?\b/i,
+  /\benfoire(?:e|es|s)?\b/i,
+  /\b(?:nique|nike)\s+ta\s+mere\b/i,
+  /\bva\s+te\s+faire\s+foutre\b/i,
+  /\bva\s+crever\b/i,
+  /\bcreve\b/i,
+  /\bsuicide\s+toi\b/i
+];
+const SEVERE_INSULT_COMPACT = [
+  'fdp',
+  'ntm',
+  'filsdepute',
+  'niquetamere',
+  'niketamere',
+  'vatefairefoutre',
+  'vacrever',
+  'suicidetoi'
+];
 
 function ensureDirectory(dirPath) {
   if (!fs.existsSync(dirPath)) {
@@ -185,6 +256,7 @@ function saveJsonFile(fileName, data, options = {}) {
 let wallets = loadJsonFile(WALLET_FILE, {}, { backupDir: WALLET_BACKUP_DIR });
 let requests = loadJsonFile('requests.json', { counter: 0, tickets: {} });
 let referrals = loadJsonFile('referrals.json', { invitedBy: {}, stats: {}, inviteLinks: {} });
+let warnings = loadJsonFile(WARNINGS_FILE, { users: {} });
 
 if (fs.existsSync(WALLET_FILE)) {
   try {
@@ -195,6 +267,7 @@ if (fs.existsSync(WALLET_FILE)) {
 }
 
 if (!referrals.inviteLinks) referrals.inviteLinks = {};
+if (!warnings.users) warnings.users = {};
 
 const pendingRecharges = new Map();
 const guildInviteUses = new Map();
@@ -212,6 +285,10 @@ function saveRequests() {
 
 function saveReferrals() {
   saveJsonFile('referrals.json', referrals);
+}
+
+function saveWarnings() {
+  saveJsonFile(WARNINGS_FILE, warnings);
 }
 
 function isAdminMember(member) {
@@ -959,6 +1036,276 @@ function sendActionLog(member, title, lines, color = 0x3498DB) {
     : sendBotLog(title, lines, color);
 }
 
+function canBypassAutoModeration(member) {
+  return shouldUseStaffLog(member);
+}
+
+function normalizeModerationText(content) {
+  const lowered = String(content || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[@]/g, 'a')
+    .replace(/[!|]/g, 'i')
+    .replace(/[$]/g, 's')
+    .replace(/0/g, 'o')
+    .replace(/3/g, 'e')
+    .replace(/4/g, 'a')
+    .replace(/5/g, 's')
+    .replace(/7/g, 't');
+
+  return {
+    raw: lowered,
+    spaced: lowered.replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim(),
+    compact: lowered.replace(/[^a-z0-9]/g, '')
+  };
+}
+
+function hasDiscordAdvertisement(text) {
+  return (
+    DISCORD_AD_REGEXES.some(regex => regex.test(text.raw) || regex.test(text.spaced)) ||
+    text.compact.includes('discordgg') ||
+    text.compact.includes('discordcominvite') ||
+    text.compact.includes('discordappcominvite')
+  );
+}
+
+function hasSocialAdvertisement(text) {
+  return (
+    SOCIAL_LINK_REGEX.test(text.raw) ||
+    SOCIAL_COMPACT_DOMAINS.some(domain => text.compact.includes(domain)) ||
+    SOCIAL_AD_REGEXES.some(regex => regex.test(text.raw) || regex.test(text.spaced))
+  );
+}
+
+function hasSevereInsult(text) {
+  return (
+    SEVERE_INSULT_REGEXES.some(regex => regex.test(text.spaced)) ||
+    SEVERE_INSULT_COMPACT.some(word => text.compact.includes(word))
+  );
+}
+
+function inspectAutoModeration(content) {
+  const text = normalizeModerationText(content);
+
+  if (hasDiscordAdvertisement(text)) {
+    return {
+      type: 'discord_ad',
+      label: 'Pub serveur Discord',
+      action: 'ban',
+      channelNotice: '🚫 Pub Discord détectée : membre banni.'
+    };
+  }
+
+  if (hasSocialAdvertisement(text)) {
+    return {
+      type: 'social_ad',
+      label: 'Pub réseaux',
+      action: 'dm_notice',
+      channelNotice: '⚠️ Message supprimé : partage de réseau à faire en MP.'
+    };
+  }
+
+  if (hasSevereInsult(text)) {
+    return {
+      type: 'severe_insult',
+      label: 'Insulte interdite',
+      action: 'warn',
+      channelNotice: '⚠️ Message supprimé : insulte interdite.'
+    };
+  }
+
+  return null;
+}
+
+function ensureWarningUser(userId) {
+  if (!warnings.users[userId]) {
+    warnings.users[userId] = {
+      count: 0,
+      entries: []
+    };
+  }
+
+  if (!Array.isArray(warnings.users[userId].entries)) {
+    warnings.users[userId].entries = [];
+  }
+
+  warnings.users[userId].count = warnings.users[userId].entries.length;
+  return warnings.users[userId];
+}
+
+function warningSanctionFor(count) {
+  if (count >= 5) return WARNING_SANCTIONS[4];
+  return WARNING_SANCTIONS.find(sanction => sanction.warns === count) || WARNING_SANCTIONS[0];
+}
+
+function formatDurationMs(duration) {
+  if (!duration) return 'Aucune';
+
+  const minutes = Math.round(duration / 60_000);
+  if (minutes < 60) return `${minutes} minute${minutes > 1 ? 's' : ''}`;
+
+  const hours = Math.round(duration / 3_600_000);
+  return `${hours} heure${hours > 1 ? 's' : ''}`;
+}
+
+async function sendTemporaryChannelNotice(channel, content) {
+  if (!channel || typeof channel.send !== 'function') return;
+
+  const notice = await channel.send(content).catch(() => null);
+  if (notice) deleteLater(notice, AUTO_MOD_NOTICE_DELAY);
+}
+
+async function sendModerationDm(user, title, lines) {
+  return user.send({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(0xE67E22)
+        .setTitle(title)
+        .setDescription(lines.filter(Boolean).join('\n'))
+        .setTimestamp()
+    ]
+  }).then(() => true).catch(() => false);
+}
+
+async function applyWarningSanction(message, violation) {
+  const member = message.member;
+  const userWarnings = ensureWarningUser(message.author.id);
+  const entry = {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    type: violation.type,
+    reason: violation.label,
+    channelId: message.channel.id,
+    guildId: message.guild.id,
+    message: message.content.slice(0, 1000),
+    createdAt: Date.now()
+  };
+
+  userWarnings.entries.push(entry);
+  userWarnings.count = userWarnings.entries.length;
+  userWarnings.lastWarnAt = entry.createdAt;
+  saveWarnings();
+
+  const count = userWarnings.count;
+  const sanction = warningSanctionFor(count);
+  const dmSent = await sendModerationDm(message.author, 'Avertissement automatique', [
+    `Serveur : **${message.guild.name}**`,
+    `Raison : **${violation.label}**`,
+    `Warns : **${count}/5**`,
+    `Sanction : **${sanction.label}**`,
+    '',
+    'Merci de respecter le règlement du serveur.'
+  ]);
+
+  let sanctionResult = sanction.label;
+
+  if (sanction.ban) {
+    await member.ban({ reason: `Auto-mod : 5 warns - ${violation.label}` })
+      .then(() => {
+        sanctionResult = 'Ban définitif appliqué';
+      })
+      .catch(error => {
+        sanctionResult = `Ban impossible : ${error.message}`;
+      });
+  } else if (sanction.timeout) {
+    await member.timeout(sanction.timeout, `Auto-mod : ${count} warns - ${violation.label}`)
+      .then(() => {
+        sanctionResult = `Timeout ${formatDurationMs(sanction.timeout)} appliqué`;
+      })
+      .catch(error => {
+        sanctionResult = `Timeout impossible : ${error.message}`;
+      });
+  }
+
+  await sendTemporaryChannelNotice(
+    message.channel,
+    sanction.ban ? '🚫 Message supprimé : membre banni après 5 warns.' : violation.channelNotice
+  );
+
+  await sendAdminLog('⚠️ Auto-modération - warn', [
+    `Membre : ${logUser(message.author)}`,
+    `Salon : ${logChannel(message.channel)}`,
+    `Raison : **${violation.label}**`,
+    `Warns : **${count}/5**`,
+    `Sanction : **${sanctionResult}**`,
+    dmSent ? 'MP : envoyé' : 'MP : impossible à envoyer',
+    '',
+    `Message : \`${message.content.slice(0, 1000)}\``
+  ], sanction.ban ? 0xE74C3C : 0xE67E22);
+}
+
+async function applyDiscordAdBan(message, violation) {
+  const dmSent = await sendModerationDm(message.author, 'Ban automatique', [
+    `Serveur : **${message.guild.name}**`,
+    'Raison : **Pub serveur Discord**',
+    '',
+    'La publicité pour un serveur Discord est interdite.'
+  ]);
+
+  let banResult = 'Ban définitif appliqué';
+
+  await message.member.ban({ reason: 'Auto-mod : pub serveur Discord' })
+    .catch(error => {
+      banResult = `Ban impossible : ${error.message}`;
+    });
+
+  await sendTemporaryChannelNotice(message.channel, violation.channelNotice);
+
+  await sendAdminLog('🚫 Auto-modération - pub Discord', [
+    `Membre : ${logUser(message.author)}`,
+    `Salon : ${logChannel(message.channel)}`,
+    `Action : **${banResult}**`,
+    dmSent ? 'MP : envoyé' : 'MP : impossible à envoyer',
+    '',
+    `Message : \`${message.content.slice(0, 1000)}\``
+  ], 0xE74C3C);
+}
+
+async function applyDmModerationNotice(message, violation) {
+  const dmSent = await sendModerationDm(message.author, 'Message supprimé', [
+    `Serveur : **${message.guild.name}**`,
+    `Raison : **${violation.label}**`,
+    '',
+    'Les réseaux et liens personnels doivent se partager en MP si besoin.',
+    'Aucun warn n’a été ajouté.'
+  ]);
+
+  await sendTemporaryChannelNotice(message.channel, violation.channelNotice);
+
+  await sendAdminLog('📩 Auto-modération - rappel MP', [
+    `Membre : ${logUser(message.author)}`,
+    `Salon : ${logChannel(message.channel)}`,
+    `Raison : **${violation.label}**`,
+    'Warn : **non**',
+    dmSent ? 'MP : envoyé' : 'MP : impossible à envoyer',
+    '',
+    `Message : \`${message.content.slice(0, 1000)}\``
+  ], 0x3498DB);
+}
+
+async function handleAutoModeration(message) {
+  if (!message.guild || !message.member || !message.content) return false;
+  if (canBypassAutoModeration(message.member)) return false;
+
+  const violation = inspectAutoModeration(message.content);
+  if (!violation) return false;
+
+  await message.delete().catch(() => {});
+
+  if (violation.action === 'ban') {
+    await applyDiscordAdBan(message, violation);
+    return true;
+  }
+
+  if (violation.action === 'dm_notice') {
+    await applyDmModerationNotice(message, violation);
+    return true;
+  }
+
+  await applyWarningSanction(message, violation);
+  return true;
+}
+
 function logUser(user) {
   return `${user} (${user.tag})`;
 }
@@ -1205,6 +1552,8 @@ client.on('messageCreate', async message => {
   if (message.author.bot) return;
 
   try {
+  if (message.guild && await handleAutoModeration(message)) return;
+
   if (!message.guild) {
     const dmRequest = findOpenRechargeRequestByUser(message.author.id);
 
