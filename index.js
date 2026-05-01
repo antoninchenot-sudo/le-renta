@@ -34,6 +34,7 @@ const TICKET_ACCESS_ROLE_ID = '1310384527952056401';
 const TICKET_CATEGORY = '1495800617204187216';
 const ORDER_CATEGORY = '1495800432776446063';
 const SUPPORT_CATEGORY = '1499036733986308146';
+const TICKET_ARCHIVE_CATEGORY = '1499765419399970908';
 const SHOP_CHANNEL_ID = '1310381741218988122';
 const SUPPORT_CHANNEL_ID = '1498434089450078258';
 const LOG_CHANNEL_ID = '1310354201704136747';
@@ -51,7 +52,7 @@ const MCDONALDS_BUTTON_EMOJI = { id: MCDONALDS_EMOJI_ID, name: MCDONALDS_EMOJI_N
 const INFO_IMAGE = process.env.INFO_IMAGE || 'https://media.discordapp.net/attachments/1499072550985269268/1499121030491541585/IMG_1333.jpg?ex=69f4f641&is=69f3a4c1&hm=1f19f9ceb27d07466a27fcb29c1fe6fd35d2699006a35d395e827735eb547bee&=&format=webp&width=623&height=944';
 const PAYPAL_LINK = 'https://paypal.me/AntoninChenot';
 const REVOLUT_LINK = 'https://revolut.me/arthur23320/pocket/vNrIna0VcG';
-const IBAN = 'FR76 2823 3000 0176 1307 4771 273';
+const IBAN = 'FR76 2823 3000 0165 8385 8232 516';
 const NO_NOTE_TEXT = '❗❗ Ne mettre aucune note lors du paiement ❗❗';
 
 let wallets = fs.existsSync('wallets.json')
@@ -461,6 +462,33 @@ function supportTicketPermissionOverwrites(guild, userId) {
   ];
 }
 
+function archivedTicketPermissionOverwrites(guild, ticketRequest) {
+  return [
+    { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+    { id: ADMIN_ROLE_ID, allow: ticketAllow }
+  ];
+}
+
+function ticketParentForType(type) {
+  if (type === 'recharge') return TICKET_CATEGORY;
+  if (type === 'support') return SUPPORT_CATEGORY;
+  return ORDER_CATEGORY;
+}
+
+function restoreTicketPermissionOverwrites(guild, ticketRequest, ownerId) {
+  const resolvedOwnerId = ticketRequest?.userId || ownerId;
+
+  if (ticketRequest?.type === 'recharge') {
+    return adminTicketPermissionOverwrites(guild);
+  }
+
+  if (ticketRequest?.type === 'support') {
+    return supportTicketPermissionOverwrites(guild, resolvedOwnerId);
+  }
+
+  return ticketPermissionOverwrites(guild, resolvedOwnerId);
+}
+
 function canManageTicket(interaction, ownerId) {
   return (
     interaction.user.id === ownerId ||
@@ -478,6 +506,100 @@ function ticketButtons(ownerId) {
       .setEmoji('🗑️')
       .setStyle(ButtonStyle.Danger)
   );
+}
+
+function archivedTicketButtons(ownerId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`reopen_ticket:${ownerId}`)
+      .setLabel('Réouvrir le ticket')
+      .setEmoji('🔓')
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`delete_ticket:${ownerId}`)
+      .setLabel('Supprimer définitivement')
+      .setEmoji('🗑️')
+      .setStyle(ButtonStyle.Danger)
+  );
+}
+
+function isTicketArchived(channel, ticketRequest) {
+  return Boolean(ticketRequest?.archivedAt || channel.parentId === TICKET_ARCHIVE_CATEGORY);
+}
+
+async function archiveTicketChannel(channel, ticketRequest, user, ownerId = ticketRequest?.userId) {
+  const archiveCategory = channel.guild.channels.cache.get(TICKET_ARCHIVE_CATEGORY)
+    || await channel.guild.channels.fetch(TICKET_ARCHIVE_CATEGORY).catch(() => null);
+
+  if (!archiveCategory || archiveCategory.type !== ChannelType.GuildCategory) {
+    throw new Error('Catégorie des tickets supprimés introuvable.');
+  }
+
+  if (ticketRequest) {
+    ticketRequest.originalParentId = ticketRequest.originalParentId || channel.parentId || ticketParentForType(ticketRequest.type);
+    ticketRequest.archivedAt = Date.now();
+    ticketRequest.archivedBy = user.id;
+    saveRequests();
+  }
+
+  await channel.setParent(TICKET_ARCHIVE_CATEGORY, { lockPermissions: false });
+  await channel.permissionOverwrites.set(archivedTicketPermissionOverwrites(channel.guild, ticketRequest));
+
+  if (!channel.name.startsWith('archive-')) {
+    await channel.setName(`archive-${channel.name}`.slice(0, 100)).catch(() => {});
+  }
+
+  await channel.send({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(0xE67E22)
+        .setTitle('Ticket déplacé dans les tickets supprimés')
+        .setDescription([
+          `Déplacé par : ${user}`,
+          ticketRequest ? `Demande : **${ticketRequest.id}**` : 'Demande : inconnue',
+          '',
+          'Tu peux le réouvrir si la suppression était une erreur, ou le supprimer définitivement.'
+        ].join('\n'))
+        .setTimestamp()
+    ],
+    components: [archivedTicketButtons(ownerId)]
+  });
+}
+
+async function reopenTicketChannel(channel, ticketRequest, user, ownerId = ticketRequest?.userId) {
+  const parentId = ticketRequest?.originalParentId || ticketParentForType(ticketRequest?.type);
+  const targetCategory = channel.guild.channels.cache.get(parentId)
+    || await channel.guild.channels.fetch(parentId).catch(() => null);
+
+  if (!targetCategory || targetCategory.type !== ChannelType.GuildCategory) {
+    throw new Error('Catégorie de réouverture introuvable.');
+  }
+
+  await channel.setParent(parentId, { lockPermissions: false });
+  await channel.permissionOverwrites.set(restoreTicketPermissionOverwrites(channel.guild, ticketRequest, ownerId));
+
+  if (channel.name.startsWith('archive-')) {
+    await channel.setName(channel.name.replace(/^archive-/, '').slice(0, 100)).catch(() => {});
+  }
+
+  if (ticketRequest) {
+    ticketRequest.reopenedAt = Date.now();
+    ticketRequest.reopenedBy = user.id;
+    delete ticketRequest.archivedAt;
+    delete ticketRequest.archivedBy;
+    saveRequests();
+  }
+
+  await channel.send({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(0x2ECC71)
+        .setTitle('Ticket réouvert')
+        .setDescription(`Réouvert par : ${user}`)
+        .setTimestamp()
+    ],
+    components: [ticketButtons(ownerId)]
+  });
 }
 
 function sanitizeChannelName(name) {
@@ -1414,10 +1536,26 @@ client.on('messageCreate', async message => {
       }
 
       if (dmSent) {
-        await message.channel.send('✅ Le ticket se fermera dans 10 secondes.');
-        delete requests.tickets[message.channel.id];
-        saveRequests();
-        setTimeout(() => message.channel.delete().catch(() => {}), 10_000);
+        await message.channel.send('✅ Le ticket sera déplacé dans les tickets supprimés dans 10 secondes.');
+        setTimeout(() => {
+          archiveTicketChannel(message.channel, ticketRequest, message.author, ticketRequest.userId)
+            .then(() => {
+              sendAdminLog('📁 Ticket recharge archivé', [
+                `Admin : ${logUser(message.author)}`,
+                `Ticket : ${logChannel(message.channel)}`,
+                `Demande : **${ticketRequest.id}**`,
+                `Client : <@${ticketRequest.userId}>`
+              ], 0xE67E22);
+            })
+            .catch(error => {
+              sendAdminLog('⚠️ Archivage ticket impossible', [
+                `Admin : ${logUser(message.author)}`,
+                `Ticket : ${logChannel(message.channel)}`,
+                `Demande : **${ticketRequest.id}**`,
+                `Erreur : \`${error.message}\``
+              ], 0xE74C3C);
+            });
+        }, 10_000);
       }
 
       return;
@@ -1566,17 +1704,26 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (interaction.customId.startsWith('delete_ticket:')) {
       const ownerId = interaction.customId.split(':')[1];
-      if (!canManageTicket(interaction, ownerId)) {
+      const ticketRequest = getTicketRequest(interaction.channel.id);
+      const archived = isTicketArchived(interaction.channel, ticketRequest);
+
+      if (archived ? !isAdminMember(interaction.member) : !canManageTicket(interaction, ownerId)) {
         return interaction.reply({ content: '❌ Tu ne peux pas supprimer ce ticket.', ephemeral: true });
       }
 
       const confirmRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`confirm_delete_ticket:${ownerId}`).setLabel('Confirmer').setEmoji('✅').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder()
+          .setCustomId(`confirm_delete_ticket:${ownerId}`)
+          .setLabel(archived ? 'Supprimer définitivement' : 'Confirmer')
+          .setEmoji('✅')
+          .setStyle(ButtonStyle.Danger),
         new ButtonBuilder().setCustomId('cancel_delete_ticket').setLabel('Annuler').setEmoji('❌').setStyle(ButtonStyle.Secondary)
       );
 
       return interaction.reply({
-        content: '⚠️ Confirmer la suppression de ce ticket ?',
+        content: archived
+          ? '⚠️ Confirmer la suppression définitive de ce ticket ?'
+          : '⚠️ Confirmer la suppression de ce ticket ? Il sera déplacé dans les tickets supprimés.',
         components: [confirmRow],
         ephemeral: true
       });
@@ -1584,28 +1731,103 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (interaction.customId.startsWith('confirm_delete_ticket:')) {
       const ownerId = interaction.customId.split(':')[1];
-      if (!canManageTicket(interaction, ownerId)) {
+      const ticketRequest = getTicketRequest(interaction.channel.id);
+      const archived = isTicketArchived(interaction.channel, ticketRequest);
+
+      if (archived ? !isAdminMember(interaction.member) : !canManageTicket(interaction, ownerId)) {
         return interaction.reply({ content: '❌ Tu ne peux pas supprimer ce ticket.', ephemeral: true });
       }
 
-      const ticketRequest = getTicketRequest(interaction.channel.id);
-      sendBotLog('🗑️ Ticket supprimé', [
+      if (archived) {
+        sendBotLog('🗑️ Ticket supprimé définitivement', [
+          `Par : ${logUser(interaction.user)}`,
+          `Ticket : ${logChannel(interaction.channel)}`,
+          ticketRequest ? `Demande : **${ticketRequest.id}**` : 'Demande : inconnue',
+          ticketRequest ? `Type : **${ticketRequest.type}**` : null,
+          ticketRequest ? `Client : <@${ticketRequest.userId}>` : null
+        ], 0xE74C3C);
+
+        delete requests.tickets[interaction.channel.id];
+        saveRequests();
+        await interaction.reply({ content: '🗑️ Ticket supprimé définitivement dans 5 secondes...', ephemeral: true });
+        setTimeout(() => interaction.channel.delete().catch(() => {}), 5000);
+        return;
+      }
+
+      try {
+        await interaction.update({ content: '📁 Ticket déplacé dans les tickets supprimés.', components: [] });
+        await archiveTicketChannel(interaction.channel, ticketRequest, interaction.user, ownerId);
+      } catch (error) {
+        const errorReply = {
+          content: `❌ Impossible de déplacer le ticket : ${error.message}`,
+          ephemeral: true
+        };
+
+        if (interaction.replied || interaction.deferred) {
+          await interaction.followUp(errorReply).catch(() => {});
+        } else {
+          await interaction.reply(errorReply).catch(() => {});
+        }
+
+        return;
+      }
+
+      sendBotLog('📁 Ticket déplacé dans les tickets supprimés', [
         `Par : ${logUser(interaction.user)}`,
         `Ticket : ${logChannel(interaction.channel)}`,
         ticketRequest ? `Demande : **${ticketRequest.id}**` : 'Demande : inconnue',
         ticketRequest ? `Type : **${ticketRequest.type}**` : null,
         ticketRequest ? `Client : <@${ticketRequest.userId}>` : null
-      ], 0xE74C3C);
-
-      delete requests.tickets[interaction.channel.id];
-      saveRequests();
-      await interaction.reply({ content: '🗑️ Ticket supprimé dans 5 secondes...', ephemeral: true });
-      setTimeout(() => interaction.channel.delete().catch(() => {}), 5000);
+      ], 0xE67E22);
       return;
     }
 
     if (interaction.customId === 'cancel_delete_ticket') {
       return interaction.update({ content: '✅ Suppression annulée.', components: [] });
+    }
+
+    if (interaction.customId.startsWith('reopen_ticket:')) {
+      const ownerId = interaction.customId.split(':')[1];
+      if (!isAdminMember(interaction.member)) {
+        return interaction.reply({ content: '❌ Tu ne peux pas réouvrir ce ticket.', ephemeral: true });
+      }
+
+      const ticketRequest = getTicketRequest(interaction.channel.id);
+
+      if (!ticketRequest) {
+        return interaction.reply({
+          content: '❌ Impossible de retrouver les informations de ce ticket.',
+          ephemeral: true
+        });
+      }
+
+      try {
+        await interaction.update({ content: '🔓 Ticket réouvert.', embeds: [], components: [] });
+        await reopenTicketChannel(interaction.channel, ticketRequest, interaction.user, ownerId);
+      } catch (error) {
+        const errorReply = {
+          content: `❌ Impossible de réouvrir le ticket : ${error.message}`,
+          ephemeral: true
+        };
+
+        if (interaction.replied || interaction.deferred) {
+          await interaction.followUp(errorReply).catch(() => {});
+        } else {
+          await interaction.reply(errorReply).catch(() => {});
+        }
+
+        return;
+      }
+
+      sendBotLog('🔓 Ticket réouvert', [
+        `Par : ${logUser(interaction.user)}`,
+        `Ticket : ${logChannel(interaction.channel)}`,
+        `Demande : **${ticketRequest.id}**`,
+        `Type : **${ticketRequest.type}**`,
+        `Client : <@${ticketRequest.userId}>`
+      ], 0x2ECC71);
+
+      return;
     }
 
     if (interaction.customId === 'open_support_ticket') {
