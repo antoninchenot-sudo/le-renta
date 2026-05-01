@@ -44,6 +44,7 @@ const INVITE_ANNOUNCE_CHANNEL_ID = '1310355769824383059';
 const INVITE_ADMIN_CHANNEL_ID = '1499523428112142568';
 const RULES_ROLE_ID = '1310359454377840650';
 const DELETE_DELAY = 10_000;
+const ARCHIVED_TICKET_TTL = 24 * 60 * 60 * 1000;
 
 const SHOP_EMOJI = '🛒';
 const MCDONALDS_EMOJI_ID = '1498440076257136830';
@@ -198,6 +199,7 @@ if (!referrals.inviteLinks) referrals.inviteLinks = {};
 const pendingRecharges = new Map();
 const guildInviteUses = new Map();
 const crashReportCooldowns = new Map();
+const archivedTicketCleanupTimers = new Map();
 const CRASH_LOG_COOLDOWN = 60_000;
 
 function saveWallets() {
@@ -658,6 +660,77 @@ function isTicketArchived(channel, ticketRequest) {
   return Boolean(ticketRequest?.archivedAt || channel.parentId === TICKET_ARCHIVE_CATEGORY);
 }
 
+function clearArchivedTicketCleanup(channelId) {
+  const timer = archivedTicketCleanupTimers.get(channelId);
+  if (!timer) return;
+
+  clearTimeout(timer);
+  archivedTicketCleanupTimers.delete(channelId);
+}
+
+function scheduleArchivedTicketCleanup(channelId, archivedAt = Date.now()) {
+  clearArchivedTicketCleanup(channelId);
+
+  const deleteAt = Number(archivedAt) + ARCHIVED_TICKET_TTL;
+  const delay = Math.max(deleteAt - Date.now(), 0);
+  const timer = setTimeout(() => {
+    deleteArchivedTicketChannel(channelId, '24h écoulées')
+      .catch(error => reportCrash('Suppression auto ticket archivé impossible', error, [
+        `Ticket : <#${channelId}> (${channelId})`
+      ]));
+  }, delay);
+
+  archivedTicketCleanupTimers.set(channelId, timer);
+}
+
+async function deleteArchivedTicketChannel(channelId, reason) {
+  clearArchivedTicketCleanup(channelId);
+
+  const ticketRequest = getTicketRequest(channelId);
+  const channel = client.channels.cache.get(channelId)
+    || await client.channels.fetch(channelId).catch(() => null);
+
+  if (!channel) {
+    if (ticketRequest?.archivedAt) {
+      delete requests.tickets[channelId];
+      saveRequests();
+    }
+    return;
+  }
+
+  if (!isTicketArchived(channel, ticketRequest)) return;
+
+  await sendAdminLog('🗑️ Ticket supprimé automatiquement', [
+    `Raison : **${reason}**`,
+    `Ticket : ${logChannel(channel)}`,
+    ticketRequest ? `Demande : **${ticketRequest.id}**` : 'Demande : inconnue',
+    ticketRequest ? `Type : **${ticketRequest.type}**` : null,
+    ticketRequest ? `Client : <@${ticketRequest.userId}>` : null
+  ], 0xE74C3C);
+
+  const deleted = await channel.delete(`Ticket archivé supprimé automatiquement : ${reason}`)
+    .then(() => true)
+    .catch(async error => {
+      await reportCrash('Suppression auto ticket archivé impossible', error, [
+        `Ticket : ${logChannel(channel)}`,
+        ticketRequest ? `Demande : **${ticketRequest.id}**` : 'Demande : inconnue'
+      ]);
+      return false;
+    });
+
+  if (!deleted) return;
+
+  delete requests.tickets[channelId];
+  saveRequests();
+}
+
+function scheduleArchivedTicketCleanups() {
+  Object.entries(requests.tickets || {}).forEach(([channelId, ticketRequest]) => {
+    if (!ticketRequest?.archivedAt) return;
+    scheduleArchivedTicketCleanup(channelId, ticketRequest.archivedAt);
+  });
+}
+
 async function archiveTicketChannel(channel, ticketRequest, user, ownerId = ticketRequest?.userId) {
   const archiveCategory = channel.guild.channels.cache.get(TICKET_ARCHIVE_CATEGORY)
     || await channel.guild.channels.fetch(TICKET_ARCHIVE_CATEGORY).catch(() => null);
@@ -689,12 +762,16 @@ async function archiveTicketChannel(channel, ticketRequest, user, ownerId = tick
           `Déplacé par : ${user}`,
           ticketRequest ? `Demande : **${ticketRequest.id}**` : 'Demande : inconnue',
           '',
-          'Tu peux le réouvrir si la suppression était une erreur, ou le supprimer définitivement.'
+          'Tu peux le réouvrir si la suppression était une erreur, ou le supprimer définitivement.',
+          '',
+          'Sans réouverture, il sera supprimé automatiquement au bout de 24h.'
         ].join('\n'))
         .setTimestamp()
     ],
     components: [archivedTicketButtons(ownerId)]
   });
+
+  scheduleArchivedTicketCleanup(channel.id, ticketRequest?.archivedAt || Date.now());
 }
 
 async function reopenTicketChannel(channel, ticketRequest, user, ownerId = ticketRequest?.userId) {
@@ -714,6 +791,7 @@ async function reopenTicketChannel(channel, ticketRequest, user, ownerId = ticke
   }
 
   if (ticketRequest) {
+    clearArchivedTicketCleanup(channel.id);
     ticketRequest.reopenedAt = Date.now();
     ticketRequest.reopenedBy = user.id;
     delete ticketRequest.archivedAt;
@@ -1045,6 +1123,7 @@ client.once('ready', async () => {
     console.log('Bot connecte');
     normalizeReferralOwnersFromPersonalLinks();
     await Promise.all(client.guilds.cache.map(guild => cacheGuildInvites(guild)));
+    scheduleArchivedTicketCleanups();
     sendBotLog('🟢 Bot connecté', `Connecté en tant que **${client.user.tag}**`, 0x2ECC71);
   } catch (error) {
     await reportCrash('Erreur au démarrage ready', error);
@@ -1990,6 +2069,8 @@ client.on(Events.InteractionCreate, async interaction => {
       }
 
       if (archived) {
+        clearArchivedTicketCleanup(interaction.channel.id);
+
         sendAdminLog('🗑️ Ticket supprimé définitivement', [
           `Par : ${logUser(interaction.user)}`,
           `Ticket : ${logChannel(interaction.channel)}`,
