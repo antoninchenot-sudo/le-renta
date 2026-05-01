@@ -34,6 +34,7 @@ const STAFF_ROLE_ID = '1310342652058800138';
 const TICKET_ACCESS_ROLE_ID = '1310384527952056401';
 const TICKET_CATEGORY = '1495800617204187216';
 const ORDER_CATEGORY = '1495800432776446063';
+const ORDER_DONE_CATEGORY = '1499779941934436403';
 const SUPPORT_CATEGORY = '1499036733986308146';
 const TICKET_ARCHIVE_CATEGORY = '1499765419399970908';
 const SHOP_CHANNEL_ID = '1310381741218988122';
@@ -652,6 +653,7 @@ function ticketPermissionOverwrites(guild, userId) {
     { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
     { id: userId, allow: ticketAllow },
     { id: STAFF_ROLE_ID, allow: ticketAllow },
+    { id: TICKET_ACCESS_ROLE_ID, allow: ticketAllow },
     { id: ADMIN_ROLE_ID, allow: ticketAllow }
   ];
 }
@@ -664,6 +666,15 @@ function adminTicketPermissionOverwrites(guild) {
 }
 
 function supportTicketPermissionOverwrites(guild, userId) {
+  return [
+    { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+    { id: userId, allow: ticketAllow },
+    { id: TICKET_ACCESS_ROLE_ID, allow: ticketAllow },
+    { id: ADMIN_ROLE_ID, allow: ticketAllow }
+  ];
+}
+
+function completedOrderTicketPermissionOverwrites(guild, userId) {
   return [
     { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
     { id: userId, allow: ticketAllow },
@@ -708,6 +719,13 @@ function canManageTicket(interaction, ownerId) {
   );
 }
 
+function canCompleteOrderTicket(member) {
+  return Boolean(
+    isAdminMember(member) ||
+    member?.roles?.cache?.has(TICKET_ACCESS_ROLE_ID)
+  );
+}
+
 function ticketButtons(ownerId) {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -716,6 +734,29 @@ function ticketButtons(ownerId) {
       .setEmoji('🗑️')
       .setStyle(ButtonStyle.Danger)
   );
+}
+
+function orderTicketButtons(ownerId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`complete_order:${ownerId}`)
+      .setLabel('Commande terminée')
+      .setEmoji('✅')
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`delete_ticket:${ownerId}`)
+      .setLabel('Supprimer le ticket')
+      .setEmoji('🗑️')
+      .setStyle(ButtonStyle.Danger)
+  );
+}
+
+function ticketButtonsForRequest(ticketRequest, ownerId) {
+  if (ticketRequest?.type === 'commande' && !ticketRequest.completedAt) {
+    return orderTicketButtons(ownerId);
+  }
+
+  return ticketButtons(ownerId);
 }
 
 function archivedTicketButtons(ownerId) {
@@ -884,8 +925,36 @@ async function reopenTicketChannel(channel, ticketRequest, user, ownerId = ticke
         .setDescription(`Réouvert par : ${user}`)
         .setTimestamp()
     ],
-    components: [ticketButtons(ownerId)]
+    components: [ticketButtonsForRequest(ticketRequest, ownerId)]
   });
+}
+
+async function completeOrderTicketChannel(channel, ticketRequest, user, ownerId = ticketRequest?.userId) {
+  const doneCategory = channel.guild.channels.cache.get(ORDER_DONE_CATEGORY)
+    || await channel.guild.channels.fetch(ORDER_DONE_CATEGORY).catch(() => null);
+
+  if (!doneCategory || doneCategory.type !== ChannelType.GuildCategory) {
+    throw new Error('Catégorie des commandes terminées introuvable.');
+  }
+
+  const resolvedOwnerId = ticketRequest?.userId || ownerId;
+
+  await channel.setParent(ORDER_DONE_CATEGORY, { lockPermissions: false });
+  await channel.permissionOverwrites.set(completedOrderTicketPermissionOverwrites(channel.guild, resolvedOwnerId));
+
+  if (!channel.name.startsWith('termine-')) {
+    await channel.setName(`termine-${channel.name}`.slice(0, 100)).catch(() => {});
+  }
+
+  if (ticketRequest) {
+    ticketRequest.completedAt = Date.now();
+    ticketRequest.completedBy = user.id;
+    ticketRequest.completedParentId = ORDER_DONE_CATEGORY;
+    ticketRequest.originalParentId = ORDER_DONE_CATEGORY;
+    saveRequests();
+  }
+
+  await channel.send({ embeds: [buildAvisEmbed()] });
 }
 
 function sanitizeChannelName(name) {
@@ -1232,6 +1301,93 @@ async function applyWarningSanction(message, violation) {
     '',
     `Message : \`${message.content.slice(0, 1000)}\``
   ], sanction.ban ? 0xE74C3C : 0xE67E22);
+}
+
+function addManualWarning(userId, data) {
+  const userWarnings = ensureWarningUser(userId);
+  const entry = {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    type: 'manual',
+    reason: data.reason || 'Aucune raison précisée',
+    moderatorId: data.moderatorId,
+    channelId: data.channelId,
+    guildId: data.guildId,
+    createdAt: Date.now()
+  };
+
+  userWarnings.entries.push(entry);
+  userWarnings.count = userWarnings.entries.length;
+  userWarnings.lastWarnAt = entry.createdAt;
+  saveWarnings();
+
+  return { userWarnings, entry };
+}
+
+function removeLatestWarnings(userId, amount = 1) {
+  const userWarnings = ensureWarningUser(userId);
+  const safeAmount = Math.max(1, Math.min(Number(amount) || 1, userWarnings.entries.length));
+  const removed = userWarnings.entries.splice(-safeAmount, safeAmount);
+
+  userWarnings.count = userWarnings.entries.length;
+  userWarnings.lastWarnAt = userWarnings.entries.at(-1)?.createdAt || null;
+  saveWarnings();
+
+  return removed;
+}
+
+function clearUserWarnings(userId) {
+  const userWarnings = ensureWarningUser(userId);
+  const removedCount = userWarnings.entries.length;
+
+  userWarnings.entries = [];
+  userWarnings.count = 0;
+  userWarnings.lastWarnAt = null;
+  saveWarnings();
+
+  return removedCount;
+}
+
+async function applyManualWarningSanction(guild, member, user, count, reason, moderator) {
+  const sanction = warningSanctionFor(count);
+  const dmSent = await sendModerationDm(user, 'Avertissement reçu', [
+    `Serveur : **${guild.name}**`,
+    `Raison : **${reason}**`,
+    `Warns : **${count}/5**`,
+    `Sanction : **${sanction.label}**`,
+    `Modérateur : **${moderator.tag}**`,
+    '',
+    'Merci de respecter le règlement du serveur.'
+  ]);
+
+  let sanctionResult = sanction.label;
+
+  if (sanction.ban) {
+    await member.ban({ reason: `Warn manuel : 5 warns - ${reason}` })
+      .then(() => {
+        sanctionResult = 'Ban définitif appliqué';
+      })
+      .catch(error => {
+        sanctionResult = `Ban impossible : ${error.message}`;
+      });
+  } else if (sanction.timeout) {
+    await member.timeout(sanction.timeout, `Warn manuel : ${count} warns - ${reason}`)
+      .then(() => {
+        sanctionResult = `Timeout ${formatDurationMs(sanction.timeout)} appliqué`;
+      })
+      .catch(error => {
+        sanctionResult = `Timeout impossible : ${error.message}`;
+      });
+  }
+
+  return { sanction, sanctionResult, dmSent };
+}
+
+function formatWarningEntry(entry, index) {
+  const date = entry.createdAt ? `<t:${Math.floor(entry.createdAt / 1000)}:f>` : 'Date inconnue';
+  const moderator = entry.moderatorId ? ` • par <@${entry.moderatorId}>` : '';
+  const reason = entry.reason || 'Aucune raison précisée';
+
+  return `**${index}.** ${date}${moderator}\n${reason}`;
 }
 
 async function applyDiscordAdBan(message, violation) {
@@ -1601,30 +1757,6 @@ client.on('messageCreate', async message => {
     ].join('\n'));
   }
 
-  const ticketRequest = getTicketRequest(message.channel.id);
-
-  if (
-    ticketRequest?.type === 'commande' &&
-    message.attachments.size > 0 &&
-    message.member?.roles.cache.has(ADMIN_ROLE_ID) &&
-    !ticketRequest.avisSentAt
-  ) {
-    ticketRequest.avisSentAt = Date.now();
-    ticketRequest.productSentBy = message.author.id;
-    ticketRequest.productSentMessageId = message.id;
-    saveRequests();
-
-    await message.channel.send({ embeds: [buildAvisEmbed()] });
-
-    await sendAdminLog('📦 Produit envoyé - avis automatique', [
-      `Admin : ${logUser(message.author)}`,
-      `Ticket : ${logChannel(message.channel)}`,
-      `Demande : **${ticketRequest.id}**`,
-      `Client : <@${ticketRequest.userId}>`,
-      `Produit : **${ticketRequest.product || 'Non précisé'}**`
-    ], 0x2ECC71);
-  }
-
   if (message.content.startsWith('!')) {
     await message.delete().catch(error => {
       console.error('Impossible de supprimer la commande :', error.message);
@@ -1971,6 +2103,227 @@ client.on('messageCreate', async message => {
 
   if (message.content === '!avis') {
     return message.channel.send({ embeds: [buildAvisEmbed()] });
+  }
+
+  if (message.content.startsWith('!warnings')) {
+    const user = message.mentions.users.first();
+
+    if (!user) {
+      const reply = await message.channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0xE74C3C)
+            .setTitle('❌ Commande invalide')
+            .setDescription('Utilisation : `!warnings @membre`')
+        ]
+      });
+
+      return deleteLater(reply);
+    }
+
+    const userWarnings = ensureWarningUser(user.id);
+    const entries = userWarnings.entries || [];
+    const recentWarnings = entries.length
+      ? entries
+          .slice(-10)
+          .reverse()
+          .map((entry, index) => formatWarningEntry(entry, entries.length - index))
+          .join('\n\n')
+      : 'Aucun warn enregistré.';
+
+    await sendAdminLog('⚠️ Warns consultés', [
+      `Admin : ${logUser(message.author)}`,
+      `Membre : ${logUser(user)}`,
+      `Warns : **${entries.length}/5**`,
+      `Salon : ${logChannel(message.channel)}`
+    ], 0x3498DB);
+
+    return message.channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(entries.length ? 0xE67E22 : 0x2ECC71)
+          .setTitle('⚠️ Warns')
+          .setDescription([
+            `Membre : ${user}`,
+            `Total : **${entries.length}/5**`,
+            '',
+            '**Derniers warns**',
+            recentWarnings
+          ].join('\n'))
+          .setThumbnail(user.displayAvatarURL({ dynamic: true }))
+      ]
+    });
+  }
+
+  if (message.content.startsWith('!unwarn')) {
+    const user = message.mentions.users.first();
+    const args = message.content.trim().split(/\s+/);
+    const amount = Math.max(1, Number.parseInt(args[2] || '1', 10) || 1);
+
+    if (!user) {
+      const reply = await message.channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0xE74C3C)
+            .setTitle('❌ Commande invalide')
+            .setDescription('Utilisation : `!unwarn @membre [nombre]`')
+        ]
+      });
+
+      return deleteLater(reply);
+    }
+
+    const userWarnings = ensureWarningUser(user.id);
+
+    if (userWarnings.entries.length === 0) {
+      const reply = await message.channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0xE67E22)
+            .setTitle('⚠️ Aucun warn')
+            .setDescription(`${user} n’a aucun warn enregistré.`)
+        ]
+      });
+
+      return deleteLater(reply);
+    }
+
+    const removed = removeLatestWarnings(user.id, amount);
+    const remaining = ensureWarningUser(user.id).entries.length;
+
+    await sendAdminLog('✅ Warn retiré', [
+      `Admin : ${logUser(message.author)}`,
+      `Membre : ${logUser(user)}`,
+      `Warns retirés : **${removed.length}**`,
+      `Warns restants : **${remaining}/5**`,
+      `Salon : ${logChannel(message.channel)}`
+    ], 0x2ECC71);
+
+    return message.channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0x2ECC71)
+          .setTitle('✅ Warn retiré')
+          .setDescription([
+            `Membre : ${user}`,
+            `Warns retirés : **${removed.length}**`,
+            `Warns restants : **${remaining}/5**`
+          ].join('\n'))
+      ]
+    });
+  }
+
+  if (message.content.startsWith('!clearwarns')) {
+    const user = message.mentions.users.first();
+
+    if (!user) {
+      const reply = await message.channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0xE74C3C)
+            .setTitle('❌ Commande invalide')
+            .setDescription('Utilisation : `!clearwarns @membre`')
+        ]
+      });
+
+      return deleteLater(reply);
+    }
+
+    const removedCount = clearUserWarnings(user.id);
+
+    await sendAdminLog('🧹 Warns supprimés', [
+      `Admin : ${logUser(message.author)}`,
+      `Membre : ${logUser(user)}`,
+      `Warns supprimés : **${removedCount}**`,
+      `Salon : ${logChannel(message.channel)}`
+    ], 0x2ECC71);
+
+    return message.channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0x2ECC71)
+          .setTitle('🧹 Warns supprimés')
+          .setDescription([
+            `Membre : ${user}`,
+            `Warns supprimés : **${removedCount}**`
+          ].join('\n'))
+      ]
+    });
+  }
+
+  if (message.content.startsWith('!warn')) {
+    const user = message.mentions.users.first();
+    const args = message.content.trim().split(/\s+/);
+    const reason = args.slice(2).join(' ').trim() || 'Aucune raison précisée';
+    const member = user ? await message.guild.members.fetch(user.id).catch(() => null) : null;
+
+    if (!user || !member) {
+      const reply = await message.channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0xE74C3C)
+            .setTitle('❌ Commande invalide')
+            .setDescription('Utilisation : `!warn @membre raison`')
+        ]
+      });
+
+      return deleteLater(reply);
+    }
+
+    if (user.bot || canBypassAutoModeration(member)) {
+      const reply = await message.channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0xE67E22)
+            .setTitle('⚠️ Membre protégé')
+            .setDescription('Tu ne peux pas warn ce membre avec cette commande.')
+        ]
+      });
+
+      return deleteLater(reply);
+    }
+
+    const { userWarnings } = addManualWarning(user.id, {
+      reason,
+      moderatorId: message.author.id,
+      channelId: message.channel.id,
+      guildId: message.guild.id
+    });
+
+    const count = userWarnings.count;
+    const { sanction, sanctionResult, dmSent } = await applyManualWarningSanction(
+      message.guild,
+      member,
+      user,
+      count,
+      reason,
+      message.author
+    );
+
+    await sendAdminLog('⚠️ Warn manuel', [
+      `Admin : ${logUser(message.author)}`,
+      `Membre : ${logUser(user)}`,
+      `Raison : **${reason}**`,
+      `Warns : **${count}/5**`,
+      `Sanction : **${sanctionResult}**`,
+      dmSent ? 'MP : envoyé' : 'MP : impossible à envoyer',
+      `Salon : ${logChannel(message.channel)}`
+    ], sanction.ban ? 0xE74C3C : 0xE67E22);
+
+    return message.channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(sanction.ban ? 0xE74C3C : 0xE67E22)
+          .setTitle('⚠️ Warn ajouté')
+          .setDescription([
+            `Membre : ${user}`,
+            `Raison : **${reason}**`,
+            `Warns : **${count}/5**`,
+            `Sanction : **${sanctionResult}**`,
+            dmSent ? 'MP : envoyé' : 'MP : impossible à envoyer'
+          ].join('\n'))
+      ]
+    });
   }
 
   if (message.content.startsWith('!wallet')) {
@@ -2379,6 +2732,54 @@ client.on(Events.InteractionCreate, async interaction => {
         content: '✅ Règlement accepté, tu as maintenant accès au serveur.',
         ephemeral: true
       });
+    }
+
+    if (interaction.customId.startsWith('complete_order:')) {
+      const ownerId = interaction.customId.split(':')[1];
+      const ticketRequest = getTicketRequest(interaction.channel.id);
+
+      if (!canCompleteOrderTicket(interaction.member)) {
+        return interaction.reply({
+          content: '❌ Tu ne peux pas terminer cette commande.',
+          ephemeral: true
+        });
+      }
+
+      if (!ticketRequest || ticketRequest.type !== 'commande') {
+        return interaction.reply({
+          content: '❌ Ce bouton ne peut être utilisé que dans un ticket commande.',
+          ephemeral: true
+        });
+      }
+
+      if (ticketRequest.completedAt) {
+        return interaction.reply({
+          content: '✅ Cette commande est déjà marquée comme terminée.',
+          ephemeral: true
+        });
+      }
+
+      await interaction.deferReply({ ephemeral: true });
+
+      try {
+        await interaction.message.edit({ components: [ticketButtons(ownerId)] }).catch(() => {});
+        await completeOrderTicketChannel(interaction.channel, ticketRequest, interaction.user, ownerId);
+      } catch (error) {
+        await interaction.editReply(`❌ Impossible de terminer la commande : ${error.message}`);
+        return;
+      }
+
+      await sendAdminLog('✅ Commande terminée', [
+        `Par : ${logUser(interaction.user)}`,
+        `Ticket : ${logChannel(interaction.channel)}`,
+        `Demande : **${ticketRequest.id}**`,
+        `Client : <@${ticketRequest.userId}>`,
+        `Produit : **${ticketRequest.product || 'Non précisé'}**`,
+        `Catégorie : <#${ORDER_DONE_CATEGORY}>`
+      ], 0x2ECC71);
+
+      await interaction.editReply('✅ Commande terminée, ticket déplacé et message d’avis envoyé.');
+      return;
     }
 
     if (interaction.customId.startsWith('delete_ticket:')) {
@@ -2818,7 +3219,7 @@ ${dmSent ? '📩 Instructions envoyées au client en MP.' : '⚠️ Impossible d
 💰 Payé : ${prix}€
 
 📌 Envoyer le produit au client.`,
-      components: [ticketButtons(interaction.user.id)]
+      components: [orderTicketButtons(interaction.user.id)]
     });
 
     sendAdminLog('🎫 Commande créée', [
