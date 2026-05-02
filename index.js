@@ -53,7 +53,7 @@ const MCDONALDS_EMOJI_NAME = '4964mcdonalds';
 const MCDONALDS_EMOJI = `<:${MCDONALDS_EMOJI_NAME}:${MCDONALDS_EMOJI_ID}>`;
 const MCDONALDS_BUTTON_EMOJI = { id: MCDONALDS_EMOJI_ID, name: MCDONALDS_EMOJI_NAME };
 const INFO_IMAGE = process.env.INFO_IMAGE || 'https://media.discordapp.net/attachments/1499072550985269268/1499121030491541585/IMG_1333.jpg?ex=69f4f641&is=69f3a4c1&hm=1f19f9ceb27d07466a27fcb29c1fe6fd35d2699006a35d395e827735eb547bee&=&format=webp&width=623&height=944';
-const PAYPAL_LINK = 'https://paypal.me/AntoninChenot';
+const PAYPAL_LINK = 'https://www.paypal.me/LaRenta23';
 const REVOLUT_LINK = 'https://revolut.me/arthur23320/pocket/vNrIna0VcG';
 const IBAN = 'FR76 2823 3000 0165 8385 8232 516';
 const NO_NOTE_TEXT = '❗❗ Ne mettre aucune note lors du paiement ❗❗';
@@ -801,6 +801,21 @@ function scheduleArchivedTicketCleanup(channelId, archivedAt = Date.now()) {
   archivedTicketCleanupTimers.set(channelId, timer);
 }
 
+function scheduleCompletedOrderTicketCleanup(channelId, completedAt = Date.now()) {
+  clearArchivedTicketCleanup(channelId);
+
+  const deleteAt = Number(completedAt) + ARCHIVED_TICKET_TTL;
+  const delay = Math.max(deleteAt - Date.now(), 0);
+  const timer = setTimeout(() => {
+    deleteCompletedOrderTicketChannel(channelId, '24h après commande terminée')
+      .catch(error => reportCrash('Suppression auto commande terminée impossible', error, [
+        `Ticket : <#${channelId}> (${channelId})`
+      ]));
+  }, delay);
+
+  archivedTicketCleanupTimers.set(channelId, timer);
+}
+
 async function deleteArchivedTicketChannel(channelId, reason) {
   clearArchivedTicketCleanup(channelId);
 
@@ -842,10 +857,65 @@ async function deleteArchivedTicketChannel(channelId, reason) {
   saveRequests();
 }
 
-function scheduleArchivedTicketCleanups() {
+async function deleteCompletedOrderTicketChannel(channelId, reason) {
+  clearArchivedTicketCleanup(channelId);
+
+  const ticketRequest = getTicketRequest(channelId);
+
+  if (
+    !ticketRequest ||
+    ticketRequest.type !== 'commande' ||
+    !ticketRequest.completedAt ||
+    ticketRequest.archivedAt
+  ) {
+    return;
+  }
+
+  const channel = client.channels.cache.get(channelId)
+    || await client.channels.fetch(channelId).catch(() => null);
+
+  if (!channel) {
+    delete requests.tickets[channelId];
+    saveRequests();
+    return;
+  }
+
+  if (channel.parentId !== ORDER_DONE_CATEGORY) return;
+
+  await sendAdminLog('🗑️ Commande terminée supprimée automatiquement', [
+    `Raison : **${reason}**`,
+    `Ticket : ${logChannel(channel)}`,
+    `Demande : **${ticketRequest.id}**`,
+    `Client : <@${ticketRequest.userId}>`,
+    `Produit : **${ticketRequest.product || 'Non précisé'}**`
+  ], 0xE74C3C);
+
+  const deleted = await channel.delete(`Commande terminée supprimée automatiquement : ${reason}`)
+    .then(() => true)
+    .catch(async error => {
+      await reportCrash('Suppression auto commande terminée impossible', error, [
+        `Ticket : ${logChannel(channel)}`,
+        `Demande : **${ticketRequest.id}**`
+      ]);
+      return false;
+    });
+
+  if (!deleted) return;
+
+  delete requests.tickets[channelId];
+  saveRequests();
+}
+
+function scheduleTicketCleanups() {
   Object.entries(requests.tickets || {}).forEach(([channelId, ticketRequest]) => {
-    if (!ticketRequest?.archivedAt) return;
-    scheduleArchivedTicketCleanup(channelId, ticketRequest.archivedAt);
+    if (ticketRequest?.archivedAt) {
+      scheduleArchivedTicketCleanup(channelId, ticketRequest.archivedAt);
+      return;
+    }
+
+    if (ticketRequest?.type === 'commande' && ticketRequest.completedAt) {
+      scheduleCompletedOrderTicketCleanup(channelId, ticketRequest.completedAt);
+    }
   });
 }
 
@@ -954,7 +1024,12 @@ async function completeOrderTicketChannel(channel, ticketRequest, user, ownerId 
     saveRequests();
   }
 
-  await channel.send({ embeds: [buildAvisEmbed()] });
+  scheduleCompletedOrderTicketCleanup(channel.id, ticketRequest?.completedAt || Date.now());
+
+  await channel.send({
+    content: '🕒 Ce ticket commande sera supprimé automatiquement dans 24h.',
+    embeds: [buildAvisEmbed()]
+  });
 }
 
 function sanitizeChannelName(name) {
@@ -1626,7 +1701,7 @@ client.once('ready', async () => {
     console.log('Bot connecte');
     normalizeReferralOwnersFromPersonalLinks();
     await Promise.all(client.guilds.cache.map(guild => cacheGuildInvites(guild)));
-    scheduleArchivedTicketCleanups();
+    scheduleTicketCleanups();
     sendBotLog('🟢 Bot connecté', `Connecté en tant que **${client.user.tag}**`, 0x2ECC71);
   } catch (error) {
     await reportCrash('Erreur au démarrage ready', error);
@@ -2470,7 +2545,7 @@ client.on('messageCreate', async message => {
     });
   }
 
-  if (message.content.startsWith('!addmoney')) {
+  if (message.content.trim().split(/\s+/)[0] === '!add') {
     const ticketRequest = getTicketRequest(message.channel.id);
     const mentionedUser = message.mentions.users.first();
     const userId = mentionedUser ? mentionedUser.id : ticketRequest?.userId;
@@ -2484,7 +2559,7 @@ client.on('messageCreate', async message => {
           new EmbedBuilder()
             .setColor(0xE74C3C)
             .setTitle('❌ Commande invalide')
-            .setDescription('Utilisation : `!addmoney @user montant` ou `!addmoney montant` dans un ticket recharge.')
+            .setDescription('Utilisation : `!add @user montant` ou `!add montant` dans un ticket recharge.')
         ]
       });
 
@@ -2607,7 +2682,7 @@ client.on('messageCreate', async message => {
     });
   }
 
-  if (message.content.startsWith('!removemoney')) {
+  if (message.content.trim().split(/\s+/)[0] === '!remove') {
     const args = message.content.split(' ');
     const user = message.mentions.users.first();
     const amount = parseFloat(args[2]);
@@ -2618,7 +2693,7 @@ client.on('messageCreate', async message => {
           new EmbedBuilder()
             .setColor(0xE74C3C)
             .setTitle('❌ Commande invalide')
-            .setDescription('Utilisation : `!removemoney @user montant`')
+            .setDescription('Utilisation : `!remove @user montant`')
         ]
       });
 
