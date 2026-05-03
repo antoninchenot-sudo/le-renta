@@ -43,6 +43,7 @@ const SUPPORT_CHANNEL_ID = '1498434089450078258';
 const LOG_CHANNEL_ID = '1310354201704136747';
 const ADMIN_COMMAND_LOG_CHANNEL_ID = '1499758004797702225';
 const ADMIN_CHANGELOG_CHANNEL_ID = '1500475167313231983';
+const AVIS_CHANNEL_ID = '1497652398259306516';
 const INVITE_ANNOUNCE_CHANNEL_ID = '1310355769824383059';
 const INVITE_ADMIN_CHANNEL_ID = '1499523428112142568';
 const RULES_ROLE_ID = '1310359454377840650';
@@ -64,17 +65,19 @@ const REVOLUT_LINK = 'https://revolut.me/arthur23320/pocket/vNrIna0VcG';
 const IBAN = 'FR76 2823 3000 0165 8385 8232 516';
 const NO_NOTE_TEXT = '❗❗ Ne mettre aucune note lors du paiement ❗❗';
 const WALLET_FILE = 'wallets.json';
+const WALLET_HISTORY_FILE = 'wallet-history.json';
+const WALLET_HISTORY_LIMIT = 50;
 const WALLET_BACKUP_DIR = path.join('backups', 'wallets');
 const WALLET_BACKUP_LIMIT = 50;
+const MAINTENANCE_FILE = 'maintenance-state.json';
 const SHOP_STATS_FILE = 'shop-stats.json';
 const WARNINGS_FILE = 'warnings.json';
 const BOT_CHANGELOG_FILE = 'bot-changelog-state.json';
-const BOT_CHANGELOG_VERSION = '2026-05-03-ticket-stats-automod-update';
+const BOT_CHANGELOG_VERSION = '2026-05-03-completed-order-message';
 // Garder uniquement les changements de cette version, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Relance automatique après 1h sans réponse du membre, fermeture après 4h.',
-  'Ajout de la commande owner !stats pour consulter les statistiques boutique.',
-  'Anti-insulte automatique désactivé, anti-pub et commandes warn conservés.'
+  'Message de commande terminée fusionné avec la demande d’avis dans le ticket.',
+  'Notification MP ajoutée au client quand une commande est terminée, sans afficher le produit en MP.'
 ];
 const AUTO_MOD_NOTICE_DELAY = 7_000;
 const WARNING_SANCTIONS = [
@@ -243,8 +246,10 @@ function saveJsonFile(fileName, data, options = {}) {
 }
 
 let wallets = loadJsonFile(WALLET_FILE, {}, { backupDir: WALLET_BACKUP_DIR });
+let walletHistory = loadJsonFile(WALLET_HISTORY_FILE, { users: {} });
 let requests = loadJsonFile('requests.json', { counter: 0, tickets: {} });
 let referrals = loadJsonFile('referrals.json', { invitedBy: {}, stats: {}, inviteLinks: {} });
+let maintenanceState = loadJsonFile(MAINTENANCE_FILE, { enabled: false, updatedAt: null, updatedBy: null });
 let shopStats = loadJsonFile(SHOP_STATS_FILE, {
   totalRechargedCents: 0,
   totalRemovedCents: 0,
@@ -265,6 +270,8 @@ if (fs.existsSync(WALLET_FILE)) {
 }
 
 if (!referrals.inviteLinks) referrals.inviteLinks = {};
+if (!walletHistory.users) walletHistory.users = {};
+if (typeof maintenanceState.enabled !== 'boolean') maintenanceState.enabled = false;
 if (!shopStats.products) shopStats.products = {};
 if (!warnings.users) warnings.users = {};
 if (!botChangelogState.announcedVersions) botChangelogState.announcedVersions = {};
@@ -281,6 +288,10 @@ function saveWallets() {
   saveJsonFile(WALLET_FILE, wallets, { backupDir: WALLET_BACKUP_DIR });
 }
 
+function saveWalletHistory() {
+  saveJsonFile(WALLET_HISTORY_FILE, walletHistory);
+}
+
 function saveRequests() {
   saveJsonFile('requests.json', requests);
 }
@@ -291,6 +302,10 @@ function saveReferrals() {
 
 function saveShopStats() {
   saveJsonFile(SHOP_STATS_FILE, shopStats);
+}
+
+function saveMaintenanceState() {
+  saveJsonFile(MAINTENANCE_FILE, maintenanceState);
 }
 
 function saveWarnings() {
@@ -527,6 +542,112 @@ function formatCents(cents) {
   return `${((Number(cents) || 0) / 100).toFixed(2)}€`;
 }
 
+function isMaintenanceEnabledFor(member) {
+  return Boolean(maintenanceState.enabled && !isOwnerMember(member));
+}
+
+function maintenanceNotice() {
+  const updatedBy = maintenanceState.updatedBy ? `<@${maintenanceState.updatedBy}>` : 'un owner';
+  const enabledAt = maintenanceState.updatedAt ? `<t:${Math.floor(maintenanceState.updatedAt / 1000)}:R>` : 'récemment';
+  return [
+    '🛠️ **Boutique en maintenance**',
+    '',
+    `La boutique a été mise en maintenance par ${updatedBy} ${enabledAt}.`,
+    maintenanceState.reason ? `Raison : **${maintenanceState.reason}**` : null,
+    'Les commandes et recharges sont temporairement bloquées.',
+    'Le support reste ouvert si besoin.'
+  ].filter(Boolean).join('\n');
+}
+
+function setMaintenanceState(enabled, user, reason = '') {
+  maintenanceState.enabled = enabled;
+  maintenanceState.updatedAt = Date.now();
+  maintenanceState.updatedBy = user.id;
+  maintenanceState.reason = reason || null;
+  saveMaintenanceState();
+}
+
+async function replyMaintenance(interaction) {
+  return replyTemp(interaction, {
+    content: maintenanceNotice(),
+    ephemeral: true
+  });
+}
+
+function ensureWalletHistory(userId) {
+  if (!walletHistory.users[userId]) walletHistory.users[userId] = [];
+  if (!Array.isArray(walletHistory.users[userId])) walletHistory.users[userId] = [];
+  return walletHistory.users[userId];
+}
+
+function recordWalletHistory(userId, entry) {
+  if (!userId) return;
+
+  const entries = ensureWalletHistory(userId);
+  entries.unshift({
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    type: entry.type,
+    amountCents: Number(entry.amountCents) || 0,
+    balanceAfterCents: Number(entry.balanceAfterCents) || 0,
+    actorId: entry.actorId || null,
+    ticketRequestId: entry.ticketRequestId || null,
+    product: entry.product || null,
+    note: entry.note || null,
+    createdAt: Date.now()
+  });
+
+  walletHistory.users[userId] = entries.slice(0, WALLET_HISTORY_LIMIT);
+  saveWalletHistory();
+}
+
+function walletHistoryTypeLabel(type) {
+  const labels = {
+    recharge: 'Recharge validée',
+    add: 'Ajout manuel',
+    remove: 'Retrait manuel',
+    order: 'Commande payée',
+    referral: 'Récompense parrainage'
+  };
+
+  return labels[type] || 'Action portefeuille';
+}
+
+function formatWalletHistoryLine(entry, index) {
+  const date = entry.createdAt ? `<t:${Math.floor(entry.createdAt / 1000)}:f>` : 'Date inconnue';
+  const amountPrefix = entry.amountCents >= 0 ? '+' : '-';
+  const amountText = `${amountPrefix}${formatCents(Math.abs(entry.amountCents))}`;
+  const actor = entry.actorId ? ` • par <@${entry.actorId}>` : '';
+  const request = entry.ticketRequestId ? ` • ${entry.ticketRequestId}` : '';
+  const product = entry.product ? ` • ${entry.product}` : '';
+  const note = entry.note ? `\n${entry.note}` : '';
+
+  return [
+    `**${index + 1}.** ${date}${actor}`,
+    `${walletHistoryTypeLabel(entry.type)}${request}${product}`,
+    `Montant : **${amountText}** • Solde après : **${formatCents(entry.balanceAfterCents)}**${note}`
+  ].join('\n');
+}
+
+function buildWalletHistoryEmbed(user) {
+  const entries = ensureWalletHistory(user.id).slice(0, 10);
+  const balance = Number(wallets[user.id]?.balance) || 0;
+  const description = entries.length
+    ? entries.map(formatWalletHistoryLine).join('\n\n')
+    : 'Aucune action enregistrée pour ce membre depuis l’activation de l’historique.';
+
+  return new EmbedBuilder()
+    .setColor(0x3498DB)
+    .setTitle('👛 Historique portefeuille')
+    .setDescription(description)
+    .addFields({
+      name: 'Solde actuel',
+      value: `Membre : ${user}\nSolde : **${formatWalletAmount(balance)}**`,
+      inline: false
+    })
+    .setThumbnail(user.displayAvatarURL({ dynamic: true }))
+    .setTimestamp();
+}
+
 function recordShopRecharge(amount, isRechargeValidation = false) {
   shopStats.totalRechargedCents = (Number(shopStats.totalRechargedCents) || 0) + eurosToCents(amount);
   if (isRechargeValidation) {
@@ -740,6 +861,14 @@ async function applyWalletAdd({ user, amount, channel, guild, adminUser, ticketR
   wallets[user.id].balance += amount;
   saveWallets();
   const isRechargeValidation = ticketRequest && ticketRequest.type === 'recharge' && ticketRequest.userId === user.id;
+  recordWalletHistory(user.id, {
+    type: isRechargeValidation ? 'recharge' : 'add',
+    amountCents: eurosToCents(amount),
+    balanceAfterCents: eurosToCents(wallets[user.id].balance),
+    actorId: adminUser.id,
+    ticketRequestId: ticketRequest?.id || null,
+    note: isRechargeValidation ? `Méthode : ${paymentLabel(ticketRequest.method)}` : null
+  });
   recordShopRecharge(amount, isRechargeValidation);
 
   if (isRechargeValidation) {
@@ -858,6 +987,12 @@ async function applyWalletRemove({ user, amount, channel, adminUser }) {
   if (!wallets[user.id]) wallets[user.id] = { balance: 0 };
   wallets[user.id].balance -= amount;
   saveWallets();
+  recordWalletHistory(user.id, {
+    type: 'remove',
+    amountCents: -eurosToCents(amount),
+    balanceAfterCents: eurosToCents(wallets[user.id].balance),
+    actorId: adminUser.id
+  });
   recordShopRemove(amount);
 
   await sendAdminLog('💸 Solde retiré', [
@@ -1386,6 +1521,14 @@ async function validateReferralReward(user, ticketRequest, amountText, guild = n
   const totalReward = baseReward + bonusReward;
   if (!wallets[inviter.id]) wallets[inviter.id] = { balance: 0 };
   wallets[inviter.id].balance += totalReward;
+  recordWalletHistory(inviter.id, {
+    type: 'referral',
+    amountCents: eurosToCents(totalReward),
+    balanceAfterCents: eurosToCents(wallets[inviter.id].balance),
+    actorId: client.user?.id || null,
+    ticketRequestId: ticketRequest.id,
+    note: `Filleul : ${user.tag}`
+  });
 
   saveWallets();
   saveReferrals();
@@ -1542,7 +1685,7 @@ function canManageTicket(interaction, ownerId) {
 }
 
 function canCompleteOrderTicket(member) {
-  return isAdminMember(member);
+  return isOwnerMember(member);
 }
 
 function ticketButtons(ownerId) {
@@ -2025,10 +2168,20 @@ async function completeOrderTicketChannel(channel, ticketRequest, user, ownerId 
 
   scheduleCompletedOrderTicketCleanup(channel.id, ticketRequest?.completedAt || Date.now());
 
-  await channel.send({
-    content: '🕒 Ce ticket commande sera supprimé automatiquement dans 24h.',
-    embeds: [buildAvisEmbed()]
-  });
+  let dmSent = false;
+
+  if (ticketRequest?.userId) {
+    const customer = await client.users.fetch(ticketRequest.userId).catch(() => null);
+    if (customer) {
+      await customer.send({ embeds: [buildCompletedOrderDmEmbed(ticketRequest)] })
+        .then(() => { dmSent = true; })
+        .catch(() => {});
+    }
+  }
+
+  await channel.send({ embeds: [buildCompletedOrderTicketEmbed(ticketRequest, dmSent)] });
+
+  return { dmSent };
 }
 
 async function addCustomerRoleAfterCompletedOrder(guild, ticketRequest) {
@@ -2146,12 +2299,59 @@ function buildAvisEmbed() {
     .setDescription([
       'Ta commande est terminée, merci pour ta confiance !',
       '',
-      'N’hésite pas à laisser un avis ici : <#1497652398259306516>',
+      `N’hésite pas à laisser un avis ici : <#${AVIS_CHANNEL_ID}>`,
       'Et si tu as apprécié le service, parle-en autour de toi !',
       '',
       'Bon appétit 😋'
     ].join('\n'))
     .setFooter({ text: 'Boutique' });
+}
+
+function buildCompletedOrderTicketEmbed(ticketRequest, dmSent) {
+  return new EmbedBuilder()
+    .setColor(0x2ECC71)
+    .setTitle('✅ Commande terminée')
+    .setDescription([
+      'La commande a été marquée comme livrée par un owner.',
+      '',
+      `🧾 Demande : #${ticketRequest?.id || 'Non précisée'}`,
+      `👤 Client : ${ticketRequest?.userId ? `<@${ticketRequest.userId}>` : 'Non précisé'}`,
+      `📦 Produit : ${ticketRequest?.product || 'Non précisé'}`,
+      '',
+      dmSent
+        ? '📩 Le client a été prévenu en message privé.'
+        : '⚠️ Impossible d’envoyer un MP au client.',
+      'Merci de conserver les informations de livraison dans ce ticket.',
+      '',
+      '⭐ **Avis**',
+      '',
+      'Ta commande est terminée, merci pour ta confiance !',
+      '',
+      `N’hésite pas à laisser un avis ici : <#${AVIS_CHANNEL_ID}>`,
+      'Et si tu as apprécié le service, parle-en autour de toi !',
+      '',
+      'Bon appétit 😋',
+      '',
+      '🕒 Ce ticket commande sera supprimé automatiquement dans 24h.'
+    ].join('\n'))
+    .setFooter({ text: 'Boutique' })
+    .setTimestamp();
+}
+
+function buildCompletedOrderDmEmbed(ticketRequest) {
+  return new EmbedBuilder()
+    .setColor(0x2ECC71)
+    .setTitle('✅ Commande livrée')
+    .setDescription([
+      'Ta commande a été marquée comme terminée.',
+      '',
+      `🧾 Demande : #${ticketRequest?.id || 'Non précisée'}`,
+      '',
+      'Merci pour ta confiance !',
+      `Tu peux laisser un avis ici : <#${AVIS_CHANNEL_ID}>.`
+    ].join('\n'))
+    .setFooter({ text: 'Boutique' })
+    .setTimestamp();
 }
 
 async function sendLogToChannel(channelId, title, lines, color = 0x3498DB) {
@@ -3628,6 +3828,88 @@ client.on('messageCreate', async message => {
     return message.channel.send({ embeds: [buildShopStatsEmbed()] });
   }
 
+  if (message.content.trim().split(/\s+/)[0] === '!maintenance') {
+    if (!isOwnerMember(message.member)) {
+      const reply = await message.channel.send('❌ Seul le rôle owner peut gérer la maintenance.');
+      return deleteLater(reply);
+    }
+
+    const args = message.content.trim().split(/\s+/);
+    const action = (args[1] || 'status').toLowerCase();
+    const reason = args.slice(2).join(' ').trim();
+
+    if (!['on', 'off', 'status'].includes(action)) {
+      const reply = await message.channel.send('Utilisation : `!maintenance on [raison]`, `!maintenance off` ou `!maintenance status`');
+      return deleteLater(reply);
+    }
+
+    if (action === 'status') {
+      return message.channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(maintenanceState.enabled ? 0xE67E22 : 0x2ECC71)
+            .setTitle('🛠️ Maintenance boutique')
+            .setDescription([
+              `Statut : **${maintenanceState.enabled ? 'activée' : 'désactivée'}**`,
+              maintenanceState.updatedBy ? `Dernière modification : <@${maintenanceState.updatedBy}>` : null,
+              maintenanceState.updatedAt ? `Date : <t:${Math.floor(maintenanceState.updatedAt / 1000)}:f>` : null,
+              maintenanceState.reason ? `Raison : **${maintenanceState.reason}**` : null
+            ].filter(Boolean).join('\n'))
+        ]
+      });
+    }
+
+    const enabled = action === 'on';
+    setMaintenanceState(enabled, message.author, reason);
+
+    await sendAdminLog(enabled ? '🛠️ Maintenance activée' : '✅ Maintenance désactivée', [
+      `Owner : ${logUser(message.author)}`,
+      `Salon : ${logChannel(message.channel)}`,
+      reason ? `Raison : **${reason}**` : null
+    ], enabled ? 0xE67E22 : 0x2ECC71);
+
+    return message.channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(enabled ? 0xE67E22 : 0x2ECC71)
+          .setTitle(enabled ? '🛠️ Maintenance activée' : '✅ Maintenance désactivée')
+          .setDescription(enabled
+            ? 'Les commandes et recharges sont maintenant bloquées pour les membres. Le support reste ouvert.'
+            : 'Les commandes et recharges sont de nouveau disponibles.')
+      ]
+    });
+  }
+
+  if (message.content.trim().split(/\s+/)[0] === '!history') {
+    if (!isOwnerMember(message.member)) {
+      const reply = await message.channel.send('❌ Seul le rôle owner peut consulter l’historique portefeuille.');
+      return deleteLater(reply);
+    }
+
+    const user = message.mentions.users.first();
+
+    if (!user) {
+      const reply = await message.channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0xE74C3C)
+            .setTitle('❌ Commande invalide')
+            .setDescription('Utilisation : `!history @membre`')
+        ]
+      });
+
+      return deleteLater(reply);
+    }
+
+    await sendAdminLog('👛 Historique portefeuille consulté', [
+      `Owner : ${logUser(message.author)}`,
+      `Membre : ${logUser(user)}`,
+      `Salon : ${logChannel(message.channel)}`
+    ], 0x3498DB);
+
+    return message.channel.send({ embeds: [buildWalletHistoryEmbed(user)] });
+  }
+
   if (message.content.trim().split(/\s+/)[0] === '!add') {
     if (!isOwnerMember(message.member)) {
       const reply = await message.channel.send('❌ Seul le rôle owner peut lancer cette commande.');
@@ -3806,9 +4088,11 @@ client.on(Events.InteractionCreate, async interaction => {
 
       await interaction.deferReply({ ephemeral: true });
 
+      let completionResult = { dmSent: false };
+
       try {
         await interaction.message.edit({ components: [ticketButtons(ownerId)] }).catch(() => {});
-        await completeOrderTicketChannel(interaction.channel, ticketRequest, interaction.user, ownerId);
+        completionResult = await completeOrderTicketChannel(interaction.channel, ticketRequest, interaction.user, ownerId);
       } catch (error) {
         await interaction.editReply(`❌ Impossible de terminer la commande : ${error.message}`);
         return;
@@ -3830,14 +4114,15 @@ client.on(Events.InteractionCreate, async interaction => {
         `Client : <@${ticketRequest.userId}>`,
         `Produit : **${ticketRequest.product || 'Non précisé'}**`,
         `Catégorie : <#${ORDER_DONE_CATEGORY}>`,
+        completionResult?.dmSent ? 'MP client : envoyé' : 'MP client : non envoyé',
         customerRoleAdded
           ? `Rôle client : <@&${CUSTOMER_ROLE_ID}> ajouté ou déjà présent`
           : `Rôle client : non ajouté${customerRoleError ? ` (${customerRoleError.message})` : ''}`
       ], customerRoleError ? 0xF1C40F : 0x2ECC71);
 
       await interaction.editReply(customerRoleError
-        ? `✅ Commande terminée, ticket déplacé et message d’avis envoyé.\n⚠️ ${customerRoleError.message}`
-        : '✅ Commande terminée, ticket déplacé, rôle client appliqué et message d’avis envoyé.');
+        ? `✅ Commande terminée, ticket déplacé et message final envoyé.\n⚠️ ${customerRoleError.message}`
+        : '✅ Commande terminée, ticket déplacé, rôle client appliqué et message final envoyé.');
       return;
     }
 
@@ -4045,6 +4330,10 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.customId === 'recharger') {
+      if (isMaintenanceEnabledFor(interaction.member)) {
+        return replyMaintenance(interaction);
+      }
+
       sendActionLog(interaction.member, '➕ Recharge ouverte', [
         `Membre : ${logUser(interaction.user)}`,
         `Salon : ${logChannel(interaction.channel)}`
@@ -4084,6 +4373,10 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.customId === 'commande') {
+      if (isMaintenanceEnabledFor(interaction.member)) {
+        return replyMaintenance(interaction);
+      }
+
       sendActionLog(interaction.member, '🎫 Fenêtre commande ouverte', [
         `Membre : ${logUser(interaction.user)}`,
         `Salon : ${logChannel(interaction.channel)}`
@@ -4112,6 +4405,10 @@ client.on(Events.InteractionCreate, async interaction => {
   }
 
   if (interaction.isModalSubmit() && interaction.customId === 'recharge_amount') {
+    if (isMaintenanceEnabledFor(interaction.member)) {
+      return replyMaintenance(interaction);
+    }
+
     const cents = parseAmountToCents(interaction.fields.getTextInputValue('amount'));
     const paymentDate = interaction.fields.getTextInputValue('payment_date').trim();
     const paymentTime = interaction.fields.getTextInputValue('payment_time').trim() || 'Non précisée';
@@ -4167,6 +4464,10 @@ client.on(Events.InteractionCreate, async interaction => {
 
   if (interaction.isStringSelectMenu()) {
     if (interaction.customId.startsWith('payment_method:')) {
+      if (isMaintenanceEnabledFor(interaction.member)) {
+        return replyMaintenance(interaction);
+      }
+
       const cents = Number(interaction.customId.split(':')[1]);
       const method = interaction.values[0];
       const amount = formatAmount(cents);
@@ -4245,6 +4546,10 @@ ${dmSent ? '📩 Instructions envoyées au client en MP.' : '⚠️ Impossible d
 
     if (interaction.customId !== 'produits') return;
 
+    if (isMaintenanceEnabledFor(interaction.member)) {
+      return replyMaintenance(interaction);
+    }
+
     const uid = interaction.user.id;
     if (!wallets[uid]) wallets[uid] = { balance: 0 };
 
@@ -4287,6 +4592,14 @@ ${dmSent ? '📩 Instructions envoyées au client en MP.' : '⚠️ Impossible d
     const request = createRequest('commande', ticket.id, interaction.user.id, {
       product: product.label,
       price: prix
+    });
+    recordWalletHistory(uid, {
+      type: 'order',
+      amountCents: -eurosToCents(prix),
+      balanceAfterCents: eurosToCents(wallets[uid].balance),
+      actorId: interaction.user.id,
+      ticketRequestId: request.id,
+      product: product.label
     });
     recordShopOrderCreated(product.label, prix);
 
