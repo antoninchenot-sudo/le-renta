@@ -49,7 +49,9 @@ const RULES_ROLE_ID = '1310359454377840650';
 const CUSTOMER_ROLE_ID = '1499537426463461586';
 const DELETE_DELAY = 10_000;
 const ARCHIVED_TICKET_TTL = 24 * 60 * 60 * 1000;
-const TICKET_NO_RESPONSE_TTL = 24 * 60 * 60 * 1000;
+const TICKET_NO_RESPONSE_REMINDER_DELAY = 60 * 60 * 1000;
+const TICKET_NO_RESPONSE_TTL = 4 * 60 * 60 * 1000;
+const WALLET_CONFIRMATION_TTL = 5 * 60 * 1000;
 
 const SHOP_EMOJI = '🛒';
 const MCDONALDS_EMOJI_ID = '1498440076257136830';
@@ -64,13 +66,15 @@ const NO_NOTE_TEXT = '❗❗ Ne mettre aucune note lors du paiement ❗❗';
 const WALLET_FILE = 'wallets.json';
 const WALLET_BACKUP_DIR = path.join('backups', 'wallets');
 const WALLET_BACKUP_LIMIT = 50;
+const SHOP_STATS_FILE = 'shop-stats.json';
 const WARNINGS_FILE = 'warnings.json';
 const BOT_CHANGELOG_FILE = 'bot-changelog-state.json';
-const BOT_CHANGELOG_VERSION = '2026-05-03-staff-owner-referral-exclusion';
+const BOT_CHANGELOG_VERSION = '2026-05-03-ticket-stats-automod-update';
 // Garder uniquement les changements de cette version, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Les owners et le staff sont exclus du système de parrainage.',
-  'Le bouton parrainage reste accessible aux owners et au staff, mais leurs invitations et récompenses ne comptent pas.'
+  'Relance automatique après 1h sans réponse du membre, fermeture après 4h.',
+  'Ajout de la commande owner !stats pour consulter les statistiques boutique.',
+  'Anti-insulte automatique désactivé, anti-pub et commandes warn conservés.'
 ];
 const AUTO_MOD_NOTICE_DELAY = 7_000;
 const WARNING_SANCTIONS = [
@@ -114,33 +118,6 @@ const SOCIAL_AD_REGEXES = [
   /\b(?:ajoute|ajoutez)\s+moi\s+sur\s+(?:snap|snapchat|insta|instagram|tiktok|telegram|twitter)\b/i,
   /\b(?:abonne|abonnez|follow)\s+(?:toi|moi)\b/i,
   /\b(?:va|allez)\s+voir\s+(?:mon|ma)\s+(?:tiktok|insta|instagram|chaine|chaîne|youtube)\b/i
-];
-
-const SEVERE_INSULT_REGEXES = [
-  /\b(?:fils\s+de\s+p(?:ute)?)\b/i,
-  /\b(?:fdp|ntm)\b/i,
-  /\bpute\b/i,
-  /\bsalope\b/i,
-  /\bpetasse\b/i,
-  /\bchiennasse\b/i,
-  /\bencule(?:e|es|s)?\b/i,
-  /\bbatard(?:e|es|s)?\b/i,
-  /\benfoire(?:e|es|s)?\b/i,
-  /\b(?:nique|nike)\s+ta\s+mere\b/i,
-  /\bva\s+te\s+faire\s+foutre\b/i,
-  /\bva\s+crever\b/i,
-  /\bcreve\b/i,
-  /\bsuicide\s+toi\b/i
-];
-const SEVERE_INSULT_COMPACT = [
-  'fdp',
-  'ntm',
-  'filsdepute',
-  'niquetamere',
-  'niketamere',
-  'vatefairefoutre',
-  'vacrever',
-  'suicidetoi'
 ];
 
 function ensureDirectory(dirPath) {
@@ -268,6 +245,14 @@ function saveJsonFile(fileName, data, options = {}) {
 let wallets = loadJsonFile(WALLET_FILE, {}, { backupDir: WALLET_BACKUP_DIR });
 let requests = loadJsonFile('requests.json', { counter: 0, tickets: {} });
 let referrals = loadJsonFile('referrals.json', { invitedBy: {}, stats: {}, inviteLinks: {} });
+let shopStats = loadJsonFile(SHOP_STATS_FILE, {
+  totalRechargedCents: 0,
+  totalRemovedCents: 0,
+  rechargeValidatedCount: 0,
+  ordersCreated: 0,
+  ordersCompleted: 0,
+  products: {}
+});
 let warnings = loadJsonFile(WARNINGS_FILE, { users: {} });
 let botChangelogState = loadJsonFile(BOT_CHANGELOG_FILE, { announcedVersions: {} });
 
@@ -280,13 +265,16 @@ if (fs.existsSync(WALLET_FILE)) {
 }
 
 if (!referrals.inviteLinks) referrals.inviteLinks = {};
+if (!shopStats.products) shopStats.products = {};
 if (!warnings.users) warnings.users = {};
 if (!botChangelogState.announcedVersions) botChangelogState.announcedVersions = {};
 
 const pendingRecharges = new Map();
+const pendingWalletActions = new Map();
 const guildInviteUses = new Map();
 const crashReportCooldowns = new Map();
 const ticketCleanupTimers = new Map();
+const ticketNoResponseReminderTimers = new Map();
 const CRASH_LOG_COOLDOWN = 60_000;
 
 function saveWallets() {
@@ -299,6 +287,10 @@ function saveRequests() {
 
 function saveReferrals() {
   saveJsonFile('referrals.json', referrals);
+}
+
+function saveShopStats() {
+  saveJsonFile(SHOP_STATS_FILE, shopStats);
 }
 
 function saveWarnings() {
@@ -316,6 +308,10 @@ function isAdminMember(member) {
   );
 }
 
+function isOwnerMember(member) {
+  return Boolean(member?.roles?.cache?.has(ADMIN_ROLE_ID));
+}
+
 function createRequest(type, channelId, userId, data = {}) {
   requests.counter += 1;
   const prefix = type === 'recharge' ? 'R' : type === 'support' ? 'S' : 'C';
@@ -326,12 +322,14 @@ function createRequest(type, channelId, userId, data = {}) {
     channelId,
     userId,
     createdAt,
+    noResponseReminderAt: createdAt + TICKET_NO_RESPONSE_REMINDER_DELAY,
     noResponseCloseAt: createdAt + TICKET_NO_RESPONSE_TTL,
     ...data
   };
 
   requests.tickets[channelId] = request;
   saveRequests();
+  scheduleOpenTicketNoResponseReminder(channelId, request.noResponseReminderAt);
   scheduleOpenTicketNoResponseCleanup(channelId, request.noResponseCloseAt);
   return request;
 }
@@ -361,12 +359,24 @@ function shouldTrackNoMemberResponse(ticketRequest) {
 
 function ensureNoMemberResponseCloseAt(ticketRequest) {
   if (!shouldTrackNoMemberResponse(ticketRequest)) return false;
-  if (ticketRequest.noResponseCloseAt) return false;
+  let changed = false;
 
   const createdAt = Number(ticketRequest.createdAt);
   const openedAt = Number.isFinite(createdAt) && createdAt > 0 ? createdAt : Date.now();
-  ticketRequest.noResponseCloseAt = openedAt + TICKET_NO_RESPONSE_TTL;
-  return true;
+  const targetReminderAt = openedAt + TICKET_NO_RESPONSE_REMINDER_DELAY;
+  const targetCloseAt = openedAt + TICKET_NO_RESPONSE_TTL;
+
+  if (!ticketRequest.noResponseReminderSentAt && Number(ticketRequest.noResponseReminderAt) !== targetReminderAt) {
+    ticketRequest.noResponseReminderAt = targetReminderAt;
+    changed = true;
+  }
+
+  if (Number(ticketRequest.noResponseCloseAt) !== targetCloseAt) {
+    ticketRequest.noResponseCloseAt = targetCloseAt;
+    changed = true;
+  }
+
+  return changed;
 }
 
 function markTicketResponse(ticketRequest, userId) {
@@ -380,7 +390,9 @@ function markTicketResponse(ticketRequest, userId) {
   if (!ticketRequest.firstResponseBy) ticketRequest.firstResponseBy = userId;
   ticketRequest.lastResponseAt = now;
   ticketRequest.lastResponseBy = userId;
+  delete ticketRequest.noResponseReminderAt;
   delete ticketRequest.noResponseCloseAt;
+  clearTicketNoResponseReminder(ticketRequest.channelId);
   clearTicketCleanup(ticketRequest.channelId);
   saveRequests();
 }
@@ -497,6 +509,475 @@ function findOpenRechargeRequestByUser(userId) {
 
 function pendingRechargeKey(interaction) {
   return `${interaction.guildId}:${interaction.user.id}`;
+}
+
+function parseWalletAmount(value) {
+  return Number.parseFloat(String(value || '').replace(',', '.'));
+}
+
+function formatWalletAmount(amount) {
+  return `${amount.toFixed(2)}€`;
+}
+
+function eurosToCents(amount) {
+  return Math.round((Number(amount) || 0) * 100);
+}
+
+function formatCents(cents) {
+  return `${((Number(cents) || 0) / 100).toFixed(2)}€`;
+}
+
+function recordShopRecharge(amount, isRechargeValidation = false) {
+  shopStats.totalRechargedCents = (Number(shopStats.totalRechargedCents) || 0) + eurosToCents(amount);
+  if (isRechargeValidation) {
+    shopStats.rechargeValidatedCount = (Number(shopStats.rechargeValidatedCount) || 0) + 1;
+  }
+  saveShopStats();
+}
+
+function recordShopRemove(amount) {
+  shopStats.totalRemovedCents = (Number(shopStats.totalRemovedCents) || 0) + eurosToCents(amount);
+  saveShopStats();
+}
+
+function recordShopOrderCreated(productLabel, price) {
+  shopStats.ordersCreated = (Number(shopStats.ordersCreated) || 0) + 1;
+
+  const productKey = productLabel || 'Produit inconnu';
+  const productStats = shopStats.products[productKey] || { count: 0, revenueCents: 0 };
+  productStats.count = (Number(productStats.count) || 0) + 1;
+  productStats.revenueCents = (Number(productStats.revenueCents) || 0) + eurosToCents(price);
+  shopStats.products[productKey] = productStats;
+
+  saveShopStats();
+}
+
+function recordShopOrderCompleted(ticketRequest) {
+  if (!ticketRequest || ticketRequest.statsOrderCompletedAt) return false;
+
+  shopStats.ordersCompleted = (Number(shopStats.ordersCompleted) || 0) + 1;
+  ticketRequest.statsOrderCompletedAt = Date.now();
+  saveShopStats();
+  return true;
+}
+
+function buildShopStatsSnapshot() {
+  const ticketList = Object.values(requests.tickets || {});
+  const activeTickets = ticketList.filter(isActiveTicketRequest);
+  const walletRows = Object.entries(wallets || {})
+    .map(([userId, wallet]) => ({
+      userId,
+      balance: Number(wallet?.balance) || 0
+    }));
+  const totalWalletCents = walletRows.reduce((sum, row) => sum + eurosToCents(row.balance), 0);
+  const topClients = walletRows
+    .filter(row => row.balance > 0)
+    .sort((a, b) => b.balance - a.balance)
+    .slice(0, 5);
+  const topProducts = Object.entries(shopStats.products || {})
+    .map(([label, stats]) => ({
+      label,
+      count: Number(stats?.count) || 0,
+      revenueCents: Number(stats?.revenueCents) || 0
+    }))
+    .filter(row => row.count > 0)
+    .sort((a, b) => b.count - a.count || b.revenueCents - a.revenueCents)
+    .slice(0, 5);
+
+  return {
+    totalRechargedCents: Number(shopStats.totalRechargedCents) || 0,
+    totalRemovedCents: Number(shopStats.totalRemovedCents) || 0,
+    totalWalletCents,
+    ordersCreated: Number(shopStats.ordersCreated) || 0,
+    ordersCompleted: Number(shopStats.ordersCompleted) || 0,
+    rechargeValidatedCount: Number(shopStats.rechargeValidatedCount) || 0,
+    openTickets: activeTickets.length,
+    openSupportTickets: activeTickets.filter(ticket => ticket.type === 'support').length,
+    pendingRechargeTickets: activeTickets.filter(ticket => ticket.type === 'recharge' && !ticket.paidAt).length,
+    openOrderTickets: activeTickets.filter(ticket => ticket.type === 'commande' && !ticket.completedAt).length,
+    topClients,
+    topProducts
+  };
+}
+
+function buildShopStatsEmbed() {
+  const snapshot = buildShopStatsSnapshot();
+  const topClients = snapshot.topClients
+    .map((row, index) => `**${index + 1}.** <@${row.userId}> — **${formatWalletAmount(row.balance)}**`)
+    .join('\n') || 'Aucun client avec solde positif.';
+  const topProducts = snapshot.topProducts
+    .map((row, index) => `**${index + 1}.** ${row.label}\nCommandes : **${row.count}** • Total : **${formatCents(row.revenueCents)}**`)
+    .join('\n\n') || 'Aucun produit enregistré depuis l’activation des stats.';
+
+  return new EmbedBuilder()
+    .setColor(0x3498DB)
+    .setTitle('📊 Stats boutique')
+    .setDescription('Statistiques enregistrées depuis l’activation du suivi boutique.')
+    .addFields(
+      {
+        name: 'Argent',
+        value: [
+          `Total rechargé : **${formatCents(snapshot.totalRechargedCents)}**`,
+          `Total retiré : **${formatCents(snapshot.totalRemovedCents)}**`,
+          `Solde total actuel : **${formatCents(snapshot.totalWalletCents)}**`
+        ].join('\n'),
+        inline: false
+      },
+      {
+        name: 'Commandes et recharges',
+        value: [
+          `Commandes créées : **${snapshot.ordersCreated}**`,
+          `Commandes terminées : **${snapshot.ordersCompleted}**`,
+          `Recharges validées : **${snapshot.rechargeValidatedCount}**`
+        ].join('\n'),
+        inline: false
+      },
+      {
+        name: 'Tickets',
+        value: [
+          `Tickets ouverts : **${snapshot.openTickets}**`,
+          `Tickets commande ouverts : **${snapshot.openOrderTickets}**`,
+          `Tickets support : **${snapshot.openSupportTickets}**`,
+          `Tickets recharge en attente : **${snapshot.pendingRechargeTickets}**`
+        ].join('\n'),
+        inline: false
+      },
+      { name: 'Top 5 clients', value: topClients, inline: false },
+      { name: 'Top produits commandés', value: topProducts, inline: false }
+    )
+    .setTimestamp();
+}
+
+function createWalletActionId() {
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function walletActionLabel(action) {
+  return action === 'add' ? 'ajout' : 'retrait';
+}
+
+function walletActionVerb(action) {
+  return action === 'add' ? 'ajouter' : 'retirer';
+}
+
+function walletActionColor(action) {
+  return action === 'add' ? 0x2ECC71 : 0xE67E22;
+}
+
+function walletConfirmationButtons(actionId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`confirm_wallet_action:${actionId}`)
+      .setLabel('Confirmer')
+      .setEmoji('✅')
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`cancel_wallet_action:${actionId}`)
+      .setLabel('Annuler')
+      .setEmoji('❌')
+      .setStyle(ButtonStyle.Secondary)
+  );
+}
+
+async function createWalletActionConfirmation(message, action, user, amount, ticketRequest) {
+  const actionId = createWalletActionId();
+  const amountText = formatWalletAmount(amount);
+  const confirmation = await message.channel.send({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(walletActionColor(action))
+        .setTitle(`⚠️ Confirmer ${walletActionLabel(action)} de solde`)
+        .setDescription([
+          `Owner : ${message.author}`,
+          `Membre : ${user}`,
+          `Montant : **${amountText}**`,
+          ticketRequest ? `Demande : **${ticketRequest.id}**` : null,
+          '',
+          `Confirmer pour ${walletActionVerb(action)} ce montant au portefeuille du membre.`
+        ].filter(Boolean).join('\n'))
+    ],
+    components: [walletConfirmationButtons(actionId)]
+  });
+
+  const timer = setTimeout(() => {
+    if (!pendingWalletActions.has(actionId)) return;
+
+    pendingWalletActions.delete(actionId);
+    confirmation.edit({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0x95A5A6)
+          .setTitle('⏱️ Confirmation expirée')
+          .setDescription(`L’action ${walletActionLabel(action)} de **${amountText}** pour ${user} a expiré.`)
+      ],
+      components: []
+    }).catch(() => {});
+  }, WALLET_CONFIRMATION_TTL);
+
+  timer.unref?.();
+
+  pendingWalletActions.set(actionId, {
+    action,
+    amount,
+    adminId: message.author.id,
+    channelId: message.channel.id,
+    guildId: message.guild.id,
+    targetUserId: user.id,
+    ticketRequestId: ticketRequest?.id || null,
+    timer
+  });
+}
+
+function clearPendingWalletAction(actionId) {
+  const pendingAction = pendingWalletActions.get(actionId);
+  if (pendingAction?.timer) clearTimeout(pendingAction.timer);
+  pendingWalletActions.delete(actionId);
+  return pendingAction;
+}
+
+async function applyWalletAdd({ user, amount, channel, guild, adminUser, ticketRequest }) {
+  if (!wallets[user.id]) wallets[user.id] = { balance: 0 };
+  wallets[user.id].balance += amount;
+  saveWallets();
+  const isRechargeValidation = ticketRequest && ticketRequest.type === 'recharge' && ticketRequest.userId === user.id;
+  recordShopRecharge(amount, isRechargeValidation);
+
+  if (isRechargeValidation) {
+    const amountText = formatWalletAmount(amount);
+    const newBalanceText = formatWalletAmount(wallets[user.id].balance);
+    const methodName = paymentLabel(ticketRequest.method);
+
+    const dmEmbed = new EmbedBuilder()
+      .setColor(0x2ECC71)
+      .setTitle('✅ Recharge validée')
+      .setDescription([
+        'Ta recharge a été validée avec succès.',
+        '',
+        `🧾 Demande : n°${ticketRequest.id}`,
+        `💰 Montant ajouté : **${amountText}**`,
+        `👤 Pris en charge par : **${adminUser.tag}**`,
+        '',
+        'Ton solde est maintenant disponible sur la boutique.'
+      ].join('\n'));
+
+    let dmSent = false;
+    await user.send({ embeds: [dmEmbed] })
+      .then(() => { dmSent = true; })
+      .catch(async () => {
+        const warn = await channel.send('⚠️ Impossible d’envoyer un MP au client. Le ticket reste ouvert.');
+        deleteLater(warn);
+      });
+
+    await channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0x2ECC71)
+          .setTitle(`✅ Paiement ${methodName} validé !`)
+          .setDescription([
+            `💶 Montant crédité : **${amountText}**`,
+            `💰 Nouveau solde : **${newBalanceText}**`,
+            `🆔 Demande : **n°${ticketRequest.id}**`,
+            dmSent ? '📩 MP envoyé au client.' : '⚠️ MP non envoyé au client.'
+          ].join('\n'))
+      ]
+    });
+
+    await sendAdminLog('✅ Recharge validée', [
+      `Admin : ${logUser(adminUser)}`,
+      `Client : ${logUser(user)}`,
+      `Demande : **${ticketRequest.id}**`,
+      `Méthode : **${methodName}**`,
+      `Montant ajouté : **${amountText}**`,
+      `Nouveau solde : **${newBalanceText}**`,
+      `Ticket : ${logChannel(channel)}`,
+      dmSent ? 'MP client : envoyé' : 'MP client : non envoyé'
+    ], dmSent ? 0x2ECC71 : 0xF1C40F);
+
+    const referralReward = await validateReferralReward(user, ticketRequest, amountText, guild);
+    if (referralReward) {
+      await channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0x2ECC71)
+            .setTitle('🎁 Parrainage validé')
+            .setDescription([
+              `👤 Parrain : ${referralReward.inviter}`,
+              `💰 Récompense ajoutée : **${referralReward.totalReward.toFixed(2)}€**`,
+              `👥 Filleuls validés : **${referralReward.stats.validated}**`,
+              `👛 Nouveau solde parrain : **${referralReward.newBalanceText}**`
+            ].join('\n'))
+        ]
+      });
+    }
+
+    if (dmSent) {
+      await channel.send('✅ Le ticket sera déplacé dans les tickets supprimés dans 10 secondes.');
+      setTimeout(() => {
+        archiveTicketChannel(channel, ticketRequest, adminUser, ticketRequest.userId)
+          .then(() => {
+            sendAdminLog('📁 Ticket recharge archivé', [
+              `Admin : ${logUser(adminUser)}`,
+              `Ticket : ${logChannel(channel)}`,
+              `Demande : **${ticketRequest.id}**`,
+              `Client : <@${ticketRequest.userId}>`
+            ], 0xE67E22);
+          })
+          .catch(error => {
+            sendAdminLog('⚠️ Archivage ticket impossible', [
+              `Admin : ${logUser(adminUser)}`,
+              `Ticket : ${logChannel(channel)}`,
+              `Demande : **${ticketRequest.id}**`,
+              `Erreur : \`${error.message}\``
+            ], 0xE74C3C);
+          });
+      }, 10_000);
+    }
+
+    return;
+  }
+
+  await sendAdminLog('💰 Solde ajouté', [
+    `Admin : ${logUser(adminUser)}`,
+    `Membre : ${logUser(user)}`,
+    `Montant ajouté : **${formatWalletAmount(amount)}**`,
+    `Nouveau solde : **${formatWalletAmount(wallets[user.id].balance)}**`,
+    `Salon : ${logChannel(channel)}`
+  ], 0x2ECC71);
+
+  await channel.send({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(0x2ECC71)
+        .setTitle('✅ Solde ajouté')
+        .setDescription(`**${formatWalletAmount(amount)}** ont été ajoutés au portefeuille de ${user}.`)
+    ]
+  });
+}
+
+async function applyWalletRemove({ user, amount, channel, adminUser }) {
+  if (!wallets[user.id]) wallets[user.id] = { balance: 0 };
+  wallets[user.id].balance -= amount;
+  saveWallets();
+  recordShopRemove(amount);
+
+  await sendAdminLog('💸 Solde retiré', [
+    `Admin : ${logUser(adminUser)}`,
+    `Membre : ${logUser(user)}`,
+    `Montant retiré : **${formatWalletAmount(amount)}**`,
+    `Nouveau solde : **${formatWalletAmount(wallets[user.id].balance)}**`,
+    `Salon : ${logChannel(channel)}`
+  ], 0xE67E22);
+
+  await channel.send({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(0xE67E22)
+        .setTitle('✅ Solde retiré')
+        .setDescription(`**${formatWalletAmount(amount)}** ont été retirés du portefeuille de ${user}.`)
+    ]
+  });
+}
+
+async function executeWalletAction(interaction, pendingAction) {
+  const channel = interaction.guild?.channels.cache.get(pendingAction.channelId)
+    || await interaction.guild?.channels.fetch(pendingAction.channelId).catch(() => null);
+  const user = await client.users.fetch(pendingAction.targetUserId).catch(() => null);
+
+  if (!channel || !user) {
+    throw new Error('Salon ou membre introuvable.');
+  }
+
+  const ticketRequest = getTicketRequest(channel.id);
+  const context = {
+    user,
+    amount: pendingAction.amount,
+    channel,
+    guild: interaction.guild,
+    adminUser: interaction.user,
+    ticketRequest
+  };
+
+  if (pendingAction.action === 'add') {
+    await applyWalletAdd(context);
+    return;
+  }
+
+  await applyWalletRemove(context);
+}
+
+async function handleWalletActionButton(interaction) {
+  const isConfirm = interaction.customId.startsWith('confirm_wallet_action:');
+  const actionId = interaction.customId.split(':')[1];
+  const pendingAction = pendingWalletActions.get(actionId);
+
+  if (!pendingAction) {
+    return interaction.reply({
+      content: '⏱️ Cette confirmation a expiré ou a déjà été utilisée.',
+      ephemeral: true
+    });
+  }
+
+  if (interaction.user.id !== pendingAction.adminId) {
+    return interaction.reply({
+      content: '❌ Seul l’owner qui a lancé cette commande peut confirmer ou annuler.',
+      ephemeral: true
+    });
+  }
+
+  if (!isOwnerMember(interaction.member)) {
+    return interaction.reply({
+      content: '❌ Seul le rôle owner peut confirmer cette action.',
+      ephemeral: true
+    });
+  }
+
+  clearPendingWalletAction(actionId);
+
+  if (!isConfirm) {
+    return interaction.update({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0x95A5A6)
+          .setTitle('❌ Action annulée')
+          .setDescription('Aucune modification de solde n’a été appliquée.')
+      ],
+      components: []
+    });
+  }
+
+  await interaction.update({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(walletActionColor(pendingAction.action))
+        .setTitle('⏳ Action confirmée')
+        .setDescription('Application de la modification de solde en cours...')
+    ],
+    components: []
+  });
+
+  try {
+    await executeWalletAction(interaction, pendingAction);
+    await interaction.message.edit({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(walletActionColor(pendingAction.action))
+          .setTitle('✅ Action appliquée')
+          .setDescription('La modification de solde a été appliquée avec succès.')
+      ],
+      components: []
+    }).catch(() => {});
+  } catch (error) {
+    await reportCrash('Confirmation solde impossible', error, [
+      `Action : **${pendingAction.action}**`,
+      `Membre : <@${pendingAction.targetUserId}>`,
+      `Montant : **${formatWalletAmount(pendingAction.amount)}**`
+    ]);
+
+    await interaction.followUp({
+      content: `❌ Impossible d’appliquer la modification : ${error.message}`,
+      ephemeral: true
+    }).catch(() => {});
+  }
 }
 
 function isReferralExcludedMember(member) {
@@ -1124,8 +1605,17 @@ function clearTicketCleanup(channelId) {
   ticketCleanupTimers.delete(channelId);
 }
 
+function clearTicketNoResponseReminder(channelId) {
+  const timer = ticketNoResponseReminderTimers.get(channelId);
+  if (!timer) return;
+
+  clearTimeout(timer);
+  ticketNoResponseReminderTimers.delete(channelId);
+}
+
 function scheduleArchivedTicketCleanup(channelId, archivedAt = Date.now()) {
   clearTicketCleanup(channelId);
+  clearTicketNoResponseReminder(channelId);
 
   const deleteAt = Number(archivedAt) + ARCHIVED_TICKET_TTL;
   const delay = Math.max(deleteAt - Date.now(), 0);
@@ -1141,6 +1631,7 @@ function scheduleArchivedTicketCleanup(channelId, archivedAt = Date.now()) {
 
 function scheduleCompletedOrderTicketCleanup(channelId, completedAt = Date.now()) {
   clearTicketCleanup(channelId);
+  clearTicketNoResponseReminder(channelId);
 
   const deleteAt = Number(completedAt) + ARCHIVED_TICKET_TTL;
   const delay = Math.max(deleteAt - Date.now(), 0);
@@ -1152,6 +1643,21 @@ function scheduleCompletedOrderTicketCleanup(channelId, completedAt = Date.now()
   }, delay);
 
   ticketCleanupTimers.set(channelId, timer);
+}
+
+function scheduleOpenTicketNoResponseReminder(channelId, reminderAt) {
+  if (!reminderAt) return;
+  clearTicketNoResponseReminder(channelId);
+
+  const delay = Math.max(Number(reminderAt) - Date.now(), 0);
+  const timer = setTimeout(() => {
+    sendOpenTicketNoResponseReminder(channelId)
+      .catch(error => reportCrash('Relance auto ticket sans réponse impossible', error, [
+        `Ticket : <#${channelId}> (${channelId})`
+      ]));
+  }, delay);
+
+  ticketNoResponseReminderTimers.set(channelId, timer);
 }
 
 function scheduleOpenTicketNoResponseCleanup(channelId, closeAt) {
@@ -1169,8 +1675,53 @@ function scheduleOpenTicketNoResponseCleanup(channelId, closeAt) {
   ticketCleanupTimers.set(channelId, timer);
 }
 
+async function sendOpenTicketNoResponseReminder(channelId) {
+  clearTicketNoResponseReminder(channelId);
+
+  const ticketRequest = getTicketRequest(channelId);
+  if (
+    !ticketRequest ||
+    !ticketRequest.noResponseReminderAt ||
+    ticketRequest.noResponseReminderSentAt ||
+    !shouldTrackNoMemberResponse(ticketRequest) ||
+    ticketRequest.archivedAt ||
+    ticketRequest.completedAt
+  ) {
+    return;
+  }
+
+  const channel = client.channels.cache.get(channelId)
+    || await client.channels.fetch(channelId).catch(() => null);
+
+  if (!channel) return;
+
+  const closeAt = ticketRequest.noResponseCloseAt
+    ? `<t:${Math.floor(ticketRequest.noResponseCloseAt / 1000)}:R>`
+    : 'bientôt';
+  const reminderLines = [
+    `<@${ticketRequest.userId}>`,
+    '',
+    '⏰ **Relance automatique**',
+    '',
+    'Nous attendons toujours ta réponse dans ce ticket.',
+    `Sans réponse de ta part, ce ticket sera fermé automatiquement ${closeAt}.`
+  ];
+
+  if (ticketRequest.type === 'recharge') {
+    const user = await client.users.fetch(ticketRequest.userId).catch(() => null);
+    if (user) await user.send(reminderLines.join('\n')).catch(() => {});
+  }
+
+  await channel.send(reminderLines.join('\n')).catch(() => {});
+
+  ticketRequest.noResponseReminderSentAt = Date.now();
+  delete ticketRequest.noResponseReminderAt;
+  saveRequests();
+}
+
 async function closeOpenTicketWithoutResponse(channelId) {
   clearTicketCleanup(channelId);
+  clearTicketNoResponseReminder(channelId);
 
   const ticketRequest = getTicketRequest(channelId);
   if (
@@ -1198,12 +1749,13 @@ async function closeOpenTicketWithoutResponse(channelId) {
     `Demande : **${ticketRequest.id}**`,
     `Type : **${ticketRequest.type}**`,
     `Client : <@${ticketRequest.userId}>`,
-    'Raison : aucune réponse du membre pendant 24h après l’ouverture'
+    'Raison : aucune réponse du membre pendant 4h après l’ouverture'
   ], 0xE67E22);
 }
 
 async function deleteArchivedTicketChannel(channelId, reason) {
   clearTicketCleanup(channelId);
+  clearTicketNoResponseReminder(channelId);
 
   const ticketRequest = getTicketRequest(channelId);
   const channel = client.channels.cache.get(channelId)
@@ -1245,6 +1797,7 @@ async function deleteArchivedTicketChannel(channelId, reason) {
 
 async function deleteCompletedOrderTicketChannel(channelId, reason) {
   clearTicketCleanup(channelId);
+  clearTicketNoResponseReminder(channelId);
 
   const ticketRequest = getTicketRequest(channelId);
 
@@ -1309,6 +1862,10 @@ function scheduleTicketCleanups() {
     if (ensureNoMemberResponseCloseAt(ticketRequest)) requestsChanged = true;
 
     if (ticketRequest?.noResponseCloseAt && shouldTrackNoMemberResponse(ticketRequest)) {
+      if (ticketRequest.noResponseReminderAt && !ticketRequest.noResponseReminderSentAt) {
+        scheduleOpenTicketNoResponseReminder(channelId, ticketRequest.noResponseReminderAt);
+      }
+
       scheduleOpenTicketNoResponseCleanup(channelId, ticketRequest.noResponseCloseAt);
     }
   });
@@ -1358,10 +1915,13 @@ async function archiveTicketChannel(channel, ticketRequest, user, ownerId = tick
     ticketRequest.originalParentId = ticketRequest.originalParentId || channel.parentId || ticketParentForType(ticketRequest.type);
     ticketRequest.archivedAt = Date.now();
     ticketRequest.archivedBy = user.id;
+    delete ticketRequest.noResponseReminderAt;
     delete ticketRequest.noResponseCloseAt;
     saveRequests();
   }
 
+  clearTicketNoResponseReminder(channel.id);
+  clearTicketCleanup(channel.id);
   await channel.setParent(TICKET_ARCHIVE_CATEGORY, { lockPermissions: false });
   await channel.permissionOverwrites.set(archivedTicketPermissionOverwrites(channel.guild, ticketRequest));
 
@@ -1408,10 +1968,18 @@ async function reopenTicketChannel(channel, ticketRequest, user, ownerId = ticke
 
   if (ticketRequest) {
     clearTicketCleanup(channel.id);
+    clearTicketNoResponseReminder(channel.id);
     ticketRequest.reopenedAt = Date.now();
     ticketRequest.reopenedBy = user.id;
     delete ticketRequest.archivedAt;
     delete ticketRequest.archivedBy;
+    if (shouldTrackNoMemberResponse(ticketRequest)) {
+      ticketRequest.noResponseReminderAt = ticketRequest.reopenedAt + TICKET_NO_RESPONSE_REMINDER_DELAY;
+      ticketRequest.noResponseCloseAt = ticketRequest.reopenedAt + TICKET_NO_RESPONSE_TTL;
+      delete ticketRequest.noResponseReminderSentAt;
+      scheduleOpenTicketNoResponseReminder(channel.id, ticketRequest.noResponseReminderAt);
+      scheduleOpenTicketNoResponseCleanup(channel.id, ticketRequest.noResponseCloseAt);
+    }
     saveRequests();
   }
 
@@ -1450,6 +2018,8 @@ async function completeOrderTicketChannel(channel, ticketRequest, user, ownerId 
     ticketRequest.completedParentId = ORDER_DONE_CATEGORY;
     ticketRequest.originalParentId = ORDER_DONE_CATEGORY;
     delete ticketRequest.noResponseCloseAt;
+    delete ticketRequest.noResponseReminderAt;
+    recordShopOrderCompleted(ticketRequest);
     saveRequests();
   }
 
@@ -1707,13 +2277,6 @@ function hasSocialAdvertisement(text) {
   );
 }
 
-function hasSevereInsult(text) {
-  return (
-    SEVERE_INSULT_REGEXES.some(regex => regex.test(text.spaced)) ||
-    SEVERE_INSULT_COMPACT.some(word => text.compact.includes(word))
-  );
-}
-
 function inspectAutoModeration(content) {
   const text = normalizeModerationText(content);
 
@@ -1732,15 +2295,6 @@ function inspectAutoModeration(content) {
       label: 'Pub réseaux',
       action: 'dm_notice',
       channelNotice: '⚠️ Message supprimé : partage de réseau à faire en MP.'
-    };
-  }
-
-  if (hasSevereInsult(text)) {
-    return {
-      type: 'severe_insult',
-      label: 'Insulte interdite',
-      action: 'warn',
-      channelNotice: '⚠️ Message supprimé : insulte interdite.'
     };
   }
 
@@ -2018,8 +2572,7 @@ async function handleAutoModeration(message) {
     return true;
   }
 
-  await applyWarningSanction(message, violation);
-  return true;
+  return false;
 }
 
 function logUser(user) {
@@ -3061,15 +3614,34 @@ client.on('messageCreate', async message => {
     });
   }
 
+  if (message.content.trim() === '!stats') {
+    if (!isOwnerMember(message.member)) {
+      const reply = await message.channel.send('❌ Seul le rôle owner peut consulter les stats boutique.');
+      return deleteLater(reply);
+    }
+
+    await sendAdminLog('📊 Stats boutique consultées', [
+      `Owner : ${logUser(message.author)}`,
+      `Salon : ${logChannel(message.channel)}`
+    ], 0x3498DB);
+
+    return message.channel.send({ embeds: [buildShopStatsEmbed()] });
+  }
+
   if (message.content.trim().split(/\s+/)[0] === '!add') {
+    if (!isOwnerMember(message.member)) {
+      const reply = await message.channel.send('❌ Seul le rôle owner peut lancer cette commande.');
+      return deleteLater(reply);
+    }
+
     const ticketRequest = getTicketRequest(message.channel.id);
     const mentionedUser = message.mentions.users.first();
     const userId = mentionedUser ? mentionedUser.id : ticketRequest?.userId;
     const user = userId ? await client.users.fetch(userId).catch(() => null) : null;
-    const args = message.content.split(' ');
-    const amount = parseFloat(mentionedUser ? args[2] : args[1]);
+    const args = message.content.trim().split(/\s+/);
+    const amount = parseWalletAmount(mentionedUser ? args[2] : args[1]);
 
-    if (!user || !Number.isFinite(amount)) {
+    if (!user || !Number.isFinite(amount) || amount <= 0) {
       const reply = await message.channel.send({
         embeds: [
           new EmbedBuilder()
@@ -3082,128 +3654,21 @@ client.on('messageCreate', async message => {
       return deleteLater(reply);
     }
 
-    if (!wallets[user.id]) wallets[user.id] = { balance: 0 };
-    wallets[user.id].balance += amount;
-    saveWallets();
-
-    if (ticketRequest && ticketRequest.type === 'recharge' && ticketRequest.userId === user.id) {
-      const amountText = `${amount.toFixed(2)}€`;
-      const newBalanceText = `${wallets[user.id].balance.toFixed(2)}€`;
-      const methodName = paymentLabel(ticketRequest.method);
-
-      const dmEmbed = new EmbedBuilder()
-        .setColor(0x2ECC71)
-        .setTitle('✅ Recharge validée')
-        .setDescription([
-          'Ta recharge a été validée avec succès.',
-          '',
-          `🧾 Demande : n°${ticketRequest.id}`,
-          `💰 Montant ajouté : **${amountText}**`,
-          `👤 Pris en charge par : **${message.author.tag}**`,
-          '',
-          'Ton solde est maintenant disponible sur la boutique.'
-        ].join('\n'));
-
-      let dmSent = false;
-      await user.send({ embeds: [dmEmbed] })
-        .then(() => { dmSent = true; })
-        .catch(async () => {
-          const warn = await message.channel.send('⚠️ Impossible d’envoyer un MP au client. Le ticket reste ouvert.');
-          deleteLater(warn);
-        });
-
-      await message.channel.send({
-        embeds: [
-          new EmbedBuilder()
-            .setColor(0x2ECC71)
-            .setTitle(`✅ Paiement ${methodName} validé !`)
-            .setDescription([
-              `💶 Montant crédité : **${amountText}**`,
-              `💰 Nouveau solde : **${newBalanceText}**`,
-              `🆔 Demande : **n°${ticketRequest.id}**`,
-              dmSent ? '📩 MP envoyé au client.' : '⚠️ MP non envoyé au client.'
-            ].join('\n'))
-        ]
-      });
-
-      await sendAdminLog('✅ Recharge validée', [
-        `Admin : ${logUser(message.author)}`,
-        `Client : ${logUser(user)}`,
-        `Demande : **${ticketRequest.id}**`,
-        `Méthode : **${methodName}**`,
-        `Montant ajouté : **${amountText}**`,
-        `Nouveau solde : **${newBalanceText}**`,
-        `Ticket : ${logChannel(message.channel)}`,
-        dmSent ? 'MP client : envoyé' : 'MP client : non envoyé'
-      ], dmSent ? 0x2ECC71 : 0xF1C40F);
-
-      const referralReward = await validateReferralReward(user, ticketRequest, amountText, message.guild);
-      if (referralReward) {
-        await message.channel.send({
-          embeds: [
-            new EmbedBuilder()
-              .setColor(0x2ECC71)
-              .setTitle('🎁 Parrainage validé')
-              .setDescription([
-                `👤 Parrain : ${referralReward.inviter}`,
-                `💰 Récompense ajoutée : **${referralReward.totalReward.toFixed(2)}€**`,
-                `👥 Filleuls validés : **${referralReward.stats.validated}**`,
-                `👛 Nouveau solde parrain : **${referralReward.newBalanceText}**`
-              ].join('\n'))
-          ]
-        });
-      }
-
-      if (dmSent) {
-        await message.channel.send('✅ Le ticket sera déplacé dans les tickets supprimés dans 10 secondes.');
-        setTimeout(() => {
-          archiveTicketChannel(message.channel, ticketRequest, message.author, ticketRequest.userId)
-            .then(() => {
-              sendAdminLog('📁 Ticket recharge archivé', [
-                `Admin : ${logUser(message.author)}`,
-                `Ticket : ${logChannel(message.channel)}`,
-                `Demande : **${ticketRequest.id}**`,
-                `Client : <@${ticketRequest.userId}>`
-              ], 0xE67E22);
-            })
-            .catch(error => {
-              sendAdminLog('⚠️ Archivage ticket impossible', [
-                `Admin : ${logUser(message.author)}`,
-                `Ticket : ${logChannel(message.channel)}`,
-                `Demande : **${ticketRequest.id}**`,
-                `Erreur : \`${error.message}\``
-              ], 0xE74C3C);
-            });
-        }, 10_000);
-      }
-
-      return;
-    }
-
-    await sendAdminLog('💰 Solde ajouté', [
-      `Admin : ${logUser(message.author)}`,
-      `Membre : ${logUser(user)}`,
-      `Montant ajouté : **${amount.toFixed(2)}€**`,
-      `Nouveau solde : **${wallets[user.id].balance.toFixed(2)}€**`,
-      `Salon : ${logChannel(message.channel)}`
-    ], 0x2ECC71);
-
-    return message.channel.send({
-      embeds: [
-        new EmbedBuilder()
-          .setColor(0x2ECC71)
-          .setTitle('✅ Solde ajouté')
-          .setDescription(`**${amount}€** ont été ajoutés au portefeuille de ${user}.`)
-      ]
-    });
+    await createWalletActionConfirmation(message, 'add', user, amount, ticketRequest);
+    return;
   }
 
   if (message.content.trim().split(/\s+/)[0] === '!remove') {
-    const args = message.content.split(' ');
-    const user = message.mentions.users.first();
-    const amount = parseFloat(args[2]);
+    if (!isOwnerMember(message.member)) {
+      const reply = await message.channel.send('❌ Seul le rôle owner peut lancer cette commande.');
+      return deleteLater(reply);
+    }
 
-    if (!user || !Number.isFinite(amount)) {
+    const args = message.content.trim().split(/\s+/);
+    const user = message.mentions.users.first();
+    const amount = parseWalletAmount(args[2]);
+
+    if (!user || !Number.isFinite(amount) || amount <= 0) {
       const reply = await message.channel.send({
         embeds: [
           new EmbedBuilder()
@@ -3216,26 +3681,8 @@ client.on('messageCreate', async message => {
       return deleteLater(reply);
     }
 
-    if (!wallets[user.id]) wallets[user.id] = { balance: 0 };
-    wallets[user.id].balance -= amount;
-    saveWallets();
-
-    await sendAdminLog('💸 Solde retiré', [
-      `Admin : ${logUser(message.author)}`,
-      `Membre : ${logUser(user)}`,
-      `Montant retiré : **${amount.toFixed(2)}€**`,
-      `Nouveau solde : **${wallets[user.id].balance.toFixed(2)}€**`,
-      `Salon : ${logChannel(message.channel)}`
-    ], 0xE67E22);
-
-    return message.channel.send({
-      embeds: [
-        new EmbedBuilder()
-          .setColor(0xE67E22)
-          .setTitle('✅ Solde retiré')
-          .setDescription(`**${amount}€** ont été retirés du portefeuille de ${user}.`)
-      ]
-    });
+    await createWalletActionConfirmation(message, 'remove', user, amount, null);
+    return;
   }
   } catch (error) {
     await handleMessageError(message, error);
@@ -3245,6 +3692,13 @@ client.on('messageCreate', async message => {
 client.on(Events.InteractionCreate, async interaction => {
   try {
   if (interaction.isButton()) {
+    if (
+      interaction.customId.startsWith('confirm_wallet_action:') ||
+      interaction.customId.startsWith('cancel_wallet_action:')
+    ) {
+      return handleWalletActionButton(interaction);
+    }
+
     if (interaction.customId === 'get_referral_invite') {
       const invite = await getOrCreatePersonalInvite(interaction.guild, interaction.user).catch(async error => {
         console.error('Impossible de créer le lien de parrainage :', error.message);
@@ -3834,6 +4288,7 @@ ${dmSent ? '📩 Instructions envoyées au client en MP.' : '⚠️ Impossible d
       product: product.label,
       price: prix
     });
+    recordShopOrderCreated(product.label, prix);
 
     await ticket.send({
       content: `<@&${STAFF_ROLE_ID}>
