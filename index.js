@@ -29,7 +29,7 @@ const client = new Client({
   partials: [Partials.Channel]
 });
 
-const ADMIN_ROLE_ID = '1310984358991106120';
+const ADMIN_ROLE_ID = '1310342652058800138';
 const STAFF_ROLE_ID = '1310342652058800138';
 const TICKET_ACCESS_ROLE_ID = '1310384527952056401';
 const TICKET_CATEGORY = '1495800617204187216';
@@ -65,18 +65,20 @@ const WALLET_BACKUP_DIR = path.join('backups', 'wallets');
 const WALLET_BACKUP_LIMIT = 50;
 const WARNINGS_FILE = 'warnings.json';
 const BOT_CHANGELOG_FILE = 'bot-changelog-state.json';
-const BOT_CHANGELOG_VERSION = '2026-05-03-referral-join-dm';
+const BOT_CHANGELOG_VERSION = '2026-05-03-owner-admin-role';
 const BOT_CHANGELOG_ITEMS = [
   'Ajout d’un salon changelog admin pour annoncer les modifications appliquées au bot.',
-  'Fermeture automatique des tickets ouverts sans réponse 24h après leur ouverture.',
-  'Annulation de cette fermeture automatique dès qu’une réponse arrive dans le ticket.',
+  'Fermeture automatique des tickets ouverts sans réponse du membre 24h après leur ouverture.',
+  'Les messages staff/admin dans un ticket ne stoppent plus cette fermeture automatique.',
   'Le screenshot de recharge envoyé en MP compte aussi comme une réponse.',
   'Mise à jour de l’image affichée par le bouton Fidélité Mcdo.',
-  'Avertissement lorsqu’un membre a déjà un ticket actif avant d’en ouvrir un autre.',
+  'Avertissement uniquement lorsqu’un membre ouvre un nouveau ticket dans une catégorie où il a déjà un ticket actif.',
   'Ajout automatique du rôle Le Rent’a quand une commande est marquée terminée.',
   'Ajout d’une confirmation Oui/Non avant d’ouvrir un ticket supplémentaire.',
   'Ajout d’un message de prise en charge automatique dans les tickets commande et support.',
-  'Envoi d’un MP au parrain dès qu’un filleul rejoint avec ses statistiques validées/en attente.'
+  'Envoi d’un MP au parrain dès qu’un filleul rejoint avec ses statistiques validées/en attente.',
+  'Fusion des messages de commande en un seul message avec une seule mention owner.',
+  'Le rôle owner est maintenant reconnu comme rôle admin du bot.'
 ];
 const AUTO_MOD_NOTICE_DELAY = 7_000;
 const WARNING_SANCTIONS = [
@@ -346,11 +348,44 @@ function getTicketRequest(channelId) {
   return requests.tickets[channelId] || null;
 }
 
+function hasTicketMemberResponse(ticketRequest) {
+  return Boolean(
+    ticketRequest?.firstMemberResponseAt ||
+    ticketRequest?.lastMemberResponseAt ||
+    (ticketRequest?.firstResponseBy && ticketRequest.firstResponseBy === ticketRequest.userId) ||
+    (ticketRequest?.lastResponseBy && ticketRequest.lastResponseBy === ticketRequest.userId)
+  );
+}
+
+function shouldTrackNoMemberResponse(ticketRequest) {
+  return Boolean(
+    ticketRequest &&
+    !ticketRequest.archivedAt &&
+    !ticketRequest.completedAt &&
+    !ticketRequest.screenshotReceivedAt &&
+    !hasTicketMemberResponse(ticketRequest)
+  );
+}
+
+function ensureNoMemberResponseCloseAt(ticketRequest) {
+  if (!shouldTrackNoMemberResponse(ticketRequest)) return false;
+  if (ticketRequest.noResponseCloseAt) return false;
+
+  const createdAt = Number(ticketRequest.createdAt);
+  const openedAt = Number.isFinite(createdAt) && createdAt > 0 ? createdAt : Date.now();
+  ticketRequest.noResponseCloseAt = openedAt + TICKET_NO_RESPONSE_TTL;
+  return true;
+}
+
 function markTicketResponse(ticketRequest, userId) {
   if (!ticketRequest || ticketRequest.archivedAt || ticketRequest.completedAt) return;
+  if (userId !== ticketRequest.userId) return;
 
   const now = Date.now();
+  if (!ticketRequest.firstMemberResponseAt) ticketRequest.firstMemberResponseAt = now;
+  ticketRequest.lastMemberResponseAt = now;
   if (!ticketRequest.firstResponseAt) ticketRequest.firstResponseAt = now;
+  if (!ticketRequest.firstResponseBy) ticketRequest.firstResponseBy = userId;
   ticketRequest.lastResponseAt = now;
   ticketRequest.lastResponseBy = userId;
   delete ticketRequest.noResponseCloseAt;
@@ -362,9 +397,10 @@ function isActiveTicketRequest(ticketRequest) {
   return Boolean(ticketRequest && !ticketRequest.archivedAt && !ticketRequest.completedAt);
 }
 
-async function findActiveTicketByUser(userId) {
+async function findActiveTicketByUser(userId, type = null) {
   for (const [channelId, ticketRequest] of Object.entries(requests.tickets || {})) {
     if (ticketRequest?.userId !== userId || !isActiveTicketRequest(ticketRequest)) continue;
+    if (type && ticketRequest.type !== type) continue;
 
     const channel = client.channels.cache.get(channelId)
       || await client.channels.fetch(channelId).catch(() => null);
@@ -379,8 +415,8 @@ async function findActiveTicketByUser(userId) {
   return null;
 }
 
-async function confirmOpeningAnotherTicket(interaction) {
-  const activeTicket = await findActiveTicketByUser(interaction.user.id);
+async function confirmOpeningAnotherTicket(interaction, type) {
+  const activeTicket = await findActiveTicketByUser(interaction.user.id, type);
   if (!activeTicket) return { confirmed: true, interaction };
 
   const typeLabels = {
@@ -1016,9 +1052,7 @@ async function closeOpenTicketWithoutResponse(channelId) {
   if (
     !ticketRequest ||
     !ticketRequest.noResponseCloseAt ||
-    ticketRequest.firstResponseAt ||
-    ticketRequest.lastResponseAt ||
-    ticketRequest.screenshotReceivedAt ||
+    !shouldTrackNoMemberResponse(ticketRequest) ||
     ticketRequest.archivedAt ||
     ticketRequest.completedAt
   ) {
@@ -1040,7 +1074,7 @@ async function closeOpenTicketWithoutResponse(channelId) {
     `Demande : **${ticketRequest.id}**`,
     `Type : **${ticketRequest.type}**`,
     `Client : <@${ticketRequest.userId}>`,
-    'Raison : aucune réponse humaine pendant 24h après l’ouverture'
+    'Raison : aucune réponse du membre pendant 24h après l’ouverture'
   ], 0xE67E22);
 }
 
@@ -1135,6 +1169,8 @@ async function deleteCompletedOrderTicketChannel(channelId, reason) {
 }
 
 function scheduleTicketCleanups() {
+  let requestsChanged = false;
+
   Object.entries(requests.tickets || {}).forEach(([channelId, ticketRequest]) => {
     if (ticketRequest?.archivedAt) {
       scheduleArchivedTicketCleanup(channelId, ticketRequest.archivedAt);
@@ -1146,10 +1182,14 @@ function scheduleTicketCleanups() {
       return;
     }
 
-    if (ticketRequest?.noResponseCloseAt && !ticketRequest.firstResponseAt && !ticketRequest.lastResponseAt && !ticketRequest.screenshotReceivedAt) {
+    if (ensureNoMemberResponseCloseAt(ticketRequest)) requestsChanged = true;
+
+    if (ticketRequest?.noResponseCloseAt && shouldTrackNoMemberResponse(ticketRequest)) {
       scheduleOpenTicketNoResponseCleanup(channelId, ticketRequest.noResponseCloseAt);
     }
   });
+
+  if (requestsChanged) saveRequests();
 }
 
 async function archiveTicketChannel(channel, ticketRequest, user, ownerId = ticketRequest?.userId) {
@@ -3310,7 +3350,7 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.customId === 'open_support_ticket') {
-      const ticketConfirmation = await confirmOpeningAnotherTicket(interaction);
+      const ticketConfirmation = await confirmOpeningAnotherTicket(interaction, 'support');
       if (!ticketConfirmation.confirmed) return;
       const responseInteraction = ticketConfirmation.interaction;
 
@@ -3517,7 +3557,7 @@ client.on(Events.InteractionCreate, async interaction => {
         });
       }
 
-      const ticketConfirmation = await confirmOpeningAnotherTicket(interaction);
+      const ticketConfirmation = await confirmOpeningAnotherTicket(interaction, 'recharge');
       if (!ticketConfirmation.confirmed) return;
       const responseInteraction = ticketConfirmation.interaction;
 
@@ -3608,7 +3648,7 @@ ${dmSent ? '📩 Instructions envoyées au client en MP.' : '⚠️ Impossible d
       });
     }
 
-    const ticketConfirmation = await confirmOpeningAnotherTicket(interaction);
+    const ticketConfirmation = await confirmOpeningAnotherTicket(interaction, 'commande');
     if (!ticketConfirmation.confirmed) return;
     const responseInteraction = ticketConfirmation.interaction;
 
@@ -3630,28 +3670,28 @@ ${dmSent ? '📩 Instructions envoyées au client en MP.' : '⚠️ Impossible d
     await ticket.send({
       content: `<@&${STAFF_ROLE_ID}>
 
-🎫 Nouvelle commande à traiter
+🎫 **Nouvelle commande à traiter**
 
 🧾 Demande : #${request.id}
 👤 Client : <@${interaction.user.id}>
 📦 Produit : ${product.label}
 💰 Payé : ${prix}€
 
-📌 Envoyer le produit au client.`,
+📌 Envoyer le produit au client.
+
+━━━━━━━━━━━━━━
+
+✅ **Commande prise en compte**
+
+Votre demande a bien été enregistrée.
+Un owner a été informé et va prendre en charge votre commande.
+
+⏱️ Délai estimé : **5 à 15 minutes**
+
+Merci de rester disponible dans ce ticket.
+Le staff vous répondra dès que possible.`,
       components: [orderTicketButtons(interaction.user.id)]
     });
-
-    await ticket.send([
-      '✅ **Commande prise en compte**',
-      '',
-      'Votre demande a bien été enregistrée.',
-      `<@&${STAFF_ROLE_ID}> a été informé et va prendre en charge votre commande.`,
-      '',
-      '⏱️ Délai estimé : **5 à 15 minutes**',
-      '',
-      'Merci de rester disponible dans ce ticket.',
-      'Le staff vous répondra dès que possible.'
-    ].join('\n'));
 
     sendAdminLog('🎫 Commande créée', [
       `Client : ${logUser(interaction.user)}`,
