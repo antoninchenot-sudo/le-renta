@@ -67,17 +67,18 @@ const NO_NOTE_TEXT = '❗❗ Ne mettre aucune note lors du paiement ❗❗';
 const WALLET_FILE = 'wallets.json';
 const WALLET_HISTORY_FILE = 'wallet-history.json';
 const WALLET_HISTORY_LIMIT = 50;
+const TICKET_HISTORY_FILE = 'ticket-history.json';
+const TICKET_HISTORY_LIMIT = 50;
 const WALLET_BACKUP_DIR = path.join('backups', 'wallets');
 const WALLET_BACKUP_LIMIT = 50;
 const MAINTENANCE_FILE = 'maintenance-state.json';
 const SHOP_STATS_FILE = 'shop-stats.json';
 const WARNINGS_FILE = 'warnings.json';
 const BOT_CHANGELOG_FILE = 'bot-changelog-state.json';
-const BOT_CHANGELOG_VERSION = '2026-05-03-completed-order-message';
+const BOT_CHANGELOG_VERSION = '2026-05-03-ticket-history-command';
 // Garder uniquement les changements de cette version, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Message de commande terminée fusionné avec la demande d’avis dans le ticket.',
-  'Notification MP ajoutée au client quand une commande est terminée, sans afficher le produit en MP.'
+  'Ajout de la commande owner !tickets pour consulter l’historique tickets d’un membre.'
 ];
 const AUTO_MOD_NOTICE_DELAY = 7_000;
 const WARNING_SANCTIONS = [
@@ -247,6 +248,7 @@ function saveJsonFile(fileName, data, options = {}) {
 
 let wallets = loadJsonFile(WALLET_FILE, {}, { backupDir: WALLET_BACKUP_DIR });
 let walletHistory = loadJsonFile(WALLET_HISTORY_FILE, { users: {} });
+let ticketHistory = loadJsonFile(TICKET_HISTORY_FILE, { users: {} });
 let requests = loadJsonFile('requests.json', { counter: 0, tickets: {} });
 let referrals = loadJsonFile('referrals.json', { invitedBy: {}, stats: {}, inviteLinks: {} });
 let maintenanceState = loadJsonFile(MAINTENANCE_FILE, { enabled: false, updatedAt: null, updatedBy: null });
@@ -271,6 +273,7 @@ if (fs.existsSync(WALLET_FILE)) {
 
 if (!referrals.inviteLinks) referrals.inviteLinks = {};
 if (!walletHistory.users) walletHistory.users = {};
+if (!ticketHistory.users) ticketHistory.users = {};
 if (typeof maintenanceState.enabled !== 'boolean') maintenanceState.enabled = false;
 if (!shopStats.products) shopStats.products = {};
 if (!warnings.users) warnings.users = {};
@@ -290,6 +293,10 @@ function saveWallets() {
 
 function saveWalletHistory() {
   saveJsonFile(WALLET_HISTORY_FILE, walletHistory);
+}
+
+function saveTicketHistory() {
+  saveJsonFile(TICKET_HISTORY_FILE, ticketHistory);
 }
 
 function saveRequests() {
@@ -344,6 +351,7 @@ function createRequest(type, channelId, userId, data = {}) {
 
   requests.tickets[channelId] = request;
   saveRequests();
+  upsertTicketHistory(request);
   scheduleOpenTicketNoResponseReminder(channelId, request.noResponseReminderAt);
   scheduleOpenTicketNoResponseCleanup(channelId, request.noResponseCloseAt);
   return request;
@@ -426,6 +434,10 @@ async function findActiveTicketByUser(userId, type = null) {
 
     if (channel) return { channel, ticketRequest };
 
+    upsertTicketHistory(ticketRequest, {
+      deletedAt: Date.now(),
+      deletedReason: 'Salon introuvable'
+    });
     delete requests.tickets[channelId];
     clearTicketCleanup(channelId);
     saveRequests();
@@ -645,6 +657,154 @@ function buildWalletHistoryEmbed(user) {
       inline: false
     })
     .setThumbnail(user.displayAvatarURL({ dynamic: true }))
+    .setTimestamp();
+}
+
+function ensureTicketHistory(userId) {
+  if (!ticketHistory.users[userId]) ticketHistory.users[userId] = [];
+  if (!Array.isArray(ticketHistory.users[userId])) ticketHistory.users[userId] = [];
+  return ticketHistory.users[userId];
+}
+
+function ticketTypeLabel(type) {
+  const labels = {
+    commande: 'Commande',
+    recharge: 'Recharge',
+    support: 'Support'
+  };
+
+  return labels[type] || 'Ticket';
+}
+
+function ticketStatusLabel(ticketRequest) {
+  if (ticketRequest?.deletedAt) return 'Supprimé';
+  if (ticketRequest?.completedAt) return 'Terminé';
+  if (ticketRequest?.archivedAt) return 'Archivé';
+  if (ticketRequest?.type === 'recharge' && ticketRequest?.screenshotReceivedAt) return 'Paiement à vérifier';
+  if (ticketRequest?.reopenedAt) return 'Réouvert';
+  return 'Ouvert';
+}
+
+function ticketHistoryRecord(ticketRequest, overrides = {}) {
+  if (!ticketRequest) return null;
+
+  return {
+    id: ticketRequest.id || overrides.id || null,
+    type: ticketRequest.type || overrides.type || null,
+    channelId: ticketRequest.channelId || overrides.channelId || null,
+    userId: ticketRequest.userId || overrides.userId || null,
+    createdAt: ticketRequest.createdAt || overrides.createdAt || Date.now(),
+    updatedAt: Date.now(),
+    product: ticketRequest.product || null,
+    price: ticketRequest.price ?? null,
+    amount: ticketRequest.amount || null,
+    method: ticketRequest.method || null,
+    paymentDate: ticketRequest.paymentDate || null,
+    paymentTime: ticketRequest.paymentTime || null,
+    screenshotReceivedAt: ticketRequest.screenshotReceivedAt || null,
+    completedAt: ticketRequest.completedAt || null,
+    completedBy: ticketRequest.completedBy || null,
+    archivedAt: ticketRequest.archivedAt || null,
+    archivedBy: ticketRequest.archivedBy || null,
+    reopenedAt: ticketRequest.reopenedAt || null,
+    reopenedBy: ticketRequest.reopenedBy || null,
+    deletedAt: ticketRequest.deletedAt || null,
+    deletedBy: ticketRequest.deletedBy || null,
+    deletedReason: ticketRequest.deletedReason || null,
+    ...overrides
+  };
+}
+
+function upsertTicketHistory(ticketRequest, overrides = {}) {
+  const record = ticketHistoryRecord(ticketRequest, overrides);
+  if (!record?.userId) return;
+
+  const entries = ensureTicketHistory(record.userId);
+  const index = entries.findIndex(entry => (
+    (record.id && entry.id === record.id) ||
+    (record.channelId && entry.channelId === record.channelId)
+  ));
+  const merged = index >= 0 ? { ...entries[index], ...record, updatedAt: Date.now() } : record;
+
+  if (index >= 0) {
+    entries.splice(index, 1);
+  }
+
+  entries.unshift(merged);
+  ticketHistory.users[record.userId] = entries
+    .sort((a, b) => Number(b.updatedAt || b.createdAt || 0) - Number(a.updatedAt || a.createdAt || 0))
+    .slice(0, TICKET_HISTORY_LIMIT);
+  saveTicketHistory();
+}
+
+function currentTicketHistoryRecords(userId) {
+  return Object.values(requests.tickets || {})
+    .filter(ticketRequest => ticketRequest?.userId === userId)
+    .map(ticketRequest => ticketHistoryRecord(ticketRequest))
+    .filter(Boolean);
+}
+
+function getTicketHistoryRows(userId) {
+  const rows = new Map();
+
+  for (const entry of ensureTicketHistory(userId)) {
+    const key = entry.id || entry.channelId;
+    if (key) rows.set(key, entry);
+  }
+
+  for (const entry of currentTicketHistoryRecords(userId)) {
+    const key = entry.id || entry.channelId;
+    if (key) rows.set(key, { ...rows.get(key), ...entry });
+  }
+
+  return [...rows.values()]
+    .sort((a, b) => Number(b.createdAt || b.updatedAt || 0) - Number(a.createdAt || a.updatedAt || 0))
+    .slice(0, 10);
+}
+
+function formatTicketHistoryLine(ticketRequest, index) {
+  const openedAt = ticketRequest.createdAt ? `<t:${Math.floor(ticketRequest.createdAt / 1000)}:f>` : 'Date inconnue';
+  const channel = ticketRequest.channelId ? `<#${ticketRequest.channelId}>` : 'Salon inconnu';
+  const details = [];
+
+  if (ticketRequest.type === 'commande') {
+    details.push(`Produit : **${ticketRequest.product || 'Non précisé'}**`);
+    if (ticketRequest.price !== null && ticketRequest.price !== undefined) details.push(`Payé : **${formatWalletAmount(Number(ticketRequest.price) || 0)}**`);
+  }
+
+  if (ticketRequest.type === 'recharge') {
+    details.push(`Montant : **${ticketRequest.amount || 'Non précisé'}**`);
+    if (ticketRequest.method) details.push(`Paiement : **${paymentLabel(ticketRequest.method)}**`);
+  }
+
+  if (ticketRequest.deletedReason) details.push(`Raison suppression : **${ticketRequest.deletedReason}**`);
+
+  return [
+    `**${index + 1}. #${ticketRequest.id || 'inconnu'} — ${ticketTypeLabel(ticketRequest.type)}**`,
+    `Statut : **${ticketStatusLabel(ticketRequest)}**`,
+    ...details,
+    `Ouvert : ${openedAt}`,
+    `Ticket : ${channel}`
+  ].join('\n');
+}
+
+function buildTicketHistoryEmbed(user) {
+  const rows = getTicketHistoryRows(user.id);
+  const description = rows.length
+    ? rows.map(formatTicketHistoryLine).join('\n\n')
+    : 'Aucun ticket enregistré pour ce membre depuis l’activation de l’historique.';
+
+  return new EmbedBuilder()
+    .setColor(0x3498DB)
+    .setTitle('🎫 Historique tickets')
+    .setDescription(description)
+    .addFields({
+      name: 'Membre',
+      value: `${user}`,
+      inline: false
+    })
+    .setThumbnail(user.displayAvatarURL({ dynamic: true }))
+    .setFooter({ text: 'Historique limité aux 10 derniers tickets affichés' })
     .setTimestamp();
 }
 
@@ -1882,6 +2042,10 @@ async function closeOpenTicketWithoutResponse(channelId) {
 
   if (!channel) {
     delete requests.tickets[channelId];
+    upsertTicketHistory(ticketRequest, {
+      deletedAt: Date.now(),
+      deletedReason: 'Salon introuvable'
+    });
     saveRequests();
     return;
   }
@@ -1906,6 +2070,10 @@ async function deleteArchivedTicketChannel(channelId, reason) {
 
   if (!channel) {
     if (ticketRequest?.archivedAt) {
+      upsertTicketHistory(ticketRequest, {
+        deletedAt: Date.now(),
+        deletedReason: 'Salon introuvable'
+      });
       delete requests.tickets[channelId];
       saveRequests();
     }
@@ -1934,6 +2102,10 @@ async function deleteArchivedTicketChannel(channelId, reason) {
 
   if (!deleted) return;
 
+  upsertTicketHistory(ticketRequest, {
+    deletedAt: Date.now(),
+    deletedReason: reason
+  });
   delete requests.tickets[channelId];
   saveRequests();
 }
@@ -1957,6 +2129,10 @@ async function deleteCompletedOrderTicketChannel(channelId, reason) {
     || await client.channels.fetch(channelId).catch(() => null);
 
   if (!channel) {
+    upsertTicketHistory(ticketRequest, {
+      deletedAt: Date.now(),
+      deletedReason: 'Salon introuvable'
+    });
     delete requests.tickets[channelId];
     saveRequests();
     return;
@@ -1984,6 +2160,10 @@ async function deleteCompletedOrderTicketChannel(channelId, reason) {
 
   if (!deleted) return;
 
+  upsertTicketHistory(ticketRequest, {
+    deletedAt: Date.now(),
+    deletedReason: reason
+  });
   delete requests.tickets[channelId];
   saveRequests();
 }
@@ -2060,6 +2240,7 @@ async function archiveTicketChannel(channel, ticketRequest, user, ownerId = tick
     ticketRequest.archivedBy = user.id;
     delete ticketRequest.noResponseReminderAt;
     delete ticketRequest.noResponseCloseAt;
+    upsertTicketHistory(ticketRequest);
     saveRequests();
   }
 
@@ -2123,6 +2304,7 @@ async function reopenTicketChannel(channel, ticketRequest, user, ownerId = ticke
       scheduleOpenTicketNoResponseReminder(channel.id, ticketRequest.noResponseReminderAt);
       scheduleOpenTicketNoResponseCleanup(channel.id, ticketRequest.noResponseCloseAt);
     }
+    upsertTicketHistory(ticketRequest);
     saveRequests();
   }
 
@@ -2163,6 +2345,7 @@ async function completeOrderTicketChannel(channel, ticketRequest, user, ownerId 
     delete ticketRequest.noResponseCloseAt;
     delete ticketRequest.noResponseReminderAt;
     recordShopOrderCompleted(ticketRequest);
+    upsertTicketHistory(ticketRequest);
     saveRequests();
   }
 
@@ -3067,6 +3250,7 @@ client.on('messageCreate', async message => {
     dmRequest.screenshotUrl = screenshotUrl;
     markTicketResponse(dmRequest, message.author.id);
     saveRequests();
+    upsertTicketHistory(dmRequest);
 
     const adminChannel = await client.channels.fetch(dmRequest.channelId).catch(() => null);
 
@@ -3910,6 +4094,36 @@ client.on('messageCreate', async message => {
     return message.channel.send({ embeds: [buildWalletHistoryEmbed(user)] });
   }
 
+  if (message.content.trim().split(/\s+/)[0] === '!tickets') {
+    if (!isOwnerMember(message.member)) {
+      const reply = await message.channel.send('❌ Seul le rôle owner peut consulter l’historique tickets.');
+      return deleteLater(reply);
+    }
+
+    const user = message.mentions.users.first();
+
+    if (!user) {
+      const reply = await message.channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0xE74C3C)
+            .setTitle('❌ Commande invalide')
+            .setDescription('Utilisation : `!tickets @membre`')
+        ]
+      });
+
+      return deleteLater(reply);
+    }
+
+    await sendAdminLog('🎫 Historique tickets consulté', [
+      `Owner : ${logUser(message.author)}`,
+      `Membre : ${logUser(user)}`,
+      `Salon : ${logChannel(message.channel)}`
+    ], 0x3498DB);
+
+    return message.channel.send({ embeds: [buildTicketHistoryEmbed(user)] });
+  }
+
   if (message.content.trim().split(/\s+/)[0] === '!add') {
     if (!isOwnerMember(message.member)) {
       const reply = await message.channel.send('❌ Seul le rôle owner peut lancer cette commande.');
@@ -4173,6 +4387,11 @@ client.on(Events.InteractionCreate, async interaction => {
           ticketRequest ? `Client : <@${ticketRequest.userId}>` : null
         ], 0xE74C3C);
 
+        upsertTicketHistory(ticketRequest, {
+          deletedAt: Date.now(),
+          deletedBy: interaction.user.id,
+          deletedReason: 'Suppression définitive manuelle'
+        });
         delete requests.tickets[interaction.channel.id];
         saveRequests();
         await interaction.reply({ content: '🗑️ Ticket supprimé définitivement dans 5 secondes...', ephemeral: true });
