@@ -45,6 +45,7 @@ const ADMIN_CHANGELOG_CHANNEL_ID = '1500475167313231983';
 const INVITE_ANNOUNCE_CHANNEL_ID = '1310355769824383059';
 const INVITE_ADMIN_CHANNEL_ID = '1499523428112142568';
 const RULES_ROLE_ID = '1310359454377840650';
+const CUSTOMER_ROLE_ID = '1499537426463461586';
 const DELETE_DELAY = 10_000;
 const ARCHIVED_TICKET_TTL = 24 * 60 * 60 * 1000;
 const TICKET_NO_RESPONSE_TTL = 24 * 60 * 60 * 1000;
@@ -64,13 +65,18 @@ const WALLET_BACKUP_DIR = path.join('backups', 'wallets');
 const WALLET_BACKUP_LIMIT = 50;
 const WARNINGS_FILE = 'warnings.json';
 const BOT_CHANGELOG_FILE = 'bot-changelog-state.json';
-const BOT_CHANGELOG_VERSION = '2026-05-03-fidelity-image-ticket-timeout';
+const BOT_CHANGELOG_VERSION = '2026-05-03-referral-join-dm';
 const BOT_CHANGELOG_ITEMS = [
   'Ajout d’un salon changelog admin pour annoncer les modifications appliquées au bot.',
   'Fermeture automatique des tickets ouverts sans réponse 24h après leur ouverture.',
   'Annulation de cette fermeture automatique dès qu’une réponse arrive dans le ticket.',
   'Le screenshot de recharge envoyé en MP compte aussi comme une réponse.',
-  'Mise à jour de l’image affichée par le bouton Fidélité Mcdo.'
+  'Mise à jour de l’image affichée par le bouton Fidélité Mcdo.',
+  'Avertissement lorsqu’un membre a déjà un ticket actif avant d’en ouvrir un autre.',
+  'Ajout automatique du rôle Le Rent’a quand une commande est marquée terminée.',
+  'Ajout d’une confirmation Oui/Non avant d’ouvrir un ticket supplémentaire.',
+  'Ajout d’un message de prise en charge automatique dans les tickets commande et support.',
+  'Envoi d’un MP au parrain dès qu’un filleul rejoint avec ses statistiques validées/en attente.'
 ];
 const AUTO_MOD_NOTICE_DELAY = 7_000;
 const WARNING_SANCTIONS = [
@@ -352,6 +358,109 @@ function markTicketResponse(ticketRequest, userId) {
   saveRequests();
 }
 
+function isActiveTicketRequest(ticketRequest) {
+  return Boolean(ticketRequest && !ticketRequest.archivedAt && !ticketRequest.completedAt);
+}
+
+async function findActiveTicketByUser(userId) {
+  for (const [channelId, ticketRequest] of Object.entries(requests.tickets || {})) {
+    if (ticketRequest?.userId !== userId || !isActiveTicketRequest(ticketRequest)) continue;
+
+    const channel = client.channels.cache.get(channelId)
+      || await client.channels.fetch(channelId).catch(() => null);
+
+    if (channel) return { channel, ticketRequest };
+
+    delete requests.tickets[channelId];
+    clearTicketCleanup(channelId);
+    saveRequests();
+  }
+
+  return null;
+}
+
+async function confirmOpeningAnotherTicket(interaction) {
+  const activeTicket = await findActiveTicketByUser(interaction.user.id);
+  if (!activeTicket) return { confirmed: true, interaction };
+
+  const typeLabels = {
+    recharge: 'recharge',
+    support: 'support',
+    commande: 'commande'
+  };
+  const typeLabel = typeLabels[activeTicket.ticketRequest.type] || 'ticket';
+  const isRecharge = activeTicket.ticketRequest.type === 'recharge';
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('confirm_open_another_ticket')
+      .setLabel('Oui, ouvrir un autre')
+      .setEmoji('✅')
+      .setStyle(ButtonStyle.Danger),
+    new ButtonBuilder()
+      .setCustomId('cancel_open_another_ticket')
+      .setLabel('Non')
+      .setEmoji('❌')
+      .setStyle(ButtonStyle.Secondary)
+  );
+
+  const prompt = await interaction.reply({
+    content: isRecharge
+      ? [
+          '⚠️ Vous avez déjà une recharge en cours.',
+          'Le bot vous a envoyé les instructions en message privé.',
+          '',
+          'Êtes-vous sûr de vouloir ouvrir une autre demande ?'
+        ].join('\n')
+      : [
+          `⚠️ Vous avez déjà un ticket ${typeLabel} ouvert : ${activeTicket.channel}`,
+          '',
+          'Êtes-vous sûr de vouloir en ouvrir un autre ?'
+        ].join('\n'),
+    components: [row],
+    ephemeral: true,
+    fetchReply: true
+  });
+
+  try {
+    const confirmation = await prompt.awaitMessageComponent({
+      filter: componentInteraction => (
+        componentInteraction.user.id === interaction.user.id &&
+        ['confirm_open_another_ticket', 'cancel_open_another_ticket'].includes(componentInteraction.customId)
+      ),
+      time: 30_000
+    });
+
+    if (confirmation.customId === 'cancel_open_another_ticket') {
+      await confirmation.update({
+        content: isRecharge
+          ? [
+              '📩 Va dans tes messages privés avec le bot.',
+              'Les instructions de ta recharge en cours y sont envoyées.'
+            ].join('\n')
+          : `Voici ton ticket déjà ouvert : ${activeTicket.channel}`,
+        components: []
+      });
+
+      return { confirmed: false };
+    }
+
+    await confirmation.update({
+      content: '✅ D’accord, création du nouveau ticket en cours...',
+      components: []
+    });
+
+    return { confirmed: true, interaction: confirmation };
+  } catch {
+    await interaction.editReply({
+      content: '⏱️ Ouverture du nouveau ticket annulée.',
+      components: []
+    }).catch(() => {});
+
+    return { confirmed: false };
+  }
+}
+
 function findOpenRechargeRequestByUser(userId) {
   return Object.values(requests.tickets)
     .reverse()
@@ -557,6 +666,42 @@ async function recordMemberInvite(member) {
   return referrals.invitedBy[member.id];
 }
 
+async function notifyInviterOfPendingReferral(member, referral) {
+  if (!referral || referral.joinDmSentAt || !referral.inviterId) return false;
+
+  const inviter = await client.users.fetch(referral.inviterId).catch(() => null);
+  if (!inviter) return false;
+
+  const summary = getReferralSummary(inviter.id);
+  const sent = await inviter.send({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(0xD4AF37)
+        .setTitle('👥 Nouveau filleul détecté')
+        .setDescription([
+          `${member.user.tag} a rejoint le serveur avec ton lien de parrainage.`,
+          '',
+          'La récompense sera validée automatiquement après sa première recharge.',
+          '',
+          `✅ Filleuls validés : **${summary.validated.length}**`,
+          `⏳ En attente de validation : **${summary.pending.length}**`
+        ].join('\n'))
+        .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
+        .setFooter({ text: 'Parrainage • Validation après première recharge' })
+        .setTimestamp()
+    ]
+  })
+    .then(() => true)
+    .catch(() => false);
+
+  if (sent) {
+    referral.joinDmSentAt = Date.now();
+    saveReferrals();
+  }
+
+  return sent;
+}
+
 async function validateReferralReward(user, ticketRequest, amountText) {
   const referral = referrals.invitedBy[user.id];
   if (!referral || referral.validated || !referral.inviterId || referral.inviterId === user.id) {
@@ -701,6 +846,7 @@ function supportTicketPermissionOverwrites(guild, userId) {
   return [
     { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
     { id: userId, allow: ticketAllow },
+    { id: STAFF_ROLE_ID, allow: ticketAllow },
     { id: TICKET_ACCESS_ROLE_ID, allow: ticketAllow },
     { id: ADMIN_ROLE_ID, allow: ticketAllow }
   ];
@@ -1121,6 +1267,22 @@ async function completeOrderTicketChannel(channel, ticketRequest, user, ownerId 
   });
 }
 
+async function addCustomerRoleAfterCompletedOrder(guild, ticketRequest) {
+  if (!ticketRequest?.userId) return false;
+
+  const member = await guild.members.fetch(ticketRequest.userId).catch(() => null);
+  if (!member) return false;
+
+  if (member.roles.cache.has(CUSTOMER_ROLE_ID)) return true;
+
+  await member.roles.add(CUSTOMER_ROLE_ID, 'Commande marquée terminée')
+    .catch(error => {
+      throw new Error(`Rôle Le Rent’a impossible à ajouter : ${error.message}`);
+    });
+
+  return true;
+}
+
 function sanitizeChannelName(name) {
   return name
     .toLowerCase()
@@ -1185,6 +1347,14 @@ function deleteLater(message, delay = DELETE_DELAY) {
 }
 
 async function replyTemp(interaction, options, delay = DELETE_DELAY) {
+  if (interaction.replied || interaction.deferred) {
+    const reply = await interaction.followUp({ ...options, fetchReply: true });
+    setTimeout(() => {
+      reply.delete().catch(() => {});
+    }, delay);
+    return reply;
+  }
+
   await interaction.reply(options);
   setTimeout(() => {
     interaction.deleteReply().catch(() => {});
@@ -1889,10 +2059,20 @@ client.on(Events.GuildMemberAdd, async member => {
       return;
     }
 
+    const inviterDmSent = await notifyInviterOfPendingReferral(member, referral);
+
     await Promise.all([
       sendInviteJoinAnnouncement(member, referral),
       sendInviteAdminAnnouncement(member, referral)
     ]);
+
+    if (!inviterDmSent) {
+      await sendAdminLog('⚠️ MP parrain impossible', [
+        `Parrain : <@${referral.inviterId}>`,
+        `Filleul : ${logUser(member.user)}`,
+        'Raison : MP fermé ou utilisateur introuvable'
+      ], 0xF1C40F);
+    }
   } catch (error) {
     await reportCrash('Erreur arrivée membre', error, [
       `Membre : ${member?.user ? logUser(member.user) : 'Inconnu'}`,
@@ -2972,16 +3152,30 @@ client.on(Events.InteractionCreate, async interaction => {
         return;
       }
 
+      let customerRoleAdded = false;
+      let customerRoleError = null;
+
+      try {
+        customerRoleAdded = await addCustomerRoleAfterCompletedOrder(interaction.guild, ticketRequest);
+      } catch (error) {
+        customerRoleError = error;
+      }
+
       await sendAdminLog('✅ Commande terminée', [
         `Par : ${logUser(interaction.user)}`,
         `Ticket : ${logChannel(interaction.channel)}`,
         `Demande : **${ticketRequest.id}**`,
         `Client : <@${ticketRequest.userId}>`,
         `Produit : **${ticketRequest.product || 'Non précisé'}**`,
-        `Catégorie : <#${ORDER_DONE_CATEGORY}>`
-      ], 0x2ECC71);
+        `Catégorie : <#${ORDER_DONE_CATEGORY}>`,
+        customerRoleAdded
+          ? `Rôle client : <@&${CUSTOMER_ROLE_ID}> ajouté ou déjà présent`
+          : `Rôle client : non ajouté${customerRoleError ? ` (${customerRoleError.message})` : ''}`
+      ], customerRoleError ? 0xF1C40F : 0x2ECC71);
 
-      await interaction.editReply('✅ Commande terminée, ticket déplacé et message d’avis envoyé.');
+      await interaction.editReply(customerRoleError
+        ? `✅ Commande terminée, ticket déplacé et message d’avis envoyé.\n⚠️ ${customerRoleError.message}`
+        : '✅ Commande terminée, ticket déplacé, rôle client appliqué et message d’avis envoyé.');
       return;
     }
 
@@ -3116,6 +3310,10 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.customId === 'open_support_ticket') {
+      const ticketConfirmation = await confirmOpeningAnotherTicket(interaction);
+      if (!ticketConfirmation.confirmed) return;
+      const responseInteraction = ticketConfirmation.interaction;
+
       const ticket = await interaction.guild.channels.create({
         name: `support-${sanitizeChannelName(interaction.user.username)}`,
         parent: SUPPORT_CATEGORY,
@@ -3135,13 +3333,23 @@ client.on(Events.InteractionCreate, async interaction => {
         components: [ticketButtons(interaction.user.id)]
       });
 
+      await ticket.send([
+        '✅ **Ticket support pris en compte**',
+        '',
+        'Votre demande a bien été enregistrée.',
+        `<@&${STAFF_ROLE_ID}> et <@&${TICKET_ACCESS_ROLE_ID}> ont été informés et vont prendre en charge votre demande.`,
+        '',
+        'Merci de rester disponible dans ce ticket.',
+        'Le staff vous répondra dès que possible.'
+      ].join('\n'));
+
       sendAdminLog('🚨 Ticket support créé', [
         `Client : ${logUser(interaction.user)}`,
         `Demande : **${request.id}**`,
         `Ticket : ${logChannel(ticket)}`
       ], 0xF1C40F);
 
-      return replyTemp(interaction, {
+      return replyTemp(responseInteraction, {
         content: `✅ Ticket support créé : ${ticket}\n🧾 Demande : #${request.id}`,
         ephemeral: true
       });
@@ -3309,6 +3517,10 @@ client.on(Events.InteractionCreate, async interaction => {
         });
       }
 
+      const ticketConfirmation = await confirmOpeningAnotherTicket(interaction);
+      if (!ticketConfirmation.confirmed) return;
+      const responseInteraction = ticketConfirmation.interaction;
+
       pendingRecharges.delete(pendingRechargeKey(interaction));
 
       const ticket = await interaction.guild.channels.create({
@@ -3361,9 +3573,9 @@ ${dmSent ? '📩 Instructions envoyées au client en MP.' : '⚠️ Impossible d
         dmSent ? 'MP instructions : envoyé' : 'MP instructions : non envoyé'
       ], dmSent ? 0x2ECC71 : 0xF1C40F);
 
-      return replyTemp(interaction, {
+      return replyTemp(responseInteraction, {
         content: dmSent
-          ? `✅ Demande de recharge créée pour ${amount}.\n📩 Les instructions ont été envoyées en MP.\n🧾 Demande : #${request.id}`
+          ? `✅ Demande de recharge créée pour ${amount}.\n📩 Va dans tes messages privés : le bot t’a envoyé un MP.\n➡️ Suis les instructions dans ce message privé.\n🧾 Demande : #${request.id}`
           : `⚠️ Demande créée, mais impossible de t’envoyer un MP. Contacte le staff.\n🧾 Demande : #${request.id}`,
         ephemeral: true
       });
@@ -3396,6 +3608,10 @@ ${dmSent ? '📩 Instructions envoyées au client en MP.' : '⚠️ Impossible d
       });
     }
 
+    const ticketConfirmation = await confirmOpeningAnotherTicket(interaction);
+    if (!ticketConfirmation.confirmed) return;
+    const responseInteraction = ticketConfirmation.interaction;
+
     wallets[uid].balance -= prix;
     saveWallets();
 
@@ -3425,6 +3641,18 @@ ${dmSent ? '📩 Instructions envoyées au client en MP.' : '⚠️ Impossible d
       components: [orderTicketButtons(interaction.user.id)]
     });
 
+    await ticket.send([
+      '✅ **Commande prise en compte**',
+      '',
+      'Votre demande a bien été enregistrée.',
+      `<@&${STAFF_ROLE_ID}> a été informé et va prendre en charge votre commande.`,
+      '',
+      '⏱️ Délai estimé : **5 à 15 minutes**',
+      '',
+      'Merci de rester disponible dans ce ticket.',
+      'Le staff vous répondra dès que possible.'
+    ].join('\n'));
+
     sendAdminLog('🎫 Commande créée', [
       `Client : ${logUser(interaction.user)}`,
       `Demande : **${request.id}**`,
@@ -3434,7 +3662,7 @@ ${dmSent ? '📩 Instructions envoyées au client en MP.' : '⚠️ Impossible d
       `Ticket : ${logChannel(ticket)}`
     ], 0x2ECC71);
 
-    return replyTemp(interaction, {
+    return replyTemp(responseInteraction, {
       content: `✅ Commande envoyée au staff.\n🧾 Demande : #${request.id}`,
       ephemeral: true
     });
