@@ -41,18 +41,20 @@ const SHOP_CHANNEL_ID = '1310381741218988122';
 const SUPPORT_CHANNEL_ID = '1498434089450078258';
 const LOG_CHANNEL_ID = '1310354201704136747';
 const ADMIN_COMMAND_LOG_CHANNEL_ID = '1499758004797702225';
+const ADMIN_CHANGELOG_CHANNEL_ID = '1500475167313231983';
 const INVITE_ANNOUNCE_CHANNEL_ID = '1310355769824383059';
 const INVITE_ADMIN_CHANNEL_ID = '1499523428112142568';
 const RULES_ROLE_ID = '1310359454377840650';
 const DELETE_DELAY = 10_000;
 const ARCHIVED_TICKET_TTL = 24 * 60 * 60 * 1000;
+const TICKET_NO_RESPONSE_TTL = 24 * 60 * 60 * 1000;
 
 const SHOP_EMOJI = '🛒';
 const MCDONALDS_EMOJI_ID = '1498440076257136830';
 const MCDONALDS_EMOJI_NAME = '4964mcdonalds';
 const MCDONALDS_EMOJI = `<:${MCDONALDS_EMOJI_NAME}:${MCDONALDS_EMOJI_ID}>`;
 const MCDONALDS_BUTTON_EMOJI = { id: MCDONALDS_EMOJI_ID, name: MCDONALDS_EMOJI_NAME };
-const INFO_IMAGE = process.env.INFO_IMAGE || 'https://media.discordapp.net/attachments/1499072550985269268/1499121030491541585/IMG_1333.jpg?ex=69f4f641&is=69f3a4c1&hm=1f19f9ceb27d07466a27fcb29c1fe6fd35d2699006a35d395e827735eb547bee&=&format=webp&width=623&height=944';
+const INFO_IMAGE = process.env.INFO_IMAGE || 'https://i0.wp.com/direct-actu.fr/wp-content/uploads/2024/11/1725353427343-ad6c22b5-478a-412e-9c6f-8e14646acd5e_1.png?ssl=1';
 const PAYPAL_LINK = 'https://www.paypal.me/LaRenta23';
 const REVOLUT_LINK = 'https://revolut.me/arthur23320/pocket/vNrIna0VcG';
 const IBAN = 'FR76 2823 3000 0165 8385 8232 516';
@@ -61,6 +63,15 @@ const WALLET_FILE = 'wallets.json';
 const WALLET_BACKUP_DIR = path.join('backups', 'wallets');
 const WALLET_BACKUP_LIMIT = 50;
 const WARNINGS_FILE = 'warnings.json';
+const BOT_CHANGELOG_FILE = 'bot-changelog-state.json';
+const BOT_CHANGELOG_VERSION = '2026-05-03-fidelity-image-ticket-timeout';
+const BOT_CHANGELOG_ITEMS = [
+  'Ajout d’un salon changelog admin pour annoncer les modifications appliquées au bot.',
+  'Fermeture automatique des tickets ouverts sans réponse 24h après leur ouverture.',
+  'Annulation de cette fermeture automatique dès qu’une réponse arrive dans le ticket.',
+  'Le screenshot de recharge envoyé en MP compte aussi comme une réponse.',
+  'Mise à jour de l’image affichée par le bouton Fidélité Mcdo.'
+];
 const AUTO_MOD_NOTICE_DELAY = 7_000;
 const WARNING_SANCTIONS = [
   { warns: 1, label: 'Rappel en MP', timeout: 0 },
@@ -258,6 +269,7 @@ let wallets = loadJsonFile(WALLET_FILE, {}, { backupDir: WALLET_BACKUP_DIR });
 let requests = loadJsonFile('requests.json', { counter: 0, tickets: {} });
 let referrals = loadJsonFile('referrals.json', { invitedBy: {}, stats: {}, inviteLinks: {} });
 let warnings = loadJsonFile(WARNINGS_FILE, { users: {} });
+let botChangelogState = loadJsonFile(BOT_CHANGELOG_FILE, { announcedVersions: {} });
 
 if (fs.existsSync(WALLET_FILE)) {
   try {
@@ -269,11 +281,12 @@ if (fs.existsSync(WALLET_FILE)) {
 
 if (!referrals.inviteLinks) referrals.inviteLinks = {};
 if (!warnings.users) warnings.users = {};
+if (!botChangelogState.announcedVersions) botChangelogState.announcedVersions = {};
 
 const pendingRecharges = new Map();
 const guildInviteUses = new Map();
 const crashReportCooldowns = new Map();
-const archivedTicketCleanupTimers = new Map();
+const ticketCleanupTimers = new Map();
 const CRASH_LOG_COOLDOWN = 60_000;
 
 function saveWallets() {
@@ -292,6 +305,10 @@ function saveWarnings() {
   saveJsonFile(WARNINGS_FILE, warnings);
 }
 
+function saveBotChangelogState() {
+  saveJsonFile(BOT_CHANGELOG_FILE, botChangelogState);
+}
+
 function isAdminMember(member) {
   return Boolean(
     member?.roles?.cache?.has(ADMIN_ROLE_ID) ||
@@ -302,22 +319,37 @@ function isAdminMember(member) {
 function createRequest(type, channelId, userId, data = {}) {
   requests.counter += 1;
   const prefix = type === 'recharge' ? 'R' : type === 'support' ? 'S' : 'C';
+  const createdAt = Date.now();
   const request = {
     id: `${prefix}-${String(requests.counter).padStart(4, '0')}`,
     type,
     channelId,
     userId,
-    createdAt: Date.now(),
+    createdAt,
+    noResponseCloseAt: createdAt + TICKET_NO_RESPONSE_TTL,
     ...data
   };
 
   requests.tickets[channelId] = request;
   saveRequests();
+  scheduleOpenTicketNoResponseCleanup(channelId, request.noResponseCloseAt);
   return request;
 }
 
 function getTicketRequest(channelId) {
   return requests.tickets[channelId] || null;
+}
+
+function markTicketResponse(ticketRequest, userId) {
+  if (!ticketRequest || ticketRequest.archivedAt || ticketRequest.completedAt) return;
+
+  const now = Date.now();
+  if (!ticketRequest.firstResponseAt) ticketRequest.firstResponseAt = now;
+  ticketRequest.lastResponseAt = now;
+  ticketRequest.lastResponseBy = userId;
+  delete ticketRequest.noResponseCloseAt;
+  clearTicketCleanup(ticketRequest.channelId);
+  saveRequests();
 }
 
 function findOpenRechargeRequestByUser(userId) {
@@ -778,16 +810,16 @@ function isTicketArchived(channel, ticketRequest) {
   return Boolean(ticketRequest?.archivedAt || channel.parentId === TICKET_ARCHIVE_CATEGORY);
 }
 
-function clearArchivedTicketCleanup(channelId) {
-  const timer = archivedTicketCleanupTimers.get(channelId);
+function clearTicketCleanup(channelId) {
+  const timer = ticketCleanupTimers.get(channelId);
   if (!timer) return;
 
   clearTimeout(timer);
-  archivedTicketCleanupTimers.delete(channelId);
+  ticketCleanupTimers.delete(channelId);
 }
 
 function scheduleArchivedTicketCleanup(channelId, archivedAt = Date.now()) {
-  clearArchivedTicketCleanup(channelId);
+  clearTicketCleanup(channelId);
 
   const deleteAt = Number(archivedAt) + ARCHIVED_TICKET_TTL;
   const delay = Math.max(deleteAt - Date.now(), 0);
@@ -798,11 +830,11 @@ function scheduleArchivedTicketCleanup(channelId, archivedAt = Date.now()) {
       ]));
   }, delay);
 
-  archivedTicketCleanupTimers.set(channelId, timer);
+  ticketCleanupTimers.set(channelId, timer);
 }
 
 function scheduleCompletedOrderTicketCleanup(channelId, completedAt = Date.now()) {
-  clearArchivedTicketCleanup(channelId);
+  clearTicketCleanup(channelId);
 
   const deleteAt = Number(completedAt) + ARCHIVED_TICKET_TTL;
   const delay = Math.max(deleteAt - Date.now(), 0);
@@ -813,11 +845,61 @@ function scheduleCompletedOrderTicketCleanup(channelId, completedAt = Date.now()
       ]));
   }, delay);
 
-  archivedTicketCleanupTimers.set(channelId, timer);
+  ticketCleanupTimers.set(channelId, timer);
+}
+
+function scheduleOpenTicketNoResponseCleanup(channelId, closeAt) {
+  if (!closeAt) return;
+  clearTicketCleanup(channelId);
+
+  const delay = Math.max(Number(closeAt) - Date.now(), 0);
+  const timer = setTimeout(() => {
+    closeOpenTicketWithoutResponse(channelId)
+      .catch(error => reportCrash('Fermeture auto ticket sans réponse impossible', error, [
+        `Ticket : <#${channelId}> (${channelId})`
+      ]));
+  }, delay);
+
+  ticketCleanupTimers.set(channelId, timer);
+}
+
+async function closeOpenTicketWithoutResponse(channelId) {
+  clearTicketCleanup(channelId);
+
+  const ticketRequest = getTicketRequest(channelId);
+  if (
+    !ticketRequest ||
+    !ticketRequest.noResponseCloseAt ||
+    ticketRequest.firstResponseAt ||
+    ticketRequest.lastResponseAt ||
+    ticketRequest.screenshotReceivedAt ||
+    ticketRequest.archivedAt ||
+    ticketRequest.completedAt
+  ) {
+    return;
+  }
+
+  const channel = client.channels.cache.get(channelId)
+    || await client.channels.fetch(channelId).catch(() => null);
+
+  if (!channel) {
+    delete requests.tickets[channelId];
+    saveRequests();
+    return;
+  }
+
+  await archiveTicketChannel(channel, ticketRequest, client.user, ticketRequest.userId);
+  await sendAdminLog('⏰ Ticket fermé automatiquement - aucune réponse', [
+    `Ticket : ${logChannel(channel)}`,
+    `Demande : **${ticketRequest.id}**`,
+    `Type : **${ticketRequest.type}**`,
+    `Client : <@${ticketRequest.userId}>`,
+    'Raison : aucune réponse humaine pendant 24h après l’ouverture'
+  ], 0xE67E22);
 }
 
 async function deleteArchivedTicketChannel(channelId, reason) {
-  clearArchivedTicketCleanup(channelId);
+  clearTicketCleanup(channelId);
 
   const ticketRequest = getTicketRequest(channelId);
   const channel = client.channels.cache.get(channelId)
@@ -858,7 +940,7 @@ async function deleteArchivedTicketChannel(channelId, reason) {
 }
 
 async function deleteCompletedOrderTicketChannel(channelId, reason) {
-  clearArchivedTicketCleanup(channelId);
+  clearTicketCleanup(channelId);
 
   const ticketRequest = getTicketRequest(channelId);
 
@@ -915,6 +997,11 @@ function scheduleTicketCleanups() {
 
     if (ticketRequest?.type === 'commande' && ticketRequest.completedAt) {
       scheduleCompletedOrderTicketCleanup(channelId, ticketRequest.completedAt);
+      return;
+    }
+
+    if (ticketRequest?.noResponseCloseAt && !ticketRequest.firstResponseAt && !ticketRequest.lastResponseAt && !ticketRequest.screenshotReceivedAt) {
+      scheduleOpenTicketNoResponseCleanup(channelId, ticketRequest.noResponseCloseAt);
     }
   });
 }
@@ -931,6 +1018,7 @@ async function archiveTicketChannel(channel, ticketRequest, user, ownerId = tick
     ticketRequest.originalParentId = ticketRequest.originalParentId || channel.parentId || ticketParentForType(ticketRequest.type);
     ticketRequest.archivedAt = Date.now();
     ticketRequest.archivedBy = user.id;
+    delete ticketRequest.noResponseCloseAt;
     saveRequests();
   }
 
@@ -979,7 +1067,7 @@ async function reopenTicketChannel(channel, ticketRequest, user, ownerId = ticke
   }
 
   if (ticketRequest) {
-    clearArchivedTicketCleanup(channel.id);
+    clearTicketCleanup(channel.id);
     ticketRequest.reopenedAt = Date.now();
     ticketRequest.reopenedBy = user.id;
     delete ticketRequest.archivedAt;
@@ -1021,6 +1109,7 @@ async function completeOrderTicketChannel(channel, ticketRequest, user, ownerId 
     ticketRequest.completedBy = user.id;
     ticketRequest.completedParentId = ORDER_DONE_CATEGORY;
     ticketRequest.originalParentId = ORDER_DONE_CATEGORY;
+    delete ticketRequest.noResponseCloseAt;
     saveRequests();
   }
 
@@ -1162,6 +1251,38 @@ function sendAdminLog(title, lines, color = 0x95A5A6) {
 
 function sendAdminCommandLog(title, lines, color = 0x95A5A6) {
   return sendAdminLog(title, lines, color);
+}
+
+async function announceBotChangelog() {
+  if (!BOT_CHANGELOG_ITEMS.length || botChangelogState.announcedVersions[BOT_CHANGELOG_VERSION]) return;
+
+  const channel = client.channels.cache.get(ADMIN_CHANGELOG_CHANNEL_ID)
+    || await client.channels.fetch(ADMIN_CHANGELOG_CHANNEL_ID).catch(() => null);
+
+  if (!channel || typeof channel.send !== 'function') {
+    await sendBotLog('⚠️ Changelog admin impossible', [
+      `Salon introuvable : <#${ADMIN_CHANGELOG_CHANNEL_ID}>`,
+      `Version : **${BOT_CHANGELOG_VERSION}**`
+    ], 0xF1C40F);
+    return;
+  }
+
+  const description = BOT_CHANGELOG_ITEMS
+    .map(item => `• ${item}`)
+    .join('\n');
+
+  await channel.send({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(0xD4AF37)
+        .setTitle('🛠️ Modifications appliquées au bot')
+        .setDescription(description)
+        .setTimestamp()
+    ]
+  });
+
+  botChangelogState.announcedVersions[BOT_CHANGELOG_VERSION] = Date.now();
+  saveBotChangelogState();
 }
 
 function shouldUseStaffLog(member) {
@@ -1702,6 +1823,7 @@ client.once('ready', async () => {
     normalizeReferralOwnersFromPersonalLinks();
     await Promise.all(client.guilds.cache.map(guild => cacheGuildInvites(guild)));
     scheduleTicketCleanups();
+    await announceBotChangelog();
     sendBotLog('🟢 Bot connecté', `Connecté en tant que **${client.user.tag}**`, 0x2ECC71);
   } catch (error) {
     await reportCrash('Erreur au démarrage ready', error);
@@ -1785,6 +1907,11 @@ client.on('messageCreate', async message => {
   try {
   if (message.guild && await handleAutoModeration(message)) return;
 
+  if (message.guild) {
+    const ticketRequest = getTicketRequest(message.channel.id);
+    if (ticketRequest) markTicketResponse(ticketRequest, message.author.id);
+  }
+
   if (!message.guild) {
     const dmRequest = findOpenRechargeRequestByUser(message.author.id);
 
@@ -1797,6 +1924,7 @@ client.on('messageCreate', async message => {
     const screenshotUrl = message.attachments.first()?.url || null;
     dmRequest.screenshotReceivedAt = Date.now();
     dmRequest.screenshotUrl = screenshotUrl;
+    markTicketResponse(dmRequest, message.author.id);
     saveRequests();
 
     const adminChannel = await client.channels.fetch(dmRequest.channelId).catch(() => null);
@@ -2894,7 +3022,7 @@ client.on(Events.InteractionCreate, async interaction => {
       }
 
       if (archived) {
-        clearArchivedTicketCleanup(interaction.channel.id);
+        clearTicketCleanup(interaction.channel.id);
 
         sendAdminLog('🗑️ Ticket supprimé définitivement', [
           `Par : ${logUser(interaction.user)}`,
