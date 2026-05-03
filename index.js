@@ -32,6 +32,7 @@ const client = new Client({
 const ADMIN_ROLE_ID = '1310342652058800138';
 const STAFF_ROLE_ID = '1310342652058800138';
 const TICKET_ACCESS_ROLE_ID = '1310384527952056401';
+const REFERRAL_EXCLUDED_ROLE_IDS = [...new Set([ADMIN_ROLE_ID, STAFF_ROLE_ID, TICKET_ACCESS_ROLE_ID])];
 const TICKET_CATEGORY = '1495800617204187216';
 const ORDER_CATEGORY = '1495800432776446063';
 const ORDER_DONE_CATEGORY = '1499779941934436403';
@@ -65,20 +66,11 @@ const WALLET_BACKUP_DIR = path.join('backups', 'wallets');
 const WALLET_BACKUP_LIMIT = 50;
 const WARNINGS_FILE = 'warnings.json';
 const BOT_CHANGELOG_FILE = 'bot-changelog-state.json';
-const BOT_CHANGELOG_VERSION = '2026-05-03-owner-admin-role';
+const BOT_CHANGELOG_VERSION = '2026-05-03-staff-owner-referral-exclusion';
+// Garder uniquement les changements de cette version, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Ajout d’un salon changelog admin pour annoncer les modifications appliquées au bot.',
-  'Fermeture automatique des tickets ouverts sans réponse du membre 24h après leur ouverture.',
-  'Les messages staff/admin dans un ticket ne stoppent plus cette fermeture automatique.',
-  'Le screenshot de recharge envoyé en MP compte aussi comme une réponse.',
-  'Mise à jour de l’image affichée par le bouton Fidélité Mcdo.',
-  'Avertissement uniquement lorsqu’un membre ouvre un nouveau ticket dans une catégorie où il a déjà un ticket actif.',
-  'Ajout automatique du rôle Le Rent’a quand une commande est marquée terminée.',
-  'Ajout d’une confirmation Oui/Non avant d’ouvrir un ticket supplémentaire.',
-  'Ajout d’un message de prise en charge automatique dans les tickets commande et support.',
-  'Envoi d’un MP au parrain dès qu’un filleul rejoint avec ses statistiques validées/en attente.',
-  'Fusion des messages de commande en un seul message avec une seule mention owner.',
-  'Le rôle owner est maintenant reconnu comme rôle admin du bot.'
+  'Les owners et le staff sont exclus du système de parrainage.',
+  'Le bouton parrainage reste accessible aux owners et au staff, mais leurs invitations et récompenses ne comptent pas.'
 ];
 const AUTO_MOD_NOTICE_DELAY = 7_000;
 const WARNING_SANCTIONS = [
@@ -507,6 +499,115 @@ function pendingRechargeKey(interaction) {
   return `${interaction.guildId}:${interaction.user.id}`;
 }
 
+function isReferralExcludedMember(member) {
+  const roles = member?.roles?.cache;
+
+  return Boolean(
+    REFERRAL_EXCLUDED_ROLE_IDS.some(roleId => roles?.has(roleId)) ||
+    member?.permissions?.has?.(PermissionFlagsBits.Administrator)
+  );
+}
+
+async function fetchGuildMemberForReferral(guild, userId) {
+  if (!guild || !userId) return null;
+
+  return guild.members.cache.get(userId)
+    || await guild.members.fetch(userId).catch(() => null);
+}
+
+function isReferralCountable(referral) {
+  return Boolean(referral && !referral.excludedAt);
+}
+
+function excludeReferral(referral, reason, saveNow = true) {
+  if (!referral || referral.excludedAt) return false;
+
+  referral.excludedAt = Date.now();
+  referral.excludedReason = reason;
+  if (saveNow) saveReferrals();
+  return true;
+}
+
+function excludeReferralStats(userId, reason, saveNow = true) {
+  if (!userId || !referrals.stats[userId]) return false;
+  if (referrals.stats[userId].excludedAt) return false;
+
+  referrals.stats[userId].excludedAt = Date.now();
+  referrals.stats[userId].excludedReason = reason;
+  if (saveNow) saveReferrals();
+  return true;
+}
+
+async function syncReferralExclusions() {
+  let excludedCount = 0;
+  let excludedStatsCount = 0;
+
+  for (const [invitedUserId, referral] of Object.entries(referrals.invitedBy || {})) {
+    if (!isReferralCountable(referral)) continue;
+
+    const guild = client.guilds.cache.get(referral.guildId);
+    if (!guild) continue;
+
+    const [invitedMember, inviterMember] = await Promise.all([
+      fetchGuildMemberForReferral(guild, invitedUserId),
+      fetchGuildMemberForReferral(guild, referral.inviterId)
+    ]);
+
+    const invitedExcluded = isReferralExcludedMember(invitedMember);
+    const inviterExcluded = isReferralExcludedMember(inviterMember);
+
+    if (inviterExcluded && excludeReferralStats(referral.inviterId, 'staff_or_owner', false)) {
+      excludedStatsCount += 1;
+    }
+
+    if (invitedExcluded || inviterExcluded) {
+      excludeReferral(referral, 'staff_or_owner', false);
+      excludedCount += 1;
+    }
+  }
+
+  if (excludedCount > 0 || excludedStatsCount > 0) {
+    saveReferrals();
+    await sendBotLog('👥 Parrainages staff/owner exclus', [
+      `Parrainages désactivés : **${excludedCount}**`,
+      `Compteurs masqués : **${excludedStatsCount}**`
+    ].join('\n'), 0xF1C40F);
+  }
+}
+
+async function excludeReferralsForStaffOrOwner(member) {
+  if (!isReferralExcludedMember(member)) return;
+
+  let excludedCount = 0;
+  let excludedStatsCount = 0;
+  const ownReferral = referrals.invitedBy?.[member.id];
+
+  if (ownReferral && isReferralCountable(ownReferral)) {
+    excludeReferral(ownReferral, 'staff_or_owner', false);
+    excludedCount += 1;
+  }
+
+  Object.values(referrals.invitedBy || {}).forEach(referral => {
+    if (referral.inviterId !== member.id || !isReferralCountable(referral)) return;
+
+    excludeReferral(referral, 'staff_or_owner', false);
+    excludedCount += 1;
+  });
+
+  if (excludeReferralStats(member.id, 'staff_or_owner', false)) {
+    excludedStatsCount += 1;
+  }
+
+  if (excludedCount > 0 || excludedStatsCount > 0) {
+    saveReferrals();
+    await sendBotLog('👥 Parrainage staff/owner désactivé', [
+      `Membre : ${logUser(member.user)}`,
+      `Parrainages désactivés : **${excludedCount}**`,
+      `Compteur masqué : **${excludedStatsCount > 0 ? 'oui' : 'non'}**`
+    ].join('\n'), 0xF1C40F);
+  }
+}
+
 function ensureReferralStats(userId) {
   if (!referrals.stats[userId]) {
     referrals.stats[userId] = {
@@ -529,7 +630,7 @@ function ensureReferralStats(userId) {
 
 function getReferralSummary(userId) {
   const invited = Object.entries(referrals.invitedBy)
-    .filter(([, referral]) => referral.inviterId === userId)
+    .filter(([, referral]) => referral.inviterId === userId && isReferralCountable(referral))
     .map(([invitedUserId, referral]) => ({ invitedUserId, ...referral }));
 
   const validated = invited.filter(referral => referral.validated);
@@ -547,6 +648,7 @@ function buildReferralLeaderboard() {
   const leaderboard = new Map();
 
   Object.values(referrals.invitedBy).forEach(referral => {
+    if (!isReferralCountable(referral)) return;
     if (!referral.inviterId) return;
 
     if (!leaderboard.has(referral.inviterId)) {
@@ -562,6 +664,8 @@ function buildReferralLeaderboard() {
   });
 
   Object.entries(referrals.stats).forEach(([userId, stats]) => {
+    if (stats?.excludedAt) return;
+
     if (!leaderboard.has(userId)) {
       leaderboard.set(userId, { inviterId: userId, validated: 0, pending: 0 });
     }
@@ -687,6 +791,12 @@ async function recordMemberInvite(member) {
     return null;
   }
 
+  const inviterMember = await fetchGuildMemberForReferral(member.guild, inviterId);
+  if (isReferralExcludedMember(member) || isReferralExcludedMember(inviterMember)) {
+    if (isReferralExcludedMember(inviterMember)) excludeReferralStats(inviterId, 'staff_or_owner');
+    return null;
+  }
+
   if (!referrals.invitedBy[member.id]) {
     referrals.invitedBy[member.id] = {
       guildId: member.guild.id,
@@ -703,7 +813,14 @@ async function recordMemberInvite(member) {
 }
 
 async function notifyInviterOfPendingReferral(member, referral) {
-  if (!referral || referral.joinDmSentAt || !referral.inviterId) return false;
+  if (!referral || !isReferralCountable(referral) || referral.joinDmSentAt || !referral.inviterId) return false;
+
+  const inviterMember = await fetchGuildMemberForReferral(member.guild, referral.inviterId);
+  if (isReferralExcludedMember(member) || isReferralExcludedMember(inviterMember)) {
+    if (isReferralExcludedMember(inviterMember)) excludeReferralStats(referral.inviterId, 'staff_or_owner');
+    excludeReferral(referral, 'staff_or_owner');
+    return false;
+  }
 
   const inviter = await client.users.fetch(referral.inviterId).catch(() => null);
   if (!inviter) return false;
@@ -738,9 +855,20 @@ async function notifyInviterOfPendingReferral(member, referral) {
   return sent;
 }
 
-async function validateReferralReward(user, ticketRequest, amountText) {
+async function validateReferralReward(user, ticketRequest, amountText, guild = null) {
   const referral = referrals.invitedBy[user.id];
-  if (!referral || referral.validated || !referral.inviterId || referral.inviterId === user.id) {
+  if (!referral || !isReferralCountable(referral) || referral.validated || !referral.inviterId || referral.inviterId === user.id) {
+    return null;
+  }
+
+  const [invitedMember, inviterMember] = await Promise.all([
+    fetchGuildMemberForReferral(guild, user.id),
+    fetchGuildMemberForReferral(guild, referral.inviterId)
+  ]);
+
+  if (isReferralExcludedMember(invitedMember) || isReferralExcludedMember(inviterMember)) {
+    if (isReferralExcludedMember(inviterMember)) excludeReferralStats(referral.inviterId, 'staff_or_owner');
+    excludeReferral(referral, 'staff_or_owner');
     return null;
   }
 
@@ -865,7 +993,6 @@ function ticketPermissionOverwrites(guild, userId) {
   return [
     { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
     { id: userId, allow: ticketAllow },
-    { id: STAFF_ROLE_ID, allow: ticketAllow },
     { id: TICKET_ACCESS_ROLE_ID, allow: ticketAllow },
     { id: ADMIN_ROLE_ID, allow: ticketAllow }
   ];
@@ -874,6 +1001,7 @@ function ticketPermissionOverwrites(guild, userId) {
 function adminTicketPermissionOverwrites(guild) {
   return [
     { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+    { id: TICKET_ACCESS_ROLE_ID, allow: ticketAllow },
     { id: ADMIN_ROLE_ID, allow: ticketAllow }
   ];
 }
@@ -882,7 +1010,6 @@ function supportTicketPermissionOverwrites(guild, userId) {
   return [
     { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
     { id: userId, allow: ticketAllow },
-    { id: STAFF_ROLE_ID, allow: ticketAllow },
     { id: TICKET_ACCESS_ROLE_ID, allow: ticketAllow },
     { id: ADMIN_ROLE_ID, allow: ticketAllow }
   ];
@@ -934,10 +1061,7 @@ function canManageTicket(interaction, ownerId) {
 }
 
 function canCompleteOrderTicket(member) {
-  return Boolean(
-    isAdminMember(member) ||
-    member?.roles?.cache?.has(TICKET_ACCESS_ROLE_ID)
-  );
+  return isAdminMember(member);
 }
 
 function ticketButtons(ownerId) {
@@ -1190,6 +1314,36 @@ function scheduleTicketCleanups() {
   });
 
   if (requestsChanged) saveRequests();
+}
+
+async function syncActiveTicketPermissions() {
+  let syncedCount = 0;
+
+  for (const [channelId, ticketRequest] of Object.entries(requests.tickets || {})) {
+    if (!ticketRequest || ticketRequest.archivedAt) continue;
+
+    const channel = client.channels.cache.get(channelId)
+      || await client.channels.fetch(channelId).catch(() => null);
+
+    if (!channel?.guild || !channel.permissionOverwrites?.set) continue;
+
+    const ownerId = ticketRequest.userId;
+    const overwrites = ticketRequest.type === 'commande' && ticketRequest.completedAt
+      ? completedOrderTicketPermissionOverwrites(channel.guild, ownerId)
+      : restoreTicketPermissionOverwrites(channel.guild, ticketRequest, ownerId);
+
+    await channel.permissionOverwrites.set(overwrites)
+      .then(() => { syncedCount += 1; })
+      .catch(error => reportCrash('Synchronisation permissions ticket impossible', error, [
+        `Ticket : <#${channelId}> (${channelId})`,
+        `Demande : **${ticketRequest.id || 'inconnue'}**`,
+        `Type : **${ticketRequest.type || 'inconnu'}**`
+      ]));
+  }
+
+  if (syncedCount > 0) {
+    await sendBotLog('🔐 Permissions tickets synchronisées', `Tickets actifs mis à jour : **${syncedCount}**`, 0x3498DB);
+  }
 }
 
 async function archiveTicketChannel(channel, ticketRequest, user, ownerId = ticketRequest?.userId) {
@@ -2032,6 +2186,8 @@ client.once('ready', async () => {
     console.log('Bot connecte');
     normalizeReferralOwnersFromPersonalLinks();
     await Promise.all(client.guilds.cache.map(guild => cacheGuildInvites(guild)));
+    await syncReferralExclusions();
+    await syncActiveTicketPermissions();
     scheduleTicketCleanups();
     await announceBotChangelog();
     sendBotLog('🟢 Bot connecté', `Connecté en tant que **${client.user.tag}**`, 0x2ECC71);
@@ -2087,6 +2243,18 @@ client.on(Events.InviteDelete, invite => {
   if (invite.guild) cacheGuildInvites(invite.guild).catch(error => reportCrash('Erreur InviteDelete', error));
 });
 
+client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
+  try {
+    if (isReferralExcludedMember(oldMember) || !isReferralExcludedMember(newMember)) return;
+
+    await excludeReferralsForStaffOrOwner(newMember);
+  } catch (error) {
+    await reportCrash('Erreur exclusion parrainage staff/owner', error, [
+      `Membre : ${newMember?.user ? logUser(newMember.user) : 'Inconnu'}`
+    ]);
+  }
+});
+
 client.on(Events.GuildMemberAdd, async member => {
   try {
     const referral = await recordMemberInvite(member);
@@ -2106,7 +2274,7 @@ client.on(Events.GuildMemberAdd, async member => {
       sendInviteAdminAnnouncement(member, referral)
     ]);
 
-    if (!inviterDmSent) {
+    if (isReferralCountable(referral) && !inviterDmSent) {
       await sendAdminLog('⚠️ MP parrain impossible', [
         `Parrain : <@${referral.inviterId}>`,
         `Filleul : ${logUser(member.user)}`,
@@ -2969,7 +3137,7 @@ client.on('messageCreate', async message => {
         dmSent ? 'MP client : envoyé' : 'MP client : non envoyé'
       ], dmSent ? 0x2ECC71 : 0xF1C40F);
 
-      const referralReward = await validateReferralReward(user, ticketRequest, amountText);
+      const referralReward = await validateReferralReward(user, ticketRequest, amountText, message.guild);
       if (referralReward) {
         await message.channel.send({
           embeds: [
