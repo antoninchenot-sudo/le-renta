@@ -79,10 +79,10 @@ const BOT_CHANGELOG_FILE = 'bot-changelog-state.json';
 const AVAILABILITY_STATE_FILE = 'availability-message-state.json';
 const PRODUCT_PRICES_FILE = 'product-prices.json';
 const DISCOUNT_STATE_FILE = 'discount-state.json';
-const BOT_CHANGELOG_VERSION = '2026-05-04-global-discount';
+const BOT_CHANGELOG_VERSION = '2026-05-04-admin-only-commands-help';
 // Garder uniquement les changements de cette version, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Ajout des commandes owner !reduc et !resetreduc pour appliquer ou retirer une réduction globale.'
+  'Ajout de !help et verrouillage des commandes texte aux admins/owners uniquement.'
 ];
 const AVAILABILITY_TIMEZONE = 'Europe/Paris';
 const AVAILABILITY_CHECK_INTERVAL = 60_000;
@@ -3204,6 +3204,71 @@ function buildAvisEmbed() {
     .setFooter({ text: 'Boutique' });
 }
 
+function helpCommandLines(entries) {
+  return entries.map(([command, description]) => `**${command}** : ${description}`).join('\n');
+}
+
+function buildHelpEmbed(guild) {
+  return new EmbedBuilder()
+    .setColor(0xD4AF37)
+    .setAuthor({ name: 'La Rent’a', iconURL: guild.iconURL({ dynamic: true }) })
+    .setTitle('Commandes du serveur')
+    .setDescription([
+      'Les commandes ci-dessous sont à taper avec `!` devant.',
+      'Elles sont listées ici sans le `!` comme demandé.',
+      '',
+      'Les membres ne peuvent pas utiliser les commandes. Les menus envoyés par les admins restent visibles par les membres.'
+    ].join('\n'))
+    .addFields(
+      {
+        name: 'Menus visibles par les membres',
+        value: helpCommandLines([
+          ['support', 'affiche le panneau support public.'],
+          ['guide', 'affiche le guide public pour recharger et commander.'],
+          ['regles', 'affiche le règlement public avec le bouton d’acceptation.'],
+          ['tarifs', 'affiche la grille publique des prix McDonald’s.'],
+          ['mdp', 'affiche le panneau public des moyens de paiement.'],
+          ['parrainage', 'affiche le panneau public parrainage et ses boutons.'],
+          ['avis', 'affiche le message public pour laisser un avis.']
+        ]),
+        inline: false
+      },
+      {
+        name: 'Admin / staff',
+        value: helpCommandLines([
+          ['help', 'affiche cette liste de commandes.'],
+          ['setup', 'envoie le message principal de la boutique.'],
+          ['clear', 'nettoie le salon où la commande est utilisée.'],
+          ['warnings @membre', 'affiche les warns d’un membre.'],
+          ['warn @membre raison', 'ajoute un warn manuel.'],
+          ['unwarn @membre [nombre]', 'retire les derniers warns.'],
+          ['clearwarns @membre', 'supprime tous les warns du membre.'],
+          ['wallet @membre', 'affiche le solde d’un membre.'],
+          ['invites @membre', 'affiche les infos parrainage d’un membre.'],
+          ['topinvites', 'affiche le classement parrainage.']
+        ]),
+        inline: false
+      },
+      {
+        name: 'Owner',
+        value: helpCommandLines([
+          ['prix', 'modifie les tarifs via boutons et formulaire.'],
+          ['reduc nombre', 'applique une réduction globale à la boutique.'],
+          ['resetreduc', 'retire la réduction globale.'],
+          ['stats', 'affiche les statistiques boutique.'],
+          ['maintenance on/off/status', 'active, désactive ou consulte la maintenance.'],
+          ['history @membre', 'affiche l’historique portefeuille.'],
+          ['tickets @membre', 'affiche l’historique tickets.'],
+          ['refund', 'rembourse une commande depuis son ticket.'],
+          ['add @membre montant', 'ajoute du solde à un membre.'],
+          ['remove @membre montant', 'retire du solde à un membre.']
+        ]),
+        inline: false
+      }
+    )
+    .setFooter({ text: 'La Rent’a • Aide commandes' });
+}
+
 function buildCompletedOrderTicketEmbed(ticketRequest, dmSent) {
   return new EmbedBuilder()
     .setColor(0x2ECC71)
@@ -4138,22 +4203,13 @@ client.on('messageCreate', async message => {
     await deleteCommandMessage(message);
 
     if (!isAdminMember(message.member)) {
-      const reply = await message.channel.send({
-        embeds: [
-          new EmbedBuilder()
-            .setColor(0xE74C3C)
-            .setTitle('❌ Permission refusée')
-            .setDescription('Tu n’as pas la permission d’utiliser cette commande.')
-        ]
-      });
-
       await sendActionLog(message.member, '⛔ Commande refusée', [
         `Utilisateur : ${logUser(message.author)}`,
         `Salon : ${logChannel(message.channel)}`,
         `Commande : \`${message.content.slice(0, 1000)}\``
       ], 0xE74C3C);
 
-      return deleteLater(reply);
+      return;
     }
 
     await sendAdminCommandLog('🛠️ Commande admin utilisée', [
@@ -4161,6 +4217,10 @@ client.on('messageCreate', async message => {
       `Salon : ${logChannel(message.channel)}`,
       `Commande : \`${message.content.slice(0, 1000)}\``
     ], 0x95A5A6);
+  }
+
+  if (message.content === '!help') {
+    return message.channel.send({ embeds: [buildHelpEmbed(message.guild)] });
   }
 
   if (message.content === '!setup') {
