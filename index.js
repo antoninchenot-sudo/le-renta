@@ -75,10 +75,10 @@ const MAINTENANCE_FILE = 'maintenance-state.json';
 const SHOP_STATS_FILE = 'shop-stats.json';
 const WARNINGS_FILE = 'warnings.json';
 const BOT_CHANGELOG_FILE = 'bot-changelog-state.json';
-const BOT_CHANGELOG_VERSION = '2026-05-04-shop-copy-final';
+const BOT_CHANGELOG_VERSION = '2026-05-04-prefix-command-delete';
 // Garder uniquement les changements de cette version, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Mise à jour du texte boutique et du bouton Commander avec l’emoji McDonald’s.'
+  'Correction de la suppression automatique des messages de commandes admin commençant par !.'
 ];
 const AUTO_MOD_NOTICE_DELAY = 7_000;
 const WARNING_SANCTIONS = [
@@ -2141,10 +2141,20 @@ const ticketAllow = [
   PermissionFlagsBits.SendMessages,
   PermissionFlagsBits.ReadMessageHistory
 ];
+const ticketBotAllow = [
+  ...ticketAllow,
+  PermissionFlagsBits.ManageMessages
+];
+
+function botTicketPermissionOverwrites(guild) {
+  const botId = guild.members.me?.id || client.user?.id;
+  return botId ? [{ id: botId, allow: ticketBotAllow }] : [];
+}
 
 function ticketPermissionOverwrites(guild, userId) {
   return [
     { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+    ...botTicketPermissionOverwrites(guild),
     { id: userId, allow: ticketAllow },
     { id: TICKET_ACCESS_ROLE_ID, allow: ticketAllow },
     { id: ADMIN_ROLE_ID, allow: ticketAllow }
@@ -2154,6 +2164,7 @@ function ticketPermissionOverwrites(guild, userId) {
 function adminTicketPermissionOverwrites(guild) {
   return [
     { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+    ...botTicketPermissionOverwrites(guild),
     { id: TICKET_ACCESS_ROLE_ID, allow: ticketAllow },
     { id: ADMIN_ROLE_ID, allow: ticketAllow }
   ];
@@ -2162,6 +2173,7 @@ function adminTicketPermissionOverwrites(guild) {
 function supportTicketPermissionOverwrites(guild, userId) {
   return [
     { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+    ...botTicketPermissionOverwrites(guild),
     { id: userId, allow: ticketAllow },
     { id: TICKET_ACCESS_ROLE_ID, allow: ticketAllow },
     { id: ADMIN_ROLE_ID, allow: ticketAllow }
@@ -2171,6 +2183,7 @@ function supportTicketPermissionOverwrites(guild, userId) {
 function completedOrderTicketPermissionOverwrites(guild, userId) {
   return [
     { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+    ...botTicketPermissionOverwrites(guild),
     { id: userId, allow: ticketAllow },
     { id: TICKET_ACCESS_ROLE_ID, allow: ticketAllow },
     { id: ADMIN_ROLE_ID, allow: ticketAllow }
@@ -2180,6 +2193,7 @@ function completedOrderTicketPermissionOverwrites(guild, userId) {
 function archivedTicketPermissionOverwrites(guild, ticketRequest) {
   return [
     { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+    ...botTicketPermissionOverwrites(guild),
     { id: ADMIN_ROLE_ID, allow: ticketAllow }
   ];
 }
@@ -2815,6 +2829,43 @@ function deleteLater(message, delay = DELETE_DELAY) {
   }, delay);
 }
 
+async function deleteCommandMessage(message) {
+  if (!message?.guild || !message.content?.startsWith('!')) return true;
+
+  let botMember = message.guild.members.me;
+  if (!botMember && client.user?.id) {
+    botMember = await message.guild.members.fetch(client.user.id).catch(() => null);
+  }
+
+  const permissions = botMember && typeof message.channel.permissionsFor === 'function'
+    ? message.channel.permissionsFor(botMember)
+    : null;
+  const canManageMessages = Boolean(permissions?.has(PermissionFlagsBits.ManageMessages));
+
+  if (!message.deletable && !canManageMessages) {
+    await sendAdminLog('⚠️ Commande admin non supprimée', [
+      `Admin : ${logUser(message.author)}`,
+      `Salon : ${logChannel(message.channel)}`,
+      `Commande : \`${message.content.slice(0, 1000)}\``,
+      'Raison : le bot n’a pas la permission **Gérer les messages** dans ce salon.'
+    ], 0xF1C40F);
+    return false;
+  }
+
+  return message.delete()
+    .then(() => true)
+    .catch(async error => {
+      await sendAdminLog('⚠️ Commande admin non supprimée', [
+        `Admin : ${logUser(message.author)}`,
+        `Salon : ${logChannel(message.channel)}`,
+        `Commande : \`${message.content.slice(0, 1000)}\``,
+        `Erreur : **${error.message}**`,
+        'Permission requise : **Gérer les messages**.'
+      ], 0xF1C40F);
+      return false;
+    });
+}
+
 async function replyTemp(interaction, options, delay = DELETE_DELAY) {
   if (interaction.replied || interaction.deferred) {
     const reply = await interaction.followUp({ ...options, fetchReply: true });
@@ -2842,34 +2893,6 @@ function productListText(options = {}) {
       return `💰  ${label.padEnd(15, ' ')} →   ${product.description}`;
     })
     .join('\n\n');
-}
-
-function productButtonLabel(product) {
-  const pointsLabel = product.label
-    .replace(/^McDonald'?s\s*/i, '')
-    .replace(/\s+Points$/i, ' pts');
-
-  return `${pointsLabel} - ${formatWalletAmount(product.price)}`.slice(0, 80);
-}
-
-function productButtonRows() {
-  const rows = [];
-
-  for (let index = 0; index < products.length; index += 4) {
-    const row = new ActionRowBuilder().addComponents(
-      products.slice(index, index + 4).map(product => (
-        new ButtonBuilder()
-          .setCustomId(`product:${product.value}`)
-          .setLabel(productButtonLabel(product))
-          .setEmoji(MCDONALDS_BUTTON_EMOJI)
-          .setStyle(ButtonStyle.Primary)
-      ))
-    );
-
-    rows.push(row);
-  }
-
-  return rows;
 }
 
 async function handleProductOrder(interaction, productId) {
@@ -3781,9 +3804,7 @@ client.on('messageCreate', async message => {
   }
 
   if (message.content.startsWith('!')) {
-    await message.delete().catch(error => {
-      console.error('Impossible de supprimer la commande :', error.message);
-    });
+    await deleteCommandMessage(message);
 
     if (!isAdminMember(message.member)) {
       const reply = await message.channel.send({
@@ -5133,16 +5154,25 @@ client.on(Events.InteractionCreate, async interaction => {
         .setDescription([
           'Sélectionne le produit que tu veux commander.',
           '',
-          'Les produits sont affichés avec leur nombre de **pts** et leur prix.',
+          'Les produits sont affichés avec leur nombre de **pts**.',
+          'Le prix est indiqué directement sous chaque produit dans le menu.',
           'Le montant sera retiré automatiquement de ton portefeuille après ton choix.'
         ].join('\n'))
         .setFooter({ text: 'La Rent’a • Sélection produit' });
 
-      return replyTemp(interaction, { embeds: [orderEmbed], components: productButtonRows(), ephemeral: true }, 120_000);
-    }
+      const productMenu = new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId('produits')
+          .setPlaceholder('Choisir un produit McDonald’s...')
+          .addOptions(products.map(product => ({
+            label: product.label.replace('Points', 'pts').slice(0, 100),
+            description: `Prix : ${product.description}`,
+            value: product.value,
+            emoji: MCDONALDS_BUTTON_EMOJI
+          })))
+      );
 
-    if (interaction.customId.startsWith('product:')) {
-      return handleProductOrder(interaction, interaction.customId.split(':')[1]);
+      return replyTemp(interaction, { embeds: [orderEmbed], components: [productMenu], ephemeral: true }, 120_000);
     }
   }
 
