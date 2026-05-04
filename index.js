@@ -75,10 +75,10 @@ const MAINTENANCE_FILE = 'maintenance-state.json';
 const SHOP_STATS_FILE = 'shop-stats.json';
 const WARNINGS_FILE = 'warnings.json';
 const BOT_CHANGELOG_FILE = 'bot-changelog-state.json';
-const BOT_CHANGELOG_VERSION = '2026-05-04-referral-stats-button';
+const BOT_CHANGELOG_VERSION = '2026-05-04-shop-copy-final';
 // Garder uniquement les changements de cette version, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Ajout d’un bouton Mes filleuls sur le message parrainage pour voir ses validés et en attente.'
+  'Mise à jour du texte boutique et du bouton Commander avec l’emoji McDonald’s.'
 ];
 const AUTO_MOD_NOTICE_DELAY = 7_000;
 const WARNING_SANCTIONS = [
@@ -2855,9 +2855,9 @@ function productButtonLabel(product) {
 function productButtonRows() {
   const rows = [];
 
-  for (let index = 0; index < products.length; index += 5) {
+  for (let index = 0; index < products.length; index += 4) {
     const row = new ActionRowBuilder().addComponents(
-      products.slice(index, index + 5).map(product => (
+      products.slice(index, index + 4).map(product => (
         new ButtonBuilder()
           .setCustomId(`product:${product.value}`)
           .setLabel(productButtonLabel(product))
@@ -3815,7 +3815,7 @@ client.on('messageCreate', async message => {
     const embed = new EmbedBuilder()
       .setColor(0xD4AF37)
       .setAuthor({ name: 'La Rent’a', iconURL: message.guild.iconURL({ dynamic: true }) })
-      .setTitle(`${SHOP_EMOJI} La Rent’a — Boutique`)
+      .setTitle(`La Rent'a - Boutique McDonald's ${MCDONALDS_EMOJI}`)
       .setDescription([
         '**Bienvenue sur la boutique officielle.**',
         '',
@@ -3826,7 +3826,8 @@ client.on('messageCreate', async message => {
         `${MCDONALDS_EMOJI} **Commander** — ouvre la sélection des produits disponibles.`,
         '🎁 **Fidélité Mcdo** — affiche les infos du programme fidélité.',
         '',
-        'Les prix ne sont pas affichés ici, mais la grille La Rent’a est appliquée automatiquement au moment de la commande.',
+        'Clique sur **Commander** pour voir les produits et leurs prix.',
+        'Le montant sera retiré automatiquement de ton portefeuille.',
         '',
         '👇 Sélectionne une action ci-dessous.'
       ].join('\n'))
@@ -5128,12 +5129,12 @@ client.on(Events.InteractionCreate, async interaction => {
 
       const orderEmbed = new EmbedBuilder()
         .setColor(0xD4AF37)
-        .setTitle(`${MCDONALDS_EMOJI} Produits McDonald’s`)
+        .setTitle(`Boutique McDonald's ${MCDONALDS_EMOJI}`)
         .setDescription([
-          'Sélectionne le produit que tu veux commander avec ton solde.',
+          'Sélectionne le produit que tu veux commander.',
           '',
-          'Les tarifs La Rent’a sont appliqués automatiquement.',
-          'Aucun prix n’est affiché sur les boutons pour garder la boutique claire.'
+          'Les produits sont affichés avec leur nombre de **pts** et leur prix.',
+          'Le montant sera retiré automatiquement de ton portefeuille après ton choix.'
         ].join('\n'))
         .setFooter({ text: 'La Rent’a • Sélection produit' });
 
