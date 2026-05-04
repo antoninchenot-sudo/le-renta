@@ -72,6 +72,10 @@ const TICKET_HISTORY_FILE = 'ticket-history.json';
 const TICKET_HISTORY_LIMIT = 50;
 const WALLET_BACKUP_DIR = path.join('backups', 'wallets');
 const WALLET_BACKUP_LIMIT = 50;
+const DATA_BACKUP_DIR = path.join('backups', 'data');
+const DATA_BACKUP_LIMIT = 50;
+const REQUESTS_FILE = 'requests.json';
+const REFERRALS_FILE = 'referrals.json';
 const MAINTENANCE_FILE = 'maintenance-state.json';
 const SHOP_STATS_FILE = 'shop-stats.json';
 const WARNINGS_FILE = 'warnings.json';
@@ -80,10 +84,24 @@ const AVAILABILITY_STATE_FILE = 'availability-message-state.json';
 const PRODUCT_PRICES_FILE = 'product-prices.json';
 const DISCOUNT_STATE_FILE = 'discount-state.json';
 const PRODUCT_STOCK_FILE = 'product-stock.json';
-const BOT_CHANGELOG_VERSION = '2026-05-04-announcement-command';
+const DATA_BACKUP_FILES = [
+  WALLET_FILE,
+  WALLET_HISTORY_FILE,
+  TICKET_HISTORY_FILE,
+  REQUESTS_FILE,
+  REFERRALS_FILE,
+  MAINTENANCE_FILE,
+  SHOP_STATS_FILE,
+  WARNINGS_FILE,
+  AVAILABILITY_STATE_FILE,
+  PRODUCT_PRICES_FILE,
+  DISCOUNT_STATE_FILE,
+  PRODUCT_STOCK_FILE
+];
+const BOT_CHANGELOG_VERSION = '2026-05-04-ticket-take-charge';
 // Garder uniquement les changements de cette version, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Ajout de !annonce pour envoyer une annonce propre dans le salon des disponibilités.'
+  'Ajout du bouton owner Prendre en charge dans les tickets.'
 ];
 const AVAILABILITY_TIMEZONE = 'Europe/Paris';
 const AVAILABILITY_CHECK_INTERVAL = 60_000;
@@ -197,6 +215,66 @@ function loadLatestJsonBackup(backupDir) {
   return null;
 }
 
+function backupReasonSlug(reason) {
+  return String(reason || 'manuel')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/gi, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40) || 'manuel';
+}
+
+function createDataBackup(reason = 'manuel', actorUser = null) {
+  try {
+    ensureDirectory(DATA_BACKUP_DIR);
+
+    const files = {};
+    for (const fileName of DATA_BACKUP_FILES) {
+      if (!fs.existsSync(fileName)) {
+        files[fileName] = { exists: false };
+        continue;
+      }
+
+      try {
+        files[fileName] = {
+          exists: true,
+          data: JSON.parse(fs.readFileSync(fileName, 'utf8'))
+        };
+      } catch (error) {
+        files[fileName] = {
+          exists: true,
+          error: error.message
+        };
+      }
+    }
+
+    const backupPath = path.join(DATA_BACKUP_DIR, `data-${backupReasonSlug(reason)}-${backupTimestamp()}.json`);
+    const snapshot = {
+      version: 1,
+      reason,
+      createdAt: Date.now(),
+      createdAtIso: new Date().toISOString(),
+      actorId: actorUser?.id || null,
+      actorTag: actorUser?.tag || null,
+      files
+    };
+
+    fs.writeFileSync(backupPath, JSON.stringify(snapshot, null, 2));
+    cleanupBackups(DATA_BACKUP_DIR, DATA_BACKUP_LIMIT);
+
+    return {
+      filePath: backupPath,
+      fileCount: Object.values(files).filter(file => file.exists).length
+    };
+  } catch (error) {
+    console.error('Impossible de créer la sauvegarde globale des données.', error);
+    reportCrash('Sauvegarde globale impossible', error, [
+      `Raison : \`${reason}\``
+    ]);
+    return null;
+  }
+}
+
 function loadJsonFile(fileName, fallback, options = {}) {
   if (!fs.existsSync(fileName)) return fallback;
 
@@ -256,8 +334,8 @@ function saveJsonFile(fileName, data, options = {}) {
 let wallets = loadJsonFile(WALLET_FILE, {}, { backupDir: WALLET_BACKUP_DIR });
 let walletHistory = loadJsonFile(WALLET_HISTORY_FILE, { users: {} });
 let ticketHistory = loadJsonFile(TICKET_HISTORY_FILE, { users: {} });
-let requests = loadJsonFile('requests.json', { counter: 0, tickets: {} });
-let referrals = loadJsonFile('referrals.json', { invitedBy: {}, stats: {}, inviteLinks: {} });
+let requests = loadJsonFile(REQUESTS_FILE, { counter: 0, tickets: {} });
+let referrals = loadJsonFile(REFERRALS_FILE, { invitedBy: {}, stats: {}, inviteLinks: {} });
 let maintenanceState = loadJsonFile(MAINTENANCE_FILE, { enabled: false, updatedAt: null, updatedBy: null });
 let shopStats = loadJsonFile(SHOP_STATS_FILE, {
   totalRechargedCents: 0,
@@ -334,11 +412,11 @@ function saveTicketHistory() {
 }
 
 function saveRequests() {
-  saveJsonFile('requests.json', requests);
+  saveJsonFile(REQUESTS_FILE, requests);
 }
 
 function saveReferrals() {
-  saveJsonFile('referrals.json', referrals);
+  saveJsonFile(REFERRALS_FILE, referrals);
 }
 
 function saveShopStats() {
@@ -643,6 +721,7 @@ function setMaintenanceState(enabled, user, reason = '') {
   maintenanceState.updatedBy = user.id;
   maintenanceState.reason = reason || null;
   saveMaintenanceState();
+  createDataBackup(enabled ? 'maintenance_on' : 'maintenance_off', user);
 }
 
 async function replyMaintenance(interaction) {
@@ -748,9 +827,11 @@ function ticketStatusLabel(ticketRequest) {
   if (ticketRequest?.deletedAt) return 'Supprimé';
   if (ticketRequest?.refundedAt) return 'Remboursé';
   if (ticketRequest?.completedAt) return 'Terminé';
+  if (ticketRequest?.type === 'recharge' && ticketRequest?.paidAt) return 'Recharge validée';
   if (ticketRequest?.archivedAt) return 'Archivé';
   if (ticketRequest?.type === 'recharge' && ticketRequest?.screenshotReceivedAt) return 'Paiement à vérifier';
   if (ticketRequest?.reopenedAt) return 'Réouvert';
+  if (ticketRequest?.takenAt) return 'Pris en charge';
   return 'Ouvert';
 }
 
@@ -771,6 +852,13 @@ function ticketHistoryRecord(ticketRequest, overrides = {}) {
     paymentDate: ticketRequest.paymentDate || null,
     paymentTime: ticketRequest.paymentTime || null,
     screenshotReceivedAt: ticketRequest.screenshotReceivedAt || null,
+    takenAt: ticketRequest.takenAt || null,
+    takenBy: ticketRequest.takenBy || null,
+    paidAt: ticketRequest.paidAt || null,
+    paidBy: ticketRequest.paidBy || null,
+    validatedAmount: ticketRequest.validatedAmount || null,
+    proofRejectedAt: ticketRequest.proofRejectedAt || null,
+    proofRejectedBy: ticketRequest.proofRejectedBy || null,
     completedAt: ticketRequest.completedAt || null,
     completedBy: ticketRequest.completedBy || null,
     refundedAt: ticketRequest.refundedAt || null,
@@ -1062,6 +1150,49 @@ function refundConfirmationButtons(actionId) {
   );
 }
 
+function rechargeProofReviewButtons(requestId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`accept_recharge_proof:${requestId}`)
+      .setLabel('Paiement reçu')
+      .setEmoji('✅')
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`reject_recharge_proof:${requestId}`)
+      .setLabel('Preuve refusée')
+      .setEmoji('❌')
+      .setStyle(ButtonStyle.Danger)
+  );
+}
+
+function buildRechargeProofReviewEmbed(ticketRequest, screenshotUrl) {
+  const methodName = paymentLabel(ticketRequest.method);
+
+  return new EmbedBuilder()
+    .setColor(0xF1C40F)
+    .setTitle('📸 Screenshot recharge reçu')
+    .setDescription([
+      `🧾 Demande : **${ticketRequest.id}**`,
+      `👤 Client : <@${ticketRequest.userId}>`,
+      `💶 Montant demandé : **${ticketRequest.amount}**`,
+      `💳 Méthode : **${methodName}**`,
+      `📅 Date indiquée : **${ticketRequest.paymentDate || 'Non précisée'}**`,
+      `🕒 Heure indiquée : **${ticketRequest.paymentTime || 'Non précisée'}**`,
+      screenshotUrl ? `📎 Screenshot : ${screenshotUrl}` : null,
+      '',
+      '**À vérifier avant de confirmer :**',
+      '• montant reçu',
+      '• date / heure',
+      '• destinataire',
+      '• aucune note / libellé interdit',
+      '',
+      '✅ **Paiement reçu** crédite le solde automatiquement.',
+      '❌ **Preuve refusée** prévient le client en MP pour renvoyer une preuve.'
+    ].filter(Boolean).join('\n'))
+    .setImage(screenshotUrl || null)
+    .setTimestamp();
+}
+
 async function createWalletActionConfirmation(message, action, user, amount, ticketRequest) {
   const actionId = createWalletActionId();
   const amountText = formatWalletAmount(amount);
@@ -1126,10 +1257,15 @@ function clearPendingRefundAction(actionId) {
 }
 
 async function applyWalletAdd({ user, amount, channel, guild, adminUser, ticketRequest }) {
+  const isRechargeValidation = ticketRequest && ticketRequest.type === 'recharge' && ticketRequest.userId === user.id;
+
+  if (isRechargeValidation && ticketRequest.paidAt) {
+    throw new Error('Cette recharge a déjà été validée.');
+  }
+
   if (!wallets[user.id]) wallets[user.id] = { balance: 0 };
   wallets[user.id].balance += amount;
   saveWallets();
-  const isRechargeValidation = ticketRequest && ticketRequest.type === 'recharge' && ticketRequest.userId === user.id;
   recordWalletHistory(user.id, {
     type: isRechargeValidation ? 'recharge' : 'add',
     amountCents: eurosToCents(amount),
@@ -1144,6 +1280,13 @@ async function applyWalletAdd({ user, amount, channel, guild, adminUser, ticketR
     const amountText = formatWalletAmount(amount);
     const newBalanceText = formatWalletAmount(wallets[user.id].balance);
     const methodName = paymentLabel(ticketRequest.method);
+
+    ticketRequest.paidAt = Date.now();
+    ticketRequest.paidBy = adminUser.id;
+    ticketRequest.validatedAmount = amountText;
+    saveRequests();
+    upsertTicketHistory(ticketRequest);
+    await renameTicketChannelState(channel, ticketRequest, 'valide');
 
     const dmEmbed = new EmbedBuilder()
       .setColor(0x2ECC71)
@@ -1209,6 +1352,8 @@ async function applyWalletAdd({ user, amount, channel, guild, adminUser, ticketR
       });
     }
 
+    createDataBackup('recharge_validated', adminUser);
+
     if (dmSent) {
       await channel.send('✅ Le ticket sera déplacé dans les tickets supprimés dans 10 secondes.');
       setTimeout(() => {
@@ -1234,6 +1379,8 @@ async function applyWalletAdd({ user, amount, channel, guild, adminUser, ticketR
 
     return;
   }
+
+  createDataBackup('wallet_add', adminUser);
 
   await sendAdminLog('💰 Solde ajouté', [
     `Admin : ${logUser(adminUser)}`,
@@ -1264,6 +1411,7 @@ async function applyWalletRemove({ user, amount, channel, adminUser }) {
     actorId: adminUser.id
   });
   recordShopRemove(amount);
+  createDataBackup('wallet_remove', adminUser);
 
   await sendAdminLog('💸 Solde retiré', [
     `Admin : ${logUser(adminUser)}`,
@@ -1448,6 +1596,7 @@ async function refundOrderTicket(message, ticketRequest) {
     product: ticketRequest.product || null,
     note: 'Remboursement de commande'
   });
+  createDataBackup('order_refunded', message.author);
 
   const newBalanceText = formatWalletAmount(wallets[ticketRequest.userId].balance);
   const refundText = formatWalletAmount(amount);
@@ -1586,6 +1735,192 @@ async function handleWalletActionButton(interaction) {
       ephemeral: true
     }).catch(() => {});
   }
+}
+
+function getRechargeProofReviewRequest(interaction, requestId) {
+  const ticketRequest = getTicketRequest(interaction.channel?.id);
+
+  if (!ticketRequest || ticketRequest.type !== 'recharge' || ticketRequest.id !== requestId) {
+    throw new Error('Ticket recharge introuvable ou invalide.');
+  }
+
+  if (ticketRequest.paidAt) {
+    throw new Error('Cette recharge a déjà été validée.');
+  }
+
+  if (!ticketRequest.screenshotReceivedAt || !ticketRequest.screenshotUrl) {
+    throw new Error('Aucun screenshot n’est en attente de vérification.');
+  }
+
+  return ticketRequest;
+}
+
+async function handleRechargeProofButton(interaction) {
+  const [action, requestId] = interaction.customId.split(':');
+  const isAccept = action === 'accept_recharge_proof';
+
+  if (!isOwnerMember(interaction.member)) {
+    return interaction.reply({
+      content: '❌ Seul le rôle owner peut valider ou refuser une preuve de recharge.',
+      ephemeral: true
+    });
+  }
+
+  let ticketRequest;
+  try {
+    ticketRequest = getRechargeProofReviewRequest(interaction, requestId);
+  } catch (error) {
+    return interaction.reply({
+      content: `❌ ${error.message}`,
+      ephemeral: true
+    });
+  }
+
+  if (isAccept) {
+    const amount = parseWalletAmount(ticketRequest.amount);
+    const user = await client.users.fetch(ticketRequest.userId).catch(() => null);
+
+    if (!user || !Number.isFinite(amount) || amount <= 0) {
+      return interaction.reply({
+        content: '❌ Impossible de retrouver le client ou le montant de cette recharge.',
+        ephemeral: true
+      });
+    }
+
+    await interaction.update({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0xF1C40F)
+          .setTitle('⏳ Validation de la recharge')
+          .setDescription([
+            `Owner : ${interaction.user}`,
+            `Client : <@${ticketRequest.userId}>`,
+            `Demande : **${ticketRequest.id}**`,
+            `Montant : **${ticketRequest.amount}**`,
+            '',
+            'Crédit du solde en cours...'
+          ].join('\n'))
+      ],
+      components: []
+    });
+
+    try {
+      await applyWalletAdd({
+        user,
+        amount,
+        channel: interaction.channel,
+        guild: interaction.guild,
+        adminUser: interaction.user,
+        ticketRequest
+      });
+
+      await interaction.message.edit({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0x2ECC71)
+            .setTitle('✅ Preuve validée')
+            .setDescription([
+              `Owner : ${interaction.user}`,
+              `Client : ${user}`,
+              `Demande : **${ticketRequest.id}**`,
+              `Montant crédité : **${formatWalletAmount(amount)}**`,
+              '',
+              'Le solde a été crédité automatiquement.'
+            ].join('\n'))
+        ],
+        components: []
+      }).catch(() => {});
+    } catch (error) {
+      await reportCrash('Validation preuve recharge impossible', error, [
+        `Owner : ${logUser(interaction.user)}`,
+        `Client : <@${ticketRequest.userId}>`,
+        `Demande : **${ticketRequest.id}**`
+      ]);
+
+      await interaction.message.edit({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0xE74C3C)
+            .setTitle('❌ Validation impossible')
+            .setDescription(`Impossible de créditer cette recharge : ${error.message}`)
+        ],
+        components: []
+      }).catch(() => {});
+
+      await interaction.followUp({
+        content: `❌ Impossible de créditer cette recharge : ${error.message}`,
+        ephemeral: true
+      }).catch(() => {});
+    }
+
+    return;
+  }
+
+  ticketRequest.proofRejectedAt = Date.now();
+  ticketRequest.proofRejectedBy = interaction.user.id;
+  saveRequests();
+  upsertTicketHistory(ticketRequest);
+  createDataBackup('recharge_proof_rejected', interaction.user);
+
+  await interaction.update({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(0xE74C3C)
+        .setTitle('❌ Preuve refusée')
+        .setDescription([
+          `Owner : ${interaction.user}`,
+          `Client : <@${ticketRequest.userId}>`,
+          `Demande : **${ticketRequest.id}**`,
+          `Montant : **${ticketRequest.amount}**`,
+          '',
+          'Le client va être prévenu en MP pour renvoyer un screenshot clair.'
+        ].join('\n'))
+    ],
+    components: []
+  });
+
+  const user = await client.users.fetch(ticketRequest.userId).catch(() => null);
+  let dmSent = false;
+
+  if (user) {
+    await user.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0xE74C3C)
+          .setTitle('❌ Preuve de paiement refusée')
+          .setDescription([
+            `Ta preuve pour la recharge **${ticketRequest.id}** a été refusée.`,
+            '',
+            'Merci de renvoyer en MP un screenshot lisible du paiement complet.',
+            'On doit voir clairement le montant, la date/heure et le destinataire.'
+          ].join('\n'))
+      ]
+    })
+      .then(() => { dmSent = true; })
+      .catch(() => {});
+  }
+
+  await interaction.channel.send({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(dmSent ? 0xE74C3C : 0xF1C40F)
+        .setTitle('❌ Preuve refusée')
+        .setDescription([
+          `Client : <@${ticketRequest.userId}>`,
+          `Demande : **${ticketRequest.id}**`,
+          dmSent ? '📩 MP envoyé au client.' : '⚠️ MP impossible à envoyer au client.'
+        ].join('\n'))
+    ]
+  }).catch(() => {});
+
+  await sendAdminLog('❌ Preuve recharge refusée', [
+    `Owner : ${logUser(interaction.user)}`,
+    `Client : <@${ticketRequest.userId}>`,
+    `Demande : **${ticketRequest.id}**`,
+    `Montant : **${ticketRequest.amount}**`,
+    `Ticket : ${logChannel(interaction.channel)}`,
+    dmSent ? 'MP client : envoyé' : 'MP client : non envoyé'
+  ], dmSent ? 0xE74C3C : 0xF1C40F);
 }
 
 async function executeRefundAction(interaction, pendingAction) {
@@ -2221,6 +2556,7 @@ function setProductAvailability(productId, available, user) {
   productStockState.updatedAt = Date.now();
   productStockState.updatedBy = user?.id || null;
   saveProductStock();
+  createDataBackup(available ? 'stock_product_available' : 'stock_product_unavailable', user);
   return true;
 }
 
@@ -2260,12 +2596,13 @@ function getProductPrice(productId) {
   return discountedCents / 100;
 }
 
-function setProductPrice(productId, price) {
+function setProductPrice(productId, price, user = null) {
   const product = getProduct(productId);
   if (!product || !Number.isFinite(price) || price <= 0) return false;
 
   productPriceOverrides[productId] = Math.round(price * 100) / 100;
   saveProductPrices();
+  createDataBackup('product_price_changed', user);
   return true;
 }
 
@@ -2274,6 +2611,7 @@ function setGlobalDiscount(percent, user) {
   discountState.updatedAt = Date.now();
   discountState.updatedBy = user?.id || null;
   saveDiscountState();
+  createDataBackup('discount_enabled', user);
 }
 
 function resetGlobalDiscount(user) {
@@ -2281,6 +2619,7 @@ function resetGlobalDiscount(user) {
   discountState.updatedAt = Date.now();
   discountState.updatedBy = user?.id || null;
   saveDiscountState();
+  createDataBackup('discount_reset', user);
 }
 
 function formatPercentValue(percent) {
@@ -2478,18 +2817,35 @@ function canCompleteOrderTicket(member) {
   return isOwnerMember(member);
 }
 
-function ticketButtons(ownerId) {
-  return new ActionRowBuilder().addComponents(
+function takeTicketButton(ownerId, ticketRequest = null) {
+  const alreadyTaken = Boolean(ticketRequest?.takenBy);
+
+  return new ButtonBuilder()
+    .setCustomId(`take_ticket:${ownerId}`)
+    .setLabel(alreadyTaken ? 'Pris en charge' : 'Prendre en charge')
+    .setEmoji('🙋')
+    .setStyle(alreadyTaken ? ButtonStyle.Secondary : ButtonStyle.Primary)
+    .setDisabled(alreadyTaken);
+}
+
+function ticketButtons(ownerId, ticketRequest = null, options = {}) {
+  const buttons = [];
+  if (options.includeTake !== false) buttons.push(takeTicketButton(ownerId, ticketRequest));
+
+  buttons.push(
     new ButtonBuilder()
       .setCustomId(`delete_ticket:${ownerId}`)
       .setLabel('Supprimer le ticket')
       .setEmoji('🗑️')
       .setStyle(ButtonStyle.Danger)
   );
+
+  return new ActionRowBuilder().addComponents(...buttons);
 }
 
-function orderTicketButtons(ownerId) {
+function orderTicketButtons(ownerId, ticketRequest = null) {
   return new ActionRowBuilder().addComponents(
+    takeTicketButton(ownerId, ticketRequest),
     new ButtonBuilder()
       .setCustomId(`complete_order:${ownerId}`)
       .setLabel('Commande terminée')
@@ -2505,10 +2861,12 @@ function orderTicketButtons(ownerId) {
 
 function ticketButtonsForRequest(ticketRequest, ownerId) {
   if (ticketRequest?.type === 'commande' && !ticketRequest.completedAt) {
-    return orderTicketButtons(ownerId);
+    return orderTicketButtons(ownerId, ticketRequest);
   }
 
-  return ticketButtons(ownerId);
+  return ticketButtons(ownerId, ticketRequest, {
+    includeTake: !ticketRequest?.completedAt && !ticketRequest?.archivedAt
+  });
 }
 
 function archivedTicketButtons(ownerId) {
@@ -2878,10 +3236,7 @@ async function archiveTicketChannel(channel, ticketRequest, user, ownerId = tick
   clearTicketCleanup(channel.id);
   await channel.setParent(TICKET_ARCHIVE_CATEGORY, { lockPermissions: false });
   await channel.permissionOverwrites.set(archivedTicketPermissionOverwrites(channel.guild, ticketRequest));
-
-  if (!channel.name.startsWith('archive-')) {
-    await channel.setName(`archive-${channel.name}`.slice(0, 100)).catch(() => {});
-  }
+  await renameTicketChannelState(channel, ticketRequest, 'archive');
 
   await channel.send({
     embeds: [
@@ -2916,10 +3271,6 @@ async function reopenTicketChannel(channel, ticketRequest, user, ownerId = ticke
   await channel.setParent(parentId, { lockPermissions: false });
   await channel.permissionOverwrites.set(restoreTicketPermissionOverwrites(channel.guild, ticketRequest, ownerId));
 
-  if (channel.name.startsWith('archive-')) {
-    await channel.setName(channel.name.replace(/^archive-/, '').slice(0, 100)).catch(() => {});
-  }
-
   if (ticketRequest) {
     clearTicketCleanup(channel.id);
     clearTicketNoResponseReminder(channel.id);
@@ -2937,6 +3288,8 @@ async function reopenTicketChannel(channel, ticketRequest, user, ownerId = ticke
     upsertTicketHistory(ticketRequest);
     saveRequests();
   }
+
+  await renameTicketChannelState(channel, ticketRequest, ticketStateForRequest(ticketRequest));
 
   await channel.send({
     embeds: [
@@ -2962,10 +3315,7 @@ async function completeOrderTicketChannel(channel, ticketRequest, user, ownerId 
 
   await channel.setParent(ORDER_DONE_CATEGORY, { lockPermissions: false });
   await channel.permissionOverwrites.set(completedOrderTicketPermissionOverwrites(channel.guild, resolvedOwnerId));
-
-  if (!channel.name.startsWith('termine-')) {
-    await channel.setName(`termine-${channel.name}`.slice(0, 100)).catch(() => {});
-  }
+  await renameTicketChannelState(channel, ticketRequest, 'termine');
 
   if (ticketRequest) {
     ticketRequest.completedAt = Date.now();
@@ -2977,6 +3327,7 @@ async function completeOrderTicketChannel(channel, ticketRequest, user, ownerId 
     recordShopOrderCompleted(ticketRequest);
     upsertTicketHistory(ticketRequest);
     saveRequests();
+    createDataBackup('order_completed', user);
   }
 
   scheduleCompletedOrderTicketCleanup(channel.id, ticketRequest?.completedAt || Date.now());
@@ -3020,6 +3371,77 @@ function sanitizeChannelName(name) {
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '')
     .slice(0, 30) || 'client';
+}
+
+const TICKET_CHANNEL_STATE_PREFIXES = [
+  'attente-screen',
+  'attente-client',
+  'a-verifier',
+  'en-cours',
+  'commande',
+  'recharge',
+  'support',
+  'archive',
+  'termine',
+  'valide'
+];
+
+function stripTicketChannelStatePrefix(channelName) {
+  let baseName = String(channelName || 'client');
+
+  for (let index = 0; index < 10; index += 1) {
+    const prefix = TICKET_CHANNEL_STATE_PREFIXES.find(state => (
+      baseName === state ||
+      baseName.startsWith(`${state}-`)
+    ));
+
+    if (!prefix) break;
+    baseName = baseName === prefix ? 'client' : baseName.slice(prefix.length + 1);
+  }
+
+  return sanitizeChannelName(baseName);
+}
+
+function ticketChannelBaseName(channel, ticketRequest) {
+  return sanitizeChannelName(ticketRequest?.channelBaseName || stripTicketChannelStatePrefix(channel?.name));
+}
+
+function buildTicketChannelName(state, baseName) {
+  return `${state}-${sanitizeChannelName(baseName)}`.slice(0, 100);
+}
+
+function ticketStateForRequest(ticketRequest) {
+  if (ticketRequest?.type === 'commande') return ticketRequest.completedAt ? 'termine' : 'en-cours';
+  if (ticketRequest?.type === 'recharge') {
+    if (ticketRequest.paidAt) return 'valide';
+    if (ticketRequest.screenshotReceivedAt) return 'a-verifier';
+    return 'attente-screen';
+  }
+  if (ticketRequest?.type === 'support') return 'attente-client';
+  return 'ticket';
+}
+
+async function renameTicketChannelState(channel, ticketRequest, state) {
+  if (!channel || typeof channel.setName !== 'function') return false;
+
+  const baseName = ticketChannelBaseName(channel, ticketRequest);
+  const nextName = buildTicketChannelName(state, baseName);
+  if (ticketRequest) ticketRequest.channelBaseName = baseName;
+  if (channel.name === nextName) return false;
+
+  return channel.setName(nextName)
+    .then(() => {
+      if (ticketRequest) saveRequests();
+      return true;
+    })
+    .catch(error => {
+      reportCrash('Renommage ticket impossible', error, [
+        `Salon : ${logChannel(channel)}`,
+        `Nouveau nom : \`${nextName}\``,
+        ticketRequest ? `Demande : **${ticketRequest.id}**` : null
+      ].filter(Boolean));
+      return false;
+    });
 }
 
 function parseAmountToCents(value) {
@@ -3243,15 +3665,17 @@ async function handleProductOrder(interaction, productId) {
 
   wallets[uid].balance -= prix;
   saveWallets();
+  const channelBaseName = sanitizeChannelName(interaction.user.username);
 
   const ticket = await interaction.guild.channels.create({
-    name: `commande-${sanitizeChannelName(interaction.user.username)}`,
+    name: buildTicketChannelName('en-cours', channelBaseName),
     parent: ORDER_CATEGORY,
     type: ChannelType.GuildText,
     permissionOverwrites: ticketPermissionOverwrites(interaction.guild, interaction.user.id)
   });
 
   const request = createRequest('commande', ticket.id, interaction.user.id, {
+    channelBaseName,
     product: product.label,
     price: prix
   });
@@ -3264,6 +3688,7 @@ async function handleProductOrder(interaction, productId) {
     product: product.label
   });
   recordShopOrderCreated(product.label, prix);
+  createDataBackup('order_created', interaction.user);
 
   await ticket.send({
     content: `<@&${STAFF_ROLE_ID}>
@@ -3288,7 +3713,7 @@ Un owner a été informé et va prendre en charge votre commande.
 
 Merci de rester disponible dans ce ticket.
 Le staff vous répondra dès que possible.`,
-    components: [orderTicketButtons(interaction.user.id)]
+    components: [orderTicketButtons(interaction.user.id, request)]
   });
 
   sendAdminLog('🎫 Commande créée', [
@@ -3377,6 +3802,7 @@ function buildHelpEmbed(guild) {
           ['maintenance on/off/status', 'active, désactive ou consulte la maintenance.'],
           ['autodispo on/off/status', 'active, coupe ou consulte les messages automatiques de 11h et 18h.'],
           ['annonce', 'ouvre un formulaire pour envoyer une annonce dans le salon des disponibilités.'],
+          ['backup', 'crée une sauvegarde manuelle des données importantes du bot.'],
           ['history @membre', 'affiche l’historique portefeuille.'],
           ['tickets @membre', 'affiche l’historique tickets.'],
           ['refund', 'rembourse une commande depuis son ticket.'],
@@ -3387,6 +3813,36 @@ function buildHelpEmbed(guild) {
       }
     )
     .setFooter({ text: 'La Rent’a • Aide commandes' });
+}
+
+function buildGuideFaqEmbed(guild) {
+  return new EmbedBuilder()
+    .setColor(0x3498DB)
+    .setAuthor({ name: 'FAQ boutique', iconURL: guild.iconURL({ dynamic: true }) })
+    .setTitle('Questions fréquentes')
+    .setDescription([
+      '**Où commander ?**',
+      `Tout se passe dans <#${SHOP_CHANNEL_ID}> avec le bouton **Commander ${MCDONALDS_EMOJI}**.`,
+      '',
+      '**Comment recharger ?**',
+      'Clique sur **Recharger le solde**, indique le montant/date/heure, puis choisis PayPal, Revolut ou virement.',
+      '',
+      '**Où envoyer le screenshot ?**',
+      'Le bot t’envoie un message privé. Réponds directement au bot en MP avec ton screenshot de paiement.',
+      '',
+      '**Je ne vois pas le MP du bot, je fais quoi ?**',
+      'Vérifie tes messages privés Discord et tes demandes de message. Si tu ne trouves rien, ouvre un ticket support.',
+      '',
+      '**Quand mon solde est ajouté ?**',
+      'Un owner vérifie ta preuve. Si le paiement est bien reçu, ton portefeuille est crédité automatiquement.',
+      '',
+      '**Pourquoi je dois garder le ticket ouvert ?**',
+      'Le ticket sert au suivi de ta commande ou recharge. Ne le ferme pas tant que tout n’est pas terminé.',
+      '',
+      '**Besoin d’aide ?**',
+      `Ouvre un ticket support dans <#${SUPPORT_CHANNEL_ID}>.`
+    ].join('\n'))
+    .setFooter({ text: 'La Rent’a • FAQ rapide' });
 }
 
 function announcementTypeConfig(type) {
@@ -3644,7 +4100,7 @@ function startAvailabilityScheduler() {
 }
 
 async function announceBotChangelog() {
-  if (!BOT_CHANGELOG_ITEMS.length || botChangelogState.announcedVersions[BOT_CHANGELOG_VERSION]) return;
+  if (!BOT_CHANGELOG_ITEMS.length) return;
 
   const channel = client.channels.cache.get(ADMIN_CHANGELOG_CHANNEL_ID)
     || await client.channels.fetch(ADMIN_CHANGELOG_CHANNEL_ID).catch(() => null);
@@ -3671,7 +4127,11 @@ async function announceBotChangelog() {
     ]
   });
 
-  botChangelogState.announcedVersions[BOT_CHANGELOG_VERSION] = Date.now();
+  botChangelogState.lastRestartAnnouncement = {
+    version: BOT_CHANGELOG_VERSION,
+    announcedAt: Date.now(),
+    items: BOT_CHANGELOG_ITEMS
+  };
   saveBotChangelogState();
 }
 
@@ -4329,16 +4789,16 @@ client.on('messageCreate', async message => {
     const adminChannel = await client.channels.fetch(dmRequest.channelId).catch(() => null);
 
     if (adminChannel) {
-      await adminChannel.send([
-        '✅ **Screenshot reçu !**',
-        `💶 Montant : **${dmRequest.amount}** | Demande n°**${dmRequest.id}**`,
-        `👤 Client : <@${dmRequest.userId}>`,
-        `📅 Date indiquée : **${dmRequest.paymentDate || 'Non précisée'}**`,
-        `🕒 Heure indiquée : **${dmRequest.paymentTime || 'Non précisée'}**`,
-        screenshotUrl ? `📎 Screenshot : ${screenshotUrl}` : null,
-        '',
-        '⏳ Un administrateur va vérifier le paiement et créditer le solde.'
-      ].filter(Boolean).join('\n'));
+      await renameTicketChannelState(adminChannel, dmRequest, 'a-verifier');
+
+      const proofMessage = await adminChannel.send({
+        embeds: [buildRechargeProofReviewEmbed(dmRequest, screenshotUrl)],
+        components: [rechargeProofReviewButtons(dmRequest.id)]
+      });
+
+      dmRequest.proofPanelMessageId = proofMessage.id;
+      saveRequests();
+      upsertTicketHistory(dmRequest);
     }
 
     await sendAdminLog('📸 Screenshot recharge reçu', [
@@ -4381,6 +4841,42 @@ client.on('messageCreate', async message => {
 
   if (message.content === '!help') {
     return message.channel.send({ embeds: [buildHelpEmbed(message.guild)] });
+  }
+
+  if (message.content === '!backup') {
+    if (!isOwnerMember(message.member)) {
+      const reply = await message.channel.send('❌ Seul le rôle owner peut créer une sauvegarde manuelle.');
+      return deleteLater(reply);
+    }
+
+    const backup = createDataBackup('manual_owner_backup', message.author);
+
+    if (!backup) {
+      const reply = await message.channel.send('❌ Impossible de créer la sauvegarde. Regarde les logs du bot.');
+      return deleteLater(reply);
+    }
+
+    await sendAdminLog('💾 Sauvegarde manuelle créée', [
+      `Owner : ${logUser(message.author)}`,
+      `Salon : ${logChannel(message.channel)}`,
+      `Fichier : \`${backup.filePath}\``,
+      `Fichiers inclus : **${backup.fileCount}**`
+    ], 0x3498DB);
+
+    return message.channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0x3498DB)
+          .setTitle('💾 Sauvegarde créée')
+          .setDescription([
+            `Fichier : \`${backup.filePath}\``,
+            `Fichiers inclus : **${backup.fileCount}**`,
+            '',
+            `Le bot garde les **${DATA_BACKUP_LIMIT}** dernières sauvegardes globales.`
+          ].join('\n'))
+          .setTimestamp()
+      ]
+    });
   }
 
   if (message.content === '!setup') {
@@ -4533,7 +5029,15 @@ client.on('messageCreate', async message => {
       .setThumbnail(message.guild.iconURL({ dynamic: true }))
       .setFooter({ text: 'Guide • Recharge • Commande • Support' });
 
-    return message.channel.send({ embeds: [guideEmbed] });
+    const guideRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('guide_faq')
+        .setLabel('FAQ')
+        .setEmoji('❓')
+        .setStyle(ButtonStyle.Secondary)
+    );
+
+    return message.channel.send({ embeds: [guideEmbed], components: [guideRow] });
   }
 
   if (message.content === '!regles') {
@@ -5501,6 +6005,20 @@ client.on(Events.InteractionCreate, async interaction => {
       return handleRefundActionButton(interaction);
     }
 
+    if (
+      interaction.customId.startsWith('accept_recharge_proof:') ||
+      interaction.customId.startsWith('reject_recharge_proof:')
+    ) {
+      return handleRechargeProofButton(interaction);
+    }
+
+    if (interaction.customId === 'guide_faq') {
+      return interaction.reply({
+        embeds: [buildGuideFaqEmbed(interaction.guild)],
+        ephemeral: true
+      });
+    }
+
     if (interaction.customId.startsWith('open_announcement_modal:')) {
       if (!isOwnerMember(interaction.member)) {
         return interaction.reply({
@@ -5745,7 +6263,9 @@ client.on(Events.InteractionCreate, async interaction => {
       let completionResult = { dmSent: false };
 
       try {
-        await interaction.message.edit({ components: [ticketButtons(ownerId)] }).catch(() => {});
+        await interaction.message.edit({
+          components: [ticketButtons(ownerId, ticketRequest, { includeTake: false })]
+        }).catch(() => {});
         completionResult = await completeOrderTicketChannel(interaction.channel, ticketRequest, interaction.user, ownerId);
       } catch (error) {
         await interaction.editReply(`❌ Impossible de terminer la commande : ${error.message}`);
@@ -5778,6 +6298,71 @@ client.on(Events.InteractionCreate, async interaction => {
         ? `✅ Commande terminée, ticket déplacé et message final envoyé.\n⚠️ ${customerRoleError.message}`
         : '✅ Commande terminée, ticket déplacé, rôle client appliqué et message final envoyé.');
       return;
+    }
+
+    if (interaction.customId.startsWith('take_ticket:')) {
+      const ownerId = interaction.customId.split(':')[1];
+      const ticketRequest = getTicketRequest(interaction.channel.id);
+
+      if (!isOwnerMember(interaction.member)) {
+        return interaction.reply({
+          content: '❌ Seul le rôle owner peut prendre un ticket en charge.',
+          ephemeral: true
+        });
+      }
+
+      if (!ticketRequest || ticketRequest.archivedAt || ticketRequest.deletedAt || ticketRequest.completedAt) {
+        return interaction.reply({
+          content: '❌ Ce ticket ne peut pas être pris en charge.',
+          ephemeral: true
+        });
+      }
+
+      if (ticketRequest.takenBy) {
+        return interaction.reply({
+          content: ticketRequest.takenBy === interaction.user.id
+            ? '✅ Tu as déjà pris ce ticket en charge.'
+            : `❌ Ce ticket est déjà pris en charge par <@${ticketRequest.takenBy}>.`,
+          ephemeral: true
+        });
+      }
+
+      ticketRequest.takenBy = interaction.user.id;
+      ticketRequest.takenAt = Date.now();
+      upsertTicketHistory(ticketRequest);
+      saveRequests();
+      createDataBackup('ticket_taken', interaction.user);
+
+      await interaction.message.edit({
+        components: [ticketButtonsForRequest(ticketRequest, ownerId)]
+      }).catch(() => {});
+
+      await interaction.channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0x3498DB)
+            .setTitle('🙋 Ticket pris en charge')
+            .setDescription([
+              `Pris en charge par : ${interaction.user}`,
+              `Demande : **${ticketRequest.id}**`,
+              `Client : <@${ticketRequest.userId}>`
+            ].join('\n'))
+            .setTimestamp()
+        ]
+      });
+
+      await sendAdminLog('🙋 Ticket pris en charge', [
+        `Owner : ${logUser(interaction.user)}`,
+        `Ticket : ${logChannel(interaction.channel)}`,
+        `Demande : **${ticketRequest.id}**`,
+        `Type : **${ticketTypeLabel(ticketRequest.type)}**`,
+        `Client : <@${ticketRequest.userId}>`
+      ], 0x3498DB);
+
+      return interaction.reply({
+        content: '✅ Ticket pris en charge.',
+        ephemeral: true
+      });
     }
 
     if (interaction.customId.startsWith('delete_ticket:')) {
@@ -5919,15 +6504,16 @@ client.on(Events.InteractionCreate, async interaction => {
       const ticketConfirmation = await confirmOpeningAnotherTicket(interaction, 'support');
       if (!ticketConfirmation.confirmed) return;
       const responseInteraction = ticketConfirmation.interaction;
+      const channelBaseName = sanitizeChannelName(interaction.user.username);
 
       const ticket = await interaction.guild.channels.create({
-        name: `support-${sanitizeChannelName(interaction.user.username)}`,
+        name: buildTicketChannelName('attente-client', channelBaseName),
         parent: SUPPORT_CATEGORY,
         type: ChannelType.GuildText,
         permissionOverwrites: supportTicketPermissionOverwrites(interaction.guild, interaction.user.id)
       });
 
-      const request = createRequest('support', ticket.id, interaction.user.id);
+      const request = createRequest('support', ticket.id, interaction.user.id, { channelBaseName });
       await ticket.send({
         content: `🚨 Ticket support
 
@@ -5936,7 +6522,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
 📩 Explique ton problème ici.
 👥 Un administrateur va te répondre dès que possible.`,
-        components: [ticketButtons(interaction.user.id)]
+        components: [ticketButtons(interaction.user.id, request)]
       });
 
       await ticket.send([
@@ -5948,6 +6534,7 @@ client.on(Events.InteractionCreate, async interaction => {
         'Merci de rester disponible dans ce ticket.',
         'Le staff vous répondra dès que possible.'
       ].join('\n'));
+      createDataBackup('support_ticket_created', interaction.user);
 
       sendAdminLog('🚨 Ticket support créé', [
         `Client : ${logUser(interaction.user)}`,
@@ -6148,7 +6735,7 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     const oldPrice = getProductBasePrice(productId);
-    setProductPrice(productId, price);
+    setProductPrice(productId, price, interaction.user);
     const newPrice = getProductBasePrice(productId);
 
     await sendAdminLog('💰 Prix McDonald’s modifié', [
@@ -6250,15 +6837,17 @@ client.on(Events.InteractionCreate, async interaction => {
       const responseInteraction = ticketConfirmation.interaction;
 
       pendingRecharges.delete(pendingRechargeKey(interaction));
+      const channelBaseName = sanitizeChannelName(interaction.user.username);
 
       const ticket = await interaction.guild.channels.create({
-        name: `recharge-${sanitizeChannelName(interaction.user.username)}`,
+        name: buildTicketChannelName('attente-screen', channelBaseName),
         parent: TICKET_CATEGORY,
         type: ChannelType.GuildText,
         permissionOverwrites: adminTicketPermissionOverwrites(interaction.guild)
       });
 
       const request = createRequest('recharge', ticket.id, interaction.user.id, {
+        channelBaseName,
         amount,
         method,
         paymentDate: pendingRecharge.paymentDate,
@@ -6287,8 +6876,9 @@ Demande n°**${request.id}**
 
 ${dmSent ? '📩 Instructions envoyées au client en MP.' : '⚠️ Impossible d’envoyer les instructions en MP au client.'}
 ⏳ En attente du screenshot du paiement.`,
-        components: [ticketButtons(interaction.user.id)]
+        components: [ticketButtons(interaction.user.id, request)]
       });
+      createDataBackup('recharge_request_created', interaction.user);
 
       sendAdminLog('💳 Demande de recharge créée', [
         `Client : ${logUser(interaction.user)}`,
