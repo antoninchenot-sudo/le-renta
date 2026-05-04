@@ -75,10 +75,10 @@ const MAINTENANCE_FILE = 'maintenance-state.json';
 const SHOP_STATS_FILE = 'shop-stats.json';
 const WARNINGS_FILE = 'warnings.json';
 const BOT_CHANGELOG_FILE = 'bot-changelog-state.json';
-const BOT_CHANGELOG_VERSION = '2026-05-03-ticket-history-command';
+const BOT_CHANGELOG_VERSION = '2026-05-04-referral-stats-button';
 // Garder uniquement les changements de cette version, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Ajout de la commande owner !tickets pour consulter l’historique tickets d’un membre.'
+  'Ajout d’un bouton Mes filleuls sur le message parrainage pour voir ses validés et en attente.'
 ];
 const AUTO_MOD_NOTICE_DELAY = 7_000;
 const WARNING_SANCTIONS = [
@@ -281,6 +281,7 @@ if (!botChangelogState.announcedVersions) botChangelogState.announcedVersions = 
 
 const pendingRecharges = new Map();
 const pendingWalletActions = new Map();
+const pendingRefundActions = new Map();
 const guildInviteUses = new Map();
 const crashReportCooldowns = new Map();
 const ticketCleanupTimers = new Map();
@@ -618,6 +619,7 @@ function walletHistoryTypeLabel(type) {
     add: 'Ajout manuel',
     remove: 'Retrait manuel',
     order: 'Commande payée',
+    refund: 'Remboursement commande',
     referral: 'Récompense parrainage'
   };
 
@@ -677,7 +679,9 @@ function ticketTypeLabel(type) {
 }
 
 function ticketStatusLabel(ticketRequest) {
+  if (ticketRequest?.deletedAt && ticketRequest?.refundedAt) return 'Supprimé (remboursé)';
   if (ticketRequest?.deletedAt) return 'Supprimé';
+  if (ticketRequest?.refundedAt) return 'Remboursé';
   if (ticketRequest?.completedAt) return 'Terminé';
   if (ticketRequest?.archivedAt) return 'Archivé';
   if (ticketRequest?.type === 'recharge' && ticketRequest?.screenshotReceivedAt) return 'Paiement à vérifier';
@@ -704,6 +708,9 @@ function ticketHistoryRecord(ticketRequest, overrides = {}) {
     screenshotReceivedAt: ticketRequest.screenshotReceivedAt || null,
     completedAt: ticketRequest.completedAt || null,
     completedBy: ticketRequest.completedBy || null,
+    refundedAt: ticketRequest.refundedAt || null,
+    refundedBy: ticketRequest.refundedBy || null,
+    refundedAmount: ticketRequest.refundedAmount ?? null,
     archivedAt: ticketRequest.archivedAt || null,
     archivedBy: ticketRequest.archivedBy || null,
     reopenedAt: ticketRequest.reopenedAt || null,
@@ -770,6 +777,7 @@ function formatTicketHistoryLine(ticketRequest, index) {
   if (ticketRequest.type === 'commande') {
     details.push(`Produit : **${ticketRequest.product || 'Non précisé'}**`);
     if (ticketRequest.price !== null && ticketRequest.price !== undefined) details.push(`Payé : **${formatWalletAmount(Number(ticketRequest.price) || 0)}**`);
+    if (ticketRequest.refundedAmount !== null && ticketRequest.refundedAmount !== undefined) details.push(`Remboursé : **${formatWalletAmount(Number(ticketRequest.refundedAmount) || 0)}**`);
   }
 
   if (ticketRequest.type === 'recharge') {
@@ -842,6 +850,16 @@ function recordShopOrderCompleted(ticketRequest) {
   return true;
 }
 
+function recordShopOrderRefunded(ticketRequest) {
+  if (!ticketRequest || ticketRequest.statsOrderRefundedAt) return false;
+
+  shopStats.ordersRefunded = (Number(shopStats.ordersRefunded) || 0) + 1;
+  shopStats.totalRefundedCents = (Number(shopStats.totalRefundedCents) || 0) + eurosToCents(ticketRequest.refundedAmount || ticketRequest.price || 0);
+  ticketRequest.statsOrderRefundedAt = Date.now();
+  saveShopStats();
+  return true;
+}
+
 function buildShopStatsSnapshot() {
   const ticketList = Object.values(requests.tickets || {});
   const activeTickets = ticketList.filter(isActiveTicketRequest);
@@ -871,6 +889,8 @@ function buildShopStatsSnapshot() {
     totalWalletCents,
     ordersCreated: Number(shopStats.ordersCreated) || 0,
     ordersCompleted: Number(shopStats.ordersCompleted) || 0,
+    ordersRefunded: Number(shopStats.ordersRefunded) || 0,
+    totalRefundedCents: Number(shopStats.totalRefundedCents) || 0,
     rechargeValidatedCount: Number(shopStats.rechargeValidatedCount) || 0,
     openTickets: activeTickets.length,
     openSupportTickets: activeTickets.filter(ticket => ticket.type === 'support').length,
@@ -900,6 +920,7 @@ function buildShopStatsEmbed() {
         value: [
           `Total rechargé : **${formatCents(snapshot.totalRechargedCents)}**`,
           `Total retiré : **${formatCents(snapshot.totalRemovedCents)}**`,
+          `Total remboursé : **${formatCents(snapshot.totalRefundedCents)}**`,
           `Solde total actuel : **${formatCents(snapshot.totalWalletCents)}**`
         ].join('\n'),
         inline: false
@@ -909,6 +930,7 @@ function buildShopStatsEmbed() {
         value: [
           `Commandes créées : **${snapshot.ordersCreated}**`,
           `Commandes terminées : **${snapshot.ordersCompleted}**`,
+          `Commandes remboursées : **${snapshot.ordersRefunded}**`,
           `Recharges validées : **${snapshot.rechargeValidatedCount}**`
         ].join('\n'),
         inline: false
@@ -954,6 +976,21 @@ function walletConfirmationButtons(actionId) {
       .setStyle(ButtonStyle.Success),
     new ButtonBuilder()
       .setCustomId(`cancel_wallet_action:${actionId}`)
+      .setLabel('Annuler')
+      .setEmoji('❌')
+      .setStyle(ButtonStyle.Secondary)
+  );
+}
+
+function refundConfirmationButtons(actionId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`confirm_refund_action:${actionId}`)
+      .setLabel('Confirmer')
+      .setEmoji('✅')
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`cancel_refund_action:${actionId}`)
       .setLabel('Annuler')
       .setEmoji('❌')
       .setStyle(ButtonStyle.Secondary)
@@ -1016,6 +1053,13 @@ function clearPendingWalletAction(actionId) {
   return pendingAction;
 }
 
+function clearPendingRefundAction(actionId) {
+  const pendingAction = pendingRefundActions.get(actionId);
+  if (pendingAction?.timer) clearTimeout(pendingAction.timer);
+  pendingRefundActions.delete(actionId);
+  return pendingAction;
+}
+
 async function applyWalletAdd({ user, amount, channel, guild, adminUser, ticketRequest }) {
   if (!wallets[user.id]) wallets[user.id] = { balance: 0 };
   wallets[user.id].balance += amount;
@@ -1046,7 +1090,8 @@ async function applyWalletAdd({ user, amount, channel, guild, adminUser, ticketR
         `💰 Montant ajouté : **${amountText}**`,
         `👤 Pris en charge par : **${adminUser.tag}**`,
         '',
-        'Ton solde est maintenant disponible sur la boutique.'
+        'Ton solde est maintenant disponible sur la boutique.',
+        `Tu peux maintenant retourner dans le salon boutique pour commander : <#${SHOP_CHANNEL_ID}>`
       ].join('\n'));
 
     let dmSent = false;
@@ -1173,6 +1218,209 @@ async function applyWalletRemove({ user, amount, channel, adminUser }) {
   });
 }
 
+async function createRefundConfirmation(message, ticketRequest) {
+  if (!ticketRequest || ticketRequest.type !== 'commande') {
+    const reply = await message.channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0xE74C3C)
+          .setTitle('❌ Ticket commande requis')
+          .setDescription('Utilisation : `!refund` directement dans un ticket commande.')
+      ]
+    });
+
+    deleteLater(reply);
+    return false;
+  }
+
+  if (ticketRequest.refundedAt) {
+    const reply = await message.channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0xE67E22)
+          .setTitle('💸 Commande déjà remboursée')
+          .setDescription([
+            `Demande : **#${ticketRequest.id}**`,
+            `Remboursée par : <@${ticketRequest.refundedBy}>`,
+            ticketRequest.refundedAt ? `Date : <t:${Math.floor(ticketRequest.refundedAt / 1000)}:f>` : null,
+            `Montant : **${formatWalletAmount(Number(ticketRequest.refundedAmount || ticketRequest.price) || 0)}**`
+          ].filter(Boolean).join('\n'))
+      ]
+    });
+
+    deleteLater(reply, 15_000);
+    return false;
+  }
+
+  const amount = Number(ticketRequest.price);
+  if (!ticketRequest.userId || !Number.isFinite(amount) || amount <= 0) {
+    const reply = await message.channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0xE74C3C)
+          .setTitle('❌ Remboursement impossible')
+          .setDescription('Le client ou le montant payé est introuvable sur cette demande.')
+      ]
+    });
+
+    deleteLater(reply);
+    return false;
+  }
+
+  const actionId = createWalletActionId();
+  const amountText = formatWalletAmount(amount);
+  const confirmation = await message.channel.send({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(0xE67E22)
+        .setTitle('⚠️ Confirmer le remboursement')
+        .setDescription([
+          `Owner : ${message.author}`,
+          `Demande : **#${ticketRequest.id}**`,
+          `Client : <@${ticketRequest.userId}>`,
+          `Produit : **${ticketRequest.product || 'Non précisé'}**`,
+          `Montant rendu au solde : **${amountText}**`,
+          '',
+          'Confirmer le remboursement de cette commande ?'
+        ].join('\n'))
+    ],
+    components: [refundConfirmationButtons(actionId)]
+  });
+
+  const timer = setTimeout(() => {
+    if (!pendingRefundActions.has(actionId)) return;
+
+    pendingRefundActions.delete(actionId);
+    confirmation.edit({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0x95A5A6)
+          .setTitle('⏱️ Confirmation expirée')
+          .setDescription(`Le remboursement de **${amountText}** pour la demande **#${ticketRequest.id}** a expiré.`)
+      ],
+      components: []
+    }).catch(() => {});
+  }, WALLET_CONFIRMATION_TTL);
+
+  timer.unref?.();
+
+  pendingRefundActions.set(actionId, {
+    ownerId: message.author.id,
+    channelId: message.channel.id,
+    guildId: message.guild.id,
+    ticketRequestId: ticketRequest.id,
+    amount,
+    timer
+  });
+}
+
+async function refundOrderTicket(message, ticketRequest) {
+  if (!ticketRequest || ticketRequest.type !== 'commande') {
+    const reply = await message.channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0xE74C3C)
+          .setTitle('❌ Ticket commande requis')
+          .setDescription('Utilisation : `!refund` directement dans un ticket commande.')
+      ]
+    });
+
+    deleteLater(reply);
+    return false;
+  }
+
+  if (ticketRequest.refundedAt) {
+    const reply = await message.channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0xE67E22)
+          .setTitle('💸 Commande déjà remboursée')
+          .setDescription([
+            `Demande : **#${ticketRequest.id}**`,
+            `Remboursée par : <@${ticketRequest.refundedBy}>`,
+            ticketRequest.refundedAt ? `Date : <t:${Math.floor(ticketRequest.refundedAt / 1000)}:f>` : null,
+            `Montant : **${formatWalletAmount(Number(ticketRequest.refundedAmount || ticketRequest.price) || 0)}**`
+          ].filter(Boolean).join('\n'))
+      ]
+    });
+
+    deleteLater(reply, 15_000);
+    return false;
+  }
+
+  const amount = Number(ticketRequest.price);
+  if (!ticketRequest.userId || !Number.isFinite(amount) || amount <= 0) {
+    const reply = await message.channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0xE74C3C)
+          .setTitle('❌ Remboursement impossible')
+          .setDescription('Le client ou le montant payé est introuvable sur cette demande.')
+      ]
+    });
+
+    deleteLater(reply);
+    return false;
+  }
+
+  if (!wallets[ticketRequest.userId]) wallets[ticketRequest.userId] = { balance: 0 };
+  wallets[ticketRequest.userId].balance += amount;
+
+  ticketRequest.refundedAt = Date.now();
+  ticketRequest.refundedBy = message.author.id;
+  ticketRequest.refundedAmount = amount;
+
+  recordShopOrderRefunded(ticketRequest);
+  saveWallets();
+  saveRequests();
+  upsertTicketHistory(ticketRequest);
+  recordWalletHistory(ticketRequest.userId, {
+    type: 'refund',
+    amountCents: eurosToCents(amount),
+    balanceAfterCents: eurosToCents(wallets[ticketRequest.userId].balance),
+    actorId: message.author.id,
+    ticketRequestId: ticketRequest.id,
+    product: ticketRequest.product || null,
+    note: 'Remboursement de commande'
+  });
+
+  const newBalanceText = formatWalletAmount(wallets[ticketRequest.userId].balance);
+  const refundText = formatWalletAmount(amount);
+
+  await sendAdminLog('💸 Commande remboursée', [
+    `Owner : ${logUser(message.author)}`,
+    `Ticket : ${logChannel(message.channel)}`,
+    `Demande : **${ticketRequest.id}**`,
+    `Client : <@${ticketRequest.userId}>`,
+    `Produit : **${ticketRequest.product || 'Non précisé'}**`,
+    `Montant rendu au solde : **${refundText}**`,
+    `Nouveau solde : **${newBalanceText}**`
+  ], 0xE67E22);
+
+  await message.channel.send({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(0xE67E22)
+        .setTitle('💸 Commande remboursée')
+        .setDescription([
+          'Cette commande a été remboursée par un owner.',
+          '',
+          `🧾 Demande : #${ticketRequest.id}`,
+          `👤 Client : <@${ticketRequest.userId}>`,
+          `📦 Produit : ${ticketRequest.product || 'Non précisé'}`,
+          `💰 Montant rendu au solde : **${refundText}**`,
+          `👛 Nouveau solde : **${newBalanceText}**`,
+          '',
+          'Le montant a été recrédité sur le portefeuille du client.',
+          'Aucun nouveau produit n’a été envoyé.'
+        ].join('\n'))
+        .setTimestamp()
+    ]
+  });
+
+  return true;
+}
+
 async function executeWalletAction(interaction, pendingAction) {
   const channel = interaction.guild?.channels.cache.get(pendingAction.channelId)
     || await interaction.guild?.channels.fetch(pendingAction.channelId).catch(() => null);
@@ -1270,6 +1518,98 @@ async function handleWalletActionButton(interaction) {
 
     await interaction.followUp({
       content: `❌ Impossible d’appliquer la modification : ${error.message}`,
+      ephemeral: true
+    }).catch(() => {});
+  }
+}
+
+async function executeRefundAction(interaction, pendingAction) {
+  const channel = interaction.guild?.channels.cache.get(pendingAction.channelId)
+    || await interaction.guild?.channels.fetch(pendingAction.channelId).catch(() => null);
+
+  if (!channel) {
+    throw new Error('Salon de commande introuvable.');
+  }
+
+  const ticketRequest = getTicketRequest(channel.id);
+  if (!ticketRequest || ticketRequest.id !== pendingAction.ticketRequestId || ticketRequest.type !== 'commande') {
+    throw new Error('Ticket commande introuvable ou invalide.');
+  }
+
+  return refundOrderTicket({ author: interaction.user, channel }, ticketRequest);
+}
+
+async function handleRefundActionButton(interaction) {
+  const isConfirm = interaction.customId.startsWith('confirm_refund_action:');
+  const actionId = interaction.customId.split(':')[1];
+  const pendingAction = pendingRefundActions.get(actionId);
+
+  if (!pendingAction) {
+    return interaction.reply({
+      content: '⏱️ Cette confirmation a expiré ou a déjà été utilisée.',
+      ephemeral: true
+    });
+  }
+
+  if (interaction.user.id !== pendingAction.ownerId) {
+    return interaction.reply({
+      content: '❌ Seul l’owner qui a lancé le remboursement peut confirmer ou annuler.',
+      ephemeral: true
+    });
+  }
+
+  if (!isOwnerMember(interaction.member)) {
+    return interaction.reply({
+      content: '❌ Seul le rôle owner peut confirmer ce remboursement.',
+      ephemeral: true
+    });
+  }
+
+  clearPendingRefundAction(actionId);
+
+  if (!isConfirm) {
+    return interaction.update({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0x95A5A6)
+          .setTitle('❌ Remboursement annulé')
+          .setDescription('Aucun argent n’a été rendu au portefeuille du client.')
+      ],
+      components: []
+    });
+  }
+
+  await interaction.update({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(0xE67E22)
+        .setTitle('⏳ Remboursement confirmé')
+        .setDescription('Application du remboursement en cours...')
+    ],
+    components: []
+  });
+
+  try {
+    const refunded = await executeRefundAction(interaction, pendingAction);
+    await interaction.message.edit({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(refunded ? 0x2ECC71 : 0xE67E22)
+          .setTitle(refunded ? '✅ Remboursement appliqué' : '⚠️ Remboursement non appliqué')
+          .setDescription(refunded
+            ? 'Le montant de la commande a été rendu au portefeuille du client.'
+            : 'Le remboursement n’a pas été appliqué. Vérifie le message envoyé dans le ticket.')
+      ],
+      components: []
+    }).catch(() => {});
+  } catch (error) {
+    await reportCrash('Confirmation remboursement impossible', error, [
+      `Demande : **${pendingAction.ticketRequestId}**`,
+      `Montant : **${formatWalletAmount(pendingAction.amount)}**`
+    ]);
+
+    await interaction.followUp({
+      content: `❌ Impossible d’appliquer le remboursement : ${error.message}`,
       ephemeral: true
     }).catch(() => {});
   }
@@ -1418,6 +1758,35 @@ function getReferralSummary(userId) {
     pending,
     stats: ensureReferralStats(userId)
   };
+}
+
+function buildReferralStatsEmbed(user) {
+  const summary = getReferralSummary(user.id);
+  const recentValidated = summary.validated
+    .slice(-5)
+    .map(referral => `✅ <@${referral.invitedUserId}>`)
+    .join('\n') || 'Aucun filleul validé pour le moment.';
+  const recentPending = summary.pending
+    .slice(-5)
+    .map(referral => `⏳ <@${referral.invitedUserId}>`)
+    .join('\n') || 'Aucun filleul en attente.';
+
+  return new EmbedBuilder()
+    .setColor(0xD4AF37)
+    .setTitle('👥 Mes filleuls')
+    .setDescription([
+      `✅ Filleuls validés : **${summary.validated.length}**`,
+      `⏳ En attente de validation : **${summary.pending.length}**`,
+      '',
+      '**Derniers validés**',
+      recentValidated,
+      '',
+      '**En attente**',
+      recentPending
+    ].join('\n'))
+    .setThumbnail(user.displayAvatarURL({ dynamic: true }))
+    .setFooter({ text: 'Un filleul est validé après sa première recharge.' })
+    .setTimestamp();
 }
 
 function buildReferralLeaderboard() {
@@ -2475,6 +2844,131 @@ function productListText(options = {}) {
     .join('\n\n');
 }
 
+function productButtonLabel(product) {
+  return product.label
+    .replace(/^McDonald'?s\s*/i, '')
+    .replace(/\s+Points$/i, ' pts')
+    .slice(0, 80);
+}
+
+function productButtonRows() {
+  const rows = [];
+
+  for (let index = 0; index < products.length; index += 5) {
+    const row = new ActionRowBuilder().addComponents(
+      products.slice(index, index + 5).map(product => (
+        new ButtonBuilder()
+          .setCustomId(`product:${product.value}`)
+          .setLabel(productButtonLabel(product))
+          .setEmoji(MCDONALDS_BUTTON_EMOJI)
+          .setStyle(ButtonStyle.Primary)
+      ))
+    );
+
+    rows.push(row);
+  }
+
+  return rows;
+}
+
+async function handleProductOrder(interaction, productId) {
+  if (isMaintenanceEnabledFor(interaction.member)) {
+    return replyMaintenance(interaction);
+  }
+
+  const uid = interaction.user.id;
+  if (!wallets[uid]) wallets[uid] = { balance: 0 };
+
+  const product = products.find(item => item.value === productId);
+  const prix = prices[productId];
+
+  if (!product || prix === undefined) {
+    return replyTemp(interaction, { content: '❌ Produit introuvable.', ephemeral: true });
+  }
+
+  if (wallets[uid].balance < prix) {
+    sendActionLog(interaction.member, '⚠️ Commande refusée - solde insuffisant', [
+      `Client : ${logUser(interaction.user)}`,
+      `Produit : **${product.label}**`,
+      `Prix : **${prix}€**`,
+      `Solde : **${wallets[uid].balance.toFixed(2)}€**`
+    ], 0xF1C40F);
+
+    return replyTemp(interaction, {
+      content: `❌ Solde insuffisant\n💰 Prix : ${prix}€\n👛 Solde : ${wallets[uid].balance.toFixed(2)}€`,
+      ephemeral: true
+    });
+  }
+
+  const ticketConfirmation = await confirmOpeningAnotherTicket(interaction, 'commande');
+  if (!ticketConfirmation.confirmed) return;
+  const responseInteraction = ticketConfirmation.interaction;
+
+  wallets[uid].balance -= prix;
+  saveWallets();
+
+  const ticket = await interaction.guild.channels.create({
+    name: `commande-${sanitizeChannelName(interaction.user.username)}`,
+    parent: ORDER_CATEGORY,
+    type: ChannelType.GuildText,
+    permissionOverwrites: ticketPermissionOverwrites(interaction.guild, interaction.user.id)
+  });
+
+  const request = createRequest('commande', ticket.id, interaction.user.id, {
+    product: product.label,
+    price: prix
+  });
+  recordWalletHistory(uid, {
+    type: 'order',
+    amountCents: -eurosToCents(prix),
+    balanceAfterCents: eurosToCents(wallets[uid].balance),
+    actorId: interaction.user.id,
+    ticketRequestId: request.id,
+    product: product.label
+  });
+  recordShopOrderCreated(product.label, prix);
+
+  await ticket.send({
+    content: `<@&${STAFF_ROLE_ID}>
+
+🎫 **Nouvelle commande à traiter**
+
+🧾 Demande : #${request.id}
+👤 Client : <@${interaction.user.id}>
+📦 Produit : ${product.label}
+💰 Payé : ${prix}€
+
+📌 Envoyer le produit au client.
+
+━━━━━━━━━━━━━━
+
+✅ **Commande prise en compte**
+
+Votre demande a bien été enregistrée.
+Un owner a été informé et va prendre en charge votre commande.
+
+⏱️ Délai estimé : **5 à 15 minutes**
+
+Merci de rester disponible dans ce ticket.
+Le staff vous répondra dès que possible.`,
+    components: [orderTicketButtons(interaction.user.id)]
+  });
+
+  sendAdminLog('🎫 Commande créée', [
+    `Client : ${logUser(interaction.user)}`,
+    `Demande : **${request.id}**`,
+    `Produit : **${product.label}**`,
+    `Prix payé : **${prix}€**`,
+    `Nouveau solde : **${wallets[uid].balance.toFixed(2)}€**`,
+    `Ticket : ${logChannel(ticket)}`
+  ], 0x2ECC71);
+
+  return replyTemp(responseInteraction, {
+    content: `✅ Commande envoyée au staff.\n🧾 Demande : #${request.id}`,
+    ephemeral: true
+  });
+}
+
 function buildAvisEmbed() {
   return new EmbedBuilder()
     .setColor(0xD4AF37)
@@ -3319,27 +3813,24 @@ client.on('messageCreate', async message => {
   if (message.content === '!setup') {
     const embed = new EmbedBuilder()
       .setColor(0xD4AF37)
-      .setAuthor({ name: 'Boutique', iconURL: message.guild.iconURL({ dynamic: true }) })
-      .setTitle(`Boutique ${SHOP_EMOJI}`)
+      .setAuthor({ name: 'La Rent’a', iconURL: message.guild.iconURL({ dynamic: true }) })
+      .setTitle(`${SHOP_EMOJI} La Rent’a — Boutique`)
       .setDescription([
-        '**Bienvenue sur la boutique.**',
+        '**Bienvenue sur la boutique officielle.**',
         '',
-        'Recharge ton portefeuille, choisis ton produit, puis le staff traite ta commande en ticket privé.',
+        'Gère ton portefeuille, recharge ton solde, puis choisis ton produit McDonald’s en quelques clics.',
         '',
-        '**Comment commander**',
-        '1. Clique sur **Portefeuille** pour vérifier ton solde.',
-        '2. Clique sur **Recharger** si ton solde est insuffisant.',
-        '3. Clique sur **Commander** et sélectionne ton produit.',
+        '👛 **Portefeuille** — consulte ton solde actuel.',
+        '💳 **Recharger** — ajoute du solde via PayPal, Revolut ou virement.',
+        `${MCDONALDS_EMOJI} **Commander** — ouvre la sélection des produits disponibles.`,
+        '🎁 **Fidélité Mcdo** — affiche les infos du programme fidélité.',
         '',
-        '**Moyens de paiement**',
+        'Les prix ne sont pas affichés ici, mais la grille La Rent’a est appliquée automatiquement au moment de la commande.',
         '',
-        'PayPal 🅿️ • Revolut 💳 • Virement bancaire 🏦',
-        '',
-        '**Tarifs**',
-        productListText({ boldRanges: true })
+        '👇 Sélectionne une action ci-dessous.'
       ].join('\n'))
       .setThumbnail(message.guild.iconURL({ dynamic: true }))
-      .setFooter({ text: 'Portefeuille • Recharge • Commande • Support' });
+      .setFooter({ text: 'La Rent’a • Portefeuille • Recharge • Commande' });
 
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('wallet').setLabel('Portefeuille').setEmoji('👛').setStyle(ButtonStyle.Danger),
@@ -3613,7 +4104,7 @@ client.on('messageCreate', async message => {
         '',
         'Un filleul est validé uniquement après sa première recharge de solde. 💳',
         '',
-        'Clique sur le bouton ci-dessous pour afficher ton lien personnel. 🔗'
+        'Utilise les boutons ci-dessous pour récupérer ton lien ou consulter tes filleuls. 🔗'
       ].join('\n'))
       .setThumbnail(message.guild.iconURL({ dynamic: true }))
       .setFooter({ text: 'Parrainage • Invitations • Récompenses' });
@@ -3623,7 +4114,12 @@ client.on('messageCreate', async message => {
         .setCustomId('get_referral_invite')
         .setLabel('Obtenir mon lien')
         .setEmoji('🔗')
-        .setStyle(ButtonStyle.Primary)
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId('get_referral_stats')
+        .setLabel('Mes filleuls')
+        .setEmoji('👥')
+        .setStyle(ButtonStyle.Secondary)
     );
 
     return message.channel.send({ embeds: [referralEmbed], components: [referralRow] });
@@ -4124,6 +4620,15 @@ client.on('messageCreate', async message => {
     return message.channel.send({ embeds: [buildTicketHistoryEmbed(user)] });
   }
 
+  if (message.content.trim().split(/\s+/)[0] === '!refund') {
+    if (!isOwnerMember(message.member)) {
+      const reply = await message.channel.send('❌ Seul le rôle owner peut rembourser une commande.');
+      return deleteLater(reply);
+    }
+
+    return createRefundConfirmation(message, getTicketRequest(message.channel.id));
+  }
+
   if (message.content.trim().split(/\s+/)[0] === '!add') {
     if (!isOwnerMember(message.member)) {
       const reply = await message.channel.send('❌ Seul le rôle owner peut lancer cette commande.');
@@ -4195,6 +4700,13 @@ client.on(Events.InteractionCreate, async interaction => {
       return handleWalletActionButton(interaction);
     }
 
+    if (
+      interaction.customId.startsWith('confirm_refund_action:') ||
+      interaction.customId.startsWith('cancel_refund_action:')
+    ) {
+      return handleRefundActionButton(interaction);
+    }
+
     if (interaction.customId === 'get_referral_invite') {
       const invite = await getOrCreatePersonalInvite(interaction.guild, interaction.user).catch(async error => {
         console.error('Impossible de créer le lien de parrainage :', error.message);
@@ -4234,6 +4746,18 @@ client.on(Events.InteractionCreate, async interaction => {
 
       return interaction.reply({
         embeds: [inviteEmbed],
+        ephemeral: true
+      });
+    }
+
+    if (interaction.customId === 'get_referral_stats') {
+      sendActionLog(interaction.member, '👥 Stats parrainage demandées', [
+        `Membre : ${logUser(interaction.user)}`,
+        `Affichage : message éphémère dans ${logChannel(interaction.channel)}`
+      ], 0x3498DB);
+
+      return interaction.reply({
+        embeds: [buildReferralStatsEmbed(interaction.user)],
         ephemeral: true
       });
     }
@@ -4603,23 +5127,20 @@ client.on(Events.InteractionCreate, async interaction => {
 
       const orderEmbed = new EmbedBuilder()
         .setColor(0xD4AF37)
-        .setTitle(`${MCDONALDS_EMOJI} Fenêtre de commande`)
-        .setDescription(['Choisis ton produit dans le menu ci-dessous.', '', '```', productListText(), '```'].join('\n'))
-        .setFooter({ text: 'Cette fenêtre disparaît automatiquement.' });
+        .setTitle(`${MCDONALDS_EMOJI} Produits McDonald’s`)
+        .setDescription([
+          'Sélectionne le produit que tu veux commander avec ton solde.',
+          '',
+          'Les tarifs La Rent’a sont appliqués automatiquement.',
+          'Aucun prix n’est affiché sur les boutons pour garder la boutique claire.'
+        ].join('\n'))
+        .setFooter({ text: 'La Rent’a • Sélection produit' });
 
-      const menu = new ActionRowBuilder().addComponents(
-        new StringSelectMenuBuilder()
-          .setCustomId('produits')
-          .setPlaceholder('🛒 Choisir un produit...')
-          .addOptions(products.map(product => ({
-            label: product.label,
-            description: product.description,
-            value: product.value,
-            emoji: '💰'
-          })))
-      );
+      return replyTemp(interaction, { embeds: [orderEmbed], components: productButtonRows(), ephemeral: true }, 120_000);
+    }
 
-      return replyTemp(interaction, { embeds: [orderEmbed], components: [menu], ephemeral: true });
+    if (interaction.customId.startsWith('product:')) {
+      return handleProductOrder(interaction, interaction.customId.split(':')[1]);
     }
   }
 
@@ -4763,104 +5284,9 @@ ${dmSent ? '📩 Instructions envoyées au client en MP.' : '⚠️ Impossible d
       });
     }
 
-    if (interaction.customId !== 'produits') return;
-
-    if (isMaintenanceEnabledFor(interaction.member)) {
-      return replyMaintenance(interaction);
+    if (interaction.customId === 'produits') {
+      return handleProductOrder(interaction, interaction.values[0]);
     }
-
-    const uid = interaction.user.id;
-    if (!wallets[uid]) wallets[uid] = { balance: 0 };
-
-    const productId = interaction.values[0];
-    const product = products.find(item => item.value === productId);
-    const prix = prices[productId];
-
-    if (!product || prix === undefined) {
-      return replyTemp(interaction, { content: '❌ Produit introuvable.', ephemeral: true });
-    }
-
-    if (wallets[uid].balance < prix) {
-      sendActionLog(interaction.member, '⚠️ Commande refusée - solde insuffisant', [
-        `Client : ${logUser(interaction.user)}`,
-        `Produit : **${product.label}**`,
-        `Prix : **${prix}€**`,
-        `Solde : **${wallets[uid].balance.toFixed(2)}€**`
-      ], 0xF1C40F);
-
-      return replyTemp(interaction, {
-        content: `❌ Solde insuffisant\n💰 Prix : ${prix}€\n👛 Solde : ${wallets[uid].balance.toFixed(2)}€`,
-        ephemeral: true
-      });
-    }
-
-    const ticketConfirmation = await confirmOpeningAnotherTicket(interaction, 'commande');
-    if (!ticketConfirmation.confirmed) return;
-    const responseInteraction = ticketConfirmation.interaction;
-
-    wallets[uid].balance -= prix;
-    saveWallets();
-
-    const ticket = await interaction.guild.channels.create({
-      name: `commande-${sanitizeChannelName(interaction.user.username)}`,
-      parent: ORDER_CATEGORY,
-      type: ChannelType.GuildText,
-      permissionOverwrites: ticketPermissionOverwrites(interaction.guild, interaction.user.id)
-    });
-
-    const request = createRequest('commande', ticket.id, interaction.user.id, {
-      product: product.label,
-      price: prix
-    });
-    recordWalletHistory(uid, {
-      type: 'order',
-      amountCents: -eurosToCents(prix),
-      balanceAfterCents: eurosToCents(wallets[uid].balance),
-      actorId: interaction.user.id,
-      ticketRequestId: request.id,
-      product: product.label
-    });
-    recordShopOrderCreated(product.label, prix);
-
-    await ticket.send({
-      content: `<@&${STAFF_ROLE_ID}>
-
-🎫 **Nouvelle commande à traiter**
-
-🧾 Demande : #${request.id}
-👤 Client : <@${interaction.user.id}>
-📦 Produit : ${product.label}
-💰 Payé : ${prix}€
-
-📌 Envoyer le produit au client.
-
-━━━━━━━━━━━━━━
-
-✅ **Commande prise en compte**
-
-Votre demande a bien été enregistrée.
-Un owner a été informé et va prendre en charge votre commande.
-
-⏱️ Délai estimé : **5 à 15 minutes**
-
-Merci de rester disponible dans ce ticket.
-Le staff vous répondra dès que possible.`,
-      components: [orderTicketButtons(interaction.user.id)]
-    });
-
-    sendAdminLog('🎫 Commande créée', [
-      `Client : ${logUser(interaction.user)}`,
-      `Demande : **${request.id}**`,
-      `Produit : **${product.label}**`,
-      `Prix payé : **${prix}€**`,
-      `Nouveau solde : **${wallets[uid].balance.toFixed(2)}€**`,
-      `Ticket : ${logChannel(ticket)}`
-    ], 0x2ECC71);
-
-    return replyTemp(responseInteraction, {
-      content: `✅ Commande envoyée au staff.\n🧾 Demande : #${request.id}`,
-      ephemeral: true
-    });
   }
   } catch (error) {
     await handleInteractionError(interaction, error);
