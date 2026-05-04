@@ -79,10 +79,11 @@ const BOT_CHANGELOG_FILE = 'bot-changelog-state.json';
 const AVAILABILITY_STATE_FILE = 'availability-message-state.json';
 const PRODUCT_PRICES_FILE = 'product-prices.json';
 const DISCOUNT_STATE_FILE = 'discount-state.json';
-const BOT_CHANGELOG_VERSION = '2026-05-04-admin-only-commands-help';
+const PRODUCT_STOCK_FILE = 'product-stock.json';
+const BOT_CHANGELOG_VERSION = '2026-05-04-announcement-command';
 // Garder uniquement les changements de cette version, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Ajout de !help et verrouillage des commandes texte aux admins/owners uniquement.'
+  'Ajout de !annonce pour envoyer une annonce propre dans le salon des disponibilités.'
 ];
 const AVAILABILITY_TIMEZONE = 'Europe/Paris';
 const AVAILABILITY_CHECK_INTERVAL = 60_000;
@@ -269,12 +270,14 @@ let shopStats = loadJsonFile(SHOP_STATS_FILE, {
 let warnings = loadJsonFile(WARNINGS_FILE, { users: {} });
 let botChangelogState = loadJsonFile(BOT_CHANGELOG_FILE, { announcedVersions: {} });
 let availabilityState = loadJsonFile(AVAILABILITY_STATE_FILE, {
+  enabled: true,
   lastMessageId: null,
   lastSlot: null,
   sentDates: {}
 });
 let productPriceOverrides = loadJsonFile(PRODUCT_PRICES_FILE, {});
 let discountState = loadJsonFile(DISCOUNT_STATE_FILE, { percent: 0, updatedAt: null, updatedBy: null });
+let productStockState = loadJsonFile(PRODUCT_STOCK_FILE, { unavailable: {}, updatedAt: null, updatedBy: null });
 
 if (fs.existsSync(WALLET_FILE)) {
   try {
@@ -291,6 +294,7 @@ if (typeof maintenanceState.enabled !== 'boolean') maintenanceState.enabled = fa
 if (!shopStats.products) shopStats.products = {};
 if (!warnings.users) warnings.users = {};
 if (!botChangelogState.announcedVersions) botChangelogState.announcedVersions = {};
+if (typeof availabilityState.enabled !== 'boolean') availabilityState.enabled = true;
 if (!availabilityState.sentDates) availabilityState.sentDates = {};
 if (!productPriceOverrides || typeof productPriceOverrides !== 'object' || Array.isArray(productPriceOverrides)) {
   productPriceOverrides = {};
@@ -300,6 +304,12 @@ if (!discountState || typeof discountState !== 'object' || Array.isArray(discoun
 }
 discountState.percent = Number(discountState.percent) || 0;
 if (discountState.percent < 0) discountState.percent = 0;
+if (!productStockState || typeof productStockState !== 'object' || Array.isArray(productStockState)) {
+  productStockState = { unavailable: {}, updatedAt: null, updatedBy: null };
+}
+if (!productStockState.unavailable || typeof productStockState.unavailable !== 'object' || Array.isArray(productStockState.unavailable)) {
+  productStockState.unavailable = {};
+}
 
 const pendingRecharges = new Map();
 const pendingWalletActions = new Map();
@@ -357,6 +367,10 @@ function saveProductPrices() {
 
 function saveDiscountState() {
   saveJsonFile(DISCOUNT_STATE_FILE, discountState);
+}
+
+function saveProductStock() {
+  saveJsonFile(PRODUCT_STOCK_FILE, productStockState);
 }
 
 function isAdminMember(member) {
@@ -2190,6 +2204,32 @@ function getProduct(productId) {
   return products.find(product => product.value === productId) || null;
 }
 
+function isProductAvailable(productId) {
+  return productStockState.unavailable?.[productId] !== true;
+}
+
+function setProductAvailability(productId, available, user) {
+  const product = getProduct(productId);
+  if (!product) return false;
+
+  if (available) {
+    delete productStockState.unavailable[productId];
+  } else {
+    productStockState.unavailable[productId] = true;
+  }
+
+  productStockState.updatedAt = Date.now();
+  productStockState.updatedBy = user?.id || null;
+  saveProductStock();
+  return true;
+}
+
+function toggleProductAvailability(productId, user) {
+  const nextAvailable = !isProductAvailable(productId);
+  setProductAvailability(productId, nextAvailable, user);
+  return nextAvailable;
+}
+
 function getDiscountPercent() {
   const percent = Number(discountState.percent);
   if (!Number.isFinite(percent) || percent <= 0) return 0;
@@ -2252,7 +2292,9 @@ function formatDiscountPercent() {
 }
 
 function formatProductPrice(productId, options = {}) {
-  const { includeDiscount = true } = options;
+  const { includeDiscount = true, ignoreAvailability = false } = options;
+  if (!ignoreAvailability && !isProductAvailable(productId)) return 'Indisponible';
+
   const basePrice = getProductBasePrice(productId);
   const price = getProductPrice(productId);
 
@@ -2276,7 +2318,7 @@ function buildPriceEditorRows() {
       products.slice(index, index + 5).map(product => (
         new ButtonBuilder()
           .setCustomId(`edit_price:${product.value}`)
-          .setLabel(`${productPointsLabel(product)} - ${formatProductPrice(product.value, { includeDiscount: false })}`.slice(0, 80))
+          .setLabel(`${productPointsLabel(product)} - ${formatProductPrice(product.value, { includeDiscount: false, ignoreAvailability: true })}`.slice(0, 80))
           .setEmoji(MCDONALDS_BUTTON_EMOJI)
           .setStyle(ButtonStyle.Primary)
       ))
@@ -2286,6 +2328,59 @@ function buildPriceEditorRows() {
   }
 
   return rows;
+}
+
+function stockButtonLabel(product) {
+  return `${isProductAvailable(product.value) ? '✅' : '❌'} ${productPointsLabel(product)}`.slice(0, 80);
+}
+
+function buildStockEditorRows() {
+  const rows = [];
+
+  for (let index = 0; index < products.length; index += 5) {
+    const row = new ActionRowBuilder().addComponents(
+      products.slice(index, index + 5).map(product => (
+        new ButtonBuilder()
+          .setCustomId(`toggle_stock:${product.value}`)
+          .setLabel(stockButtonLabel(product))
+          .setStyle(isProductAvailable(product.value) ? ButtonStyle.Success : ButtonStyle.Danger)
+      ))
+    );
+
+    rows.push(row);
+  }
+
+  return rows;
+}
+
+function buildStockEditorEmbed(guild) {
+  const unavailableCount = products.filter(product => !isProductAvailable(product.value)).length;
+
+  return new EmbedBuilder()
+    .setColor(0xD4AF37)
+    .setAuthor({ name: 'Stock McDonald\'s', iconURL: guild.iconURL({ dynamic: true }) })
+    .setTitle(`Gestion du stock ${MCDONALDS_EMOJI}`)
+    .setDescription([
+      'Clique sur un produit pour changer son état.',
+      '',
+      '✅ Disponible',
+      '❌ Indisponible',
+      '',
+      `Produits indisponibles : **${unavailableCount}/${products.length}**`,
+      '',
+      'Les produits indisponibles restent visibles dans Commander, mais ils ne peuvent pas être commandés.'
+    ].join('\n'))
+    .setFooter({ text: 'Owner • Gestion du stock' });
+}
+
+function productMenuLabel(product) {
+  const label = product.label.replace('Points', 'pts');
+  return (isProductAvailable(product.value) ? label : `❌ ${label}`).slice(0, 100);
+}
+
+function productMenuDescription(product) {
+  if (!isProductAvailable(product.value)) return 'Indisponible';
+  return `Prix : ${formatProductPrice(product.value)}`;
 }
 
 const ticketAllow = [
@@ -3081,6 +3176,28 @@ async function handleProductOrder(interaction, productId) {
     return replyTemp(interaction, { content: '❌ Produit introuvable.', ephemeral: true });
   }
 
+  if (!isProductAvailable(productId)) {
+    sendActionLog(interaction.member, '📦 Commande refusée - produit indisponible', [
+      `Client : ${logUser(interaction.user)}`,
+      `Produit : **${product.label}**`
+    ], 0xF1C40F);
+
+    return replyTemp(interaction, {
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0xE74C3C)
+          .setTitle('❌ Produit indisponible')
+          .setDescription([
+            `Produit : **${product.label}**`,
+            '',
+            'Ce produit est actuellement indisponible.',
+            'Reviens plus tard ou choisis un autre produit.'
+          ].join('\n'))
+      ],
+      ephemeral: true
+    }, 60_000);
+  }
+
   if (wallets[uid].balance < prix) {
     const currentBalance = wallets[uid].balance;
     const missingAmount = Math.max(prix - currentBalance, 0);
@@ -3253,10 +3370,13 @@ function buildHelpEmbed(guild) {
         name: 'Owner',
         value: helpCommandLines([
           ['prix', 'modifie les tarifs via boutons et formulaire.'],
+          ['stock', 'affiche les produits en boutons pour les rendre disponibles ou indisponibles.'],
           ['reduc nombre', 'applique une réduction globale à la boutique.'],
           ['resetreduc', 'retire la réduction globale.'],
           ['stats', 'affiche les statistiques boutique.'],
           ['maintenance on/off/status', 'active, désactive ou consulte la maintenance.'],
+          ['autodispo on/off/status', 'active, coupe ou consulte les messages automatiques de 11h et 18h.'],
+          ['annonce', 'ouvre un formulaire pour envoyer une annonce dans le salon des disponibilités.'],
           ['history @membre', 'affiche l’historique portefeuille.'],
           ['tickets @membre', 'affiche l’historique tickets.'],
           ['refund', 'rembourse une commande depuis son ticket.'],
@@ -3267,6 +3387,31 @@ function buildHelpEmbed(guild) {
       }
     )
     .setFooter({ text: 'La Rent’a • Aide commandes' });
+}
+
+function announcementTypeConfig(type) {
+  const normalized = String(type || 'info').trim().toLowerCase();
+
+  if (['promo', 'promotion', 'reduc', 'réduc', 'reduction', 'réduction'].includes(normalized)) {
+    return { key: 'promo', label: 'Promo', emoji: '🏷️', color: 0xD4AF37 };
+  }
+
+  if (['important', 'urgence', 'urgent', 'alerte'].includes(normalized)) {
+    return { key: 'important', label: 'Important', emoji: '⚠️', color: 0xE74C3C };
+  }
+
+  return { key: 'info', label: 'Info', emoji: '📣', color: 0x3498DB };
+}
+
+function buildAnnouncementEmbed(title, body, type) {
+  const config = announcementTypeConfig(type);
+
+  return new EmbedBuilder()
+    .setColor(config.color)
+    .setTitle(`${config.emoji} ${title}`.slice(0, 256))
+    .setDescription(body.slice(0, 4096))
+    .setFooter({ text: `La Rent’a • Annonce ${config.label}` })
+    .setTimestamp();
 }
 
 function buildCompletedOrderTicketEmbed(ticketRequest, dmSent) {
@@ -3419,6 +3564,19 @@ async function deletePreviousAvailabilityMessage(channel) {
   ], 0xF1C40F));
 }
 
+async function deleteStoredAvailabilityMessage() {
+  const channel = client.channels.cache.get(AVAILABILITY_CHANNEL_ID)
+    || await client.channels.fetch(AVAILABILITY_CHANNEL_ID).catch(() => null);
+
+  if (channel && typeof channel.send === 'function') {
+    await deletePreviousAvailabilityMessage(channel);
+  }
+
+  availabilityState.lastMessageId = null;
+  availabilityState.lastSlot = null;
+  saveAvailabilityState();
+}
+
 async function sendAvailabilityMessage(slotKey, dateKey) {
   const slot = AVAILABILITY_SLOTS[slotKey];
   if (!slot) return;
@@ -3464,6 +3622,8 @@ async function sendAvailabilityMessage(slotKey, dateKey) {
 }
 
 async function checkAvailabilitySchedule() {
+  if (!availabilityState.enabled) return;
+
   const now = getParisDateTimeParts();
   const slot = Object.values(AVAILABILITY_SLOTS)
     .find(item => item.hour === now.hour && now.minute === 0);
@@ -4480,6 +4640,59 @@ client.on('messageCreate', async message => {
     return message.channel.send({ embeds: [embed], components: buildPriceEditorRows() });
   }
 
+  if (message.content === '!stock') {
+    if (!isOwnerMember(message.member)) {
+      const reply = await message.channel.send('❌ Seul le rôle owner peut gérer le stock.');
+      return deleteLater(reply);
+    }
+
+    await sendAdminLog('📦 Panneau stock ouvert', [
+      `Owner : ${logUser(message.author)}`,
+      `Salon : ${logChannel(message.channel)}`,
+      `Indisponibles : **${products.filter(product => !isProductAvailable(product.value)).length}/${products.length}**`
+    ], 0x3498DB);
+
+    return message.channel.send({ embeds: [buildStockEditorEmbed(message.guild)], components: buildStockEditorRows() });
+  }
+
+  if (message.content === '!annonce') {
+    if (!isOwnerMember(message.member)) {
+      const reply = await message.channel.send('❌ Seul le rôle owner peut créer une annonce.');
+      return deleteLater(reply);
+    }
+
+    const embed = new EmbedBuilder()
+      .setColor(0xD4AF37)
+      .setAuthor({ name: 'Annonce La Rent’a', iconURL: message.guild.iconURL({ dynamic: true }) })
+      .setTitle('Créer une annonce')
+      .setDescription([
+        `L’annonce sera envoyée dans <#${AVAILABILITY_CHANNEL_ID}>.`,
+        '',
+        'Clique sur le bouton ci-dessous pour remplir le formulaire.',
+        '',
+        'Types acceptés : `info`, `promo`, `important`.'
+      ].join('\n'))
+      .setFooter({ text: 'Owner • Ce panneau disparaît dans 5 minutes' });
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`open_announcement_modal:${message.author.id}`)
+        .setLabel('Créer l’annonce')
+        .setEmoji('📣')
+        .setStyle(ButtonStyle.Primary)
+    );
+
+    await sendAdminLog('📣 Panneau annonce ouvert', [
+      `Owner : ${logUser(message.author)}`,
+      `Salon commande : ${logChannel(message.channel)}`,
+      `Salon annonce : <#${AVAILABILITY_CHANNEL_ID}>`
+    ], 0x3498DB);
+
+    const panel = await message.channel.send({ embeds: [embed], components: [row] });
+    deleteLater(panel, 5 * 60_000);
+    return;
+  }
+
   if (message.content.trim().split(/\s+/)[0] === '!reduc') {
     if (!isOwnerMember(message.member)) {
       const reply = await message.channel.send('❌ Seul le rôle owner peut appliquer une réduction.');
@@ -5028,6 +5241,67 @@ client.on('messageCreate', async message => {
     return message.channel.send({ embeds: [buildShopStatsEmbed()] });
   }
 
+  if (message.content.trim().split(/\s+/)[0] === '!autodispo') {
+    if (!isOwnerMember(message.member)) {
+      const reply = await message.channel.send('❌ Seul le rôle owner peut gérer les messages automatiques de disponibilité.');
+      return deleteLater(reply);
+    }
+
+    const args = message.content.trim().split(/\s+/);
+    const action = (args[1] || 'status').toLowerCase();
+
+    if (!['on', 'off', 'status'].includes(action)) {
+      const reply = await message.channel.send('Utilisation : `!autodispo on`, `!autodispo off` ou `!autodispo status`');
+      return deleteLater(reply);
+    }
+
+    if (action === 'status') {
+      return message.channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(availabilityState.enabled ? 0x2ECC71 : 0xE67E22)
+            .setTitle('📣 Messages disponibilité automatiques')
+            .setDescription([
+              `Statut : **${availabilityState.enabled ? 'activés' : 'désactivés'}**`,
+              `Salon : <#${AVAILABILITY_CHANNEL_ID}>`,
+              availabilityState.lastSlot
+                ? `Dernier message : **${availabilityState.lastSlot === 'morning' ? '11h' : '18h'}**`
+                : 'Dernier message : **aucun**',
+              availabilityState.lastMessageId ? `Message actuel : **${availabilityState.lastMessageId}**` : null
+            ].filter(Boolean).join('\n'))
+        ]
+      });
+    }
+
+    const enabled = action === 'on';
+    availabilityState.enabled = enabled;
+    availabilityState.updatedAt = Date.now();
+    availabilityState.updatedBy = message.author.id;
+    saveAvailabilityState();
+
+    if (!enabled) {
+      await deleteStoredAvailabilityMessage();
+    }
+
+    await sendAdminLog(enabled ? '📣 Auto-dispo activé' : '📣 Auto-dispo désactivé', [
+      `Owner : ${logUser(message.author)}`,
+      `Salon commande : ${logChannel(message.channel)}`,
+      `Salon annonces : <#${AVAILABILITY_CHANNEL_ID}>`,
+      enabled ? 'Messages 11h/18h : activés' : 'Messages 11h/18h : désactivés et dernier message supprimé si présent'
+    ], enabled ? 0x2ECC71 : 0xE67E22);
+
+    return message.channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(enabled ? 0x2ECC71 : 0xE67E22)
+          .setTitle(enabled ? '📣 Auto-dispo activé' : '📣 Auto-dispo désactivé')
+          .setDescription(enabled
+            ? 'Les messages automatiques de 11h et 18h sont réactivés.'
+            : 'Les messages automatiques de 11h et 18h sont désactivés. Le dernier message dispo a été supprimé si le bot l’a retrouvé.')
+      ]
+    });
+  }
+
   if (message.content.trim().split(/\s+/)[0] === '!maintenance') {
     if (!isOwnerMember(message.member)) {
       const reply = await message.channel.send('❌ Seul le rôle owner peut gérer la maintenance.');
@@ -5227,6 +5501,93 @@ client.on(Events.InteractionCreate, async interaction => {
       return handleRefundActionButton(interaction);
     }
 
+    if (interaction.customId.startsWith('open_announcement_modal:')) {
+      if (!isOwnerMember(interaction.member)) {
+        return interaction.reply({
+          content: '❌ Seul le rôle owner peut créer une annonce.',
+          ephemeral: true
+        });
+      }
+
+      const modal = new ModalBuilder()
+        .setCustomId(`announcement_modal:${interaction.user.id}`)
+        .setTitle('Créer une annonce');
+
+      const titleInput = new TextInputBuilder()
+        .setCustomId('announcement_title')
+        .setLabel('Titre')
+        .setPlaceholder('Exemple : Promo ce soir')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMinLength(2)
+        .setMaxLength(100);
+
+      const bodyInput = new TextInputBuilder()
+        .setCustomId('announcement_body')
+        .setLabel('Message')
+        .setPlaceholder('Exemple : -20% sur toute la boutique jusqu’à 23h.')
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(true)
+        .setMinLength(2)
+        .setMaxLength(1800);
+
+      const typeInput = new TextInputBuilder()
+        .setCustomId('announcement_type')
+        .setLabel('Type : info, promo ou important')
+        .setPlaceholder('info')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setMaxLength(20);
+
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(titleInput),
+        new ActionRowBuilder().addComponents(bodyInput),
+        new ActionRowBuilder().addComponents(typeInput)
+      );
+
+      return interaction.showModal(modal);
+    }
+
+    if (interaction.customId.startsWith('toggle_stock:')) {
+      if (!isOwnerMember(interaction.member)) {
+        return interaction.reply({
+          content: '❌ Seul le rôle owner peut gérer le stock.',
+          ephemeral: true
+        });
+      }
+
+      const productId = interaction.customId.split(':')[1];
+      const product = getProduct(productId);
+
+      if (!product) {
+        return interaction.reply({
+          content: '❌ Produit introuvable.',
+          ephemeral: true
+        });
+      }
+
+      const available = toggleProductAvailability(productId, interaction.user);
+
+      await sendAdminLog(available ? '📦 Produit remis en stock' : '📦 Produit mis indisponible', [
+        `Owner : ${logUser(interaction.user)}`,
+        `Produit : **${product.label}**`,
+        `Nouvel état : **${available ? 'Disponible' : 'Indisponible'}**`,
+        `Salon : ${logChannel(interaction.channel)}`
+      ], available ? 0x2ECC71 : 0xE67E22);
+
+      await interaction.update({
+        embeds: [buildStockEditorEmbed(interaction.guild)],
+        components: buildStockEditorRows()
+      });
+
+      return interaction.followUp({
+        content: available
+          ? `✅ **${product.label}** est maintenant disponible.`
+          : `❌ **${product.label}** est maintenant indisponible.`,
+        ephemeral: true
+      });
+    }
+
     if (interaction.customId.startsWith('edit_price:')) {
       if (!isOwnerMember(interaction.member)) {
         return interaction.reply({
@@ -5252,7 +5613,7 @@ client.on(Events.InteractionCreate, async interaction => {
       const priceInput = new TextInputBuilder()
         .setCustomId('price')
         .setLabel('Nouveau prix en euros')
-        .setPlaceholder(`Prix actuel : ${formatProductPrice(productId, { includeDiscount: false })} | Exemple : 4.50`)
+        .setPlaceholder(`Prix actuel : ${formatProductPrice(productId, { includeDiscount: false, ignoreAvailability: true })} | Exemple : 4.50`)
         .setStyle(TextInputStyle.Short)
         .setRequired(true)
         .setMinLength(1)
@@ -5697,8 +6058,8 @@ client.on(Events.InteractionCreate, async interaction => {
           .setCustomId('produits')
           .setPlaceholder('Choisir un produit McDonald’s...')
           .addOptions(products.map(product => ({
-            label: product.label.replace('Points', 'pts').slice(0, 100),
-            description: `Prix : ${formatProductPrice(product.value)}`,
+            label: productMenuLabel(product),
+            description: productMenuDescription(product),
             value: product.value,
             emoji: MCDONALDS_BUTTON_EMOJI
           })))
@@ -5706,6 +6067,65 @@ client.on(Events.InteractionCreate, async interaction => {
 
       return replyTemp(interaction, { embeds: [orderEmbed], components: [productMenu], ephemeral: true }, 120_000);
     }
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('announcement_modal:')) {
+    if (!isOwnerMember(interaction.member)) {
+      return interaction.reply({
+        content: '❌ Seul le rôle owner peut créer une annonce.',
+        ephemeral: true
+      });
+    }
+
+    const title = interaction.fields.getTextInputValue('announcement_title').trim();
+    const body = interaction.fields.getTextInputValue('announcement_body').trim();
+    const type = interaction.fields.getTextInputValue('announcement_type').trim() || 'info';
+
+    if (!title || !body) {
+      return interaction.reply({
+        content: '❌ Titre ou message invalide.',
+        ephemeral: true
+      });
+    }
+
+    const channel = client.channels.cache.get(AVAILABILITY_CHANNEL_ID)
+      || await client.channels.fetch(AVAILABILITY_CHANNEL_ID).catch(() => null);
+
+    if (!channel || typeof channel.send !== 'function') {
+      return interaction.reply({
+        content: `❌ Impossible de trouver le salon d’annonce : <#${AVAILABILITY_CHANNEL_ID}>.`,
+        ephemeral: true
+      });
+    }
+
+    const embed = buildAnnouncementEmbed(title, body, type);
+    const sent = await channel.send({ embeds: [embed] })
+      .catch(async error => {
+        await reportCrash('Envoi annonce impossible', error, [
+          `Owner : ${logUser(interaction.user)}`,
+          `Salon annonce : <#${AVAILABILITY_CHANNEL_ID}>`
+        ]);
+        return null;
+      });
+
+    if (!sent) {
+      return interaction.reply({
+        content: '❌ Impossible d’envoyer l’annonce.',
+        ephemeral: true
+      });
+    }
+
+    await sendAdminLog('📣 Annonce envoyée', [
+      `Owner : ${logUser(interaction.user)}`,
+      `Salon annonce : ${logChannel(channel)}`,
+      `Titre : **${title.slice(0, 200)}**`,
+      `Type : **${announcementTypeConfig(type).label}**`
+    ], 0x2ECC71);
+
+    return interaction.reply({
+      content: `✅ Annonce envoyée dans <#${AVAILABILITY_CHANNEL_ID}>.`,
+      ephemeral: true
+    });
   }
 
   if (interaction.isModalSubmit() && interaction.customId.startsWith('edit_price_modal:')) {
