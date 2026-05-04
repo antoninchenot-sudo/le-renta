@@ -74,6 +74,7 @@ const WALLET_BACKUP_DIR = path.join('backups', 'wallets');
 const WALLET_BACKUP_LIMIT = 50;
 const DATA_BACKUP_DIR = path.join('backups', 'data');
 const DATA_BACKUP_LIMIT = 50;
+const DATA_BACKUP_DEBOUNCE_DELAY = 1_500;
 const REQUESTS_FILE = 'requests.json';
 const REFERRALS_FILE = 'referrals.json';
 const MAINTENANCE_FILE = 'maintenance-state.json';
@@ -98,10 +99,11 @@ const DATA_BACKUP_FILES = [
   DISCOUNT_STATE_FILE,
   PRODUCT_STOCK_FILE
 ];
-const BOT_CHANGELOG_VERSION = '2026-05-04-ticket-take-charge';
+const BOT_CHANGELOG_VERSION = '2026-05-04-latency-ticket-locks';
 // Garder uniquement les changements de cette version, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Ajout du bouton owner Prendre en charge dans les tickets.'
+  'Optimisation des sauvegardes globales pour réduire la latence du bot.',
+  'Ajout d’un verrou anti double-clic sur les actions sensibles des tickets.'
 ];
 const AVAILABILITY_TIMEZONE = 'Europe/Paris';
 const AVAILABILITY_CHECK_INTERVAL = 60_000;
@@ -275,6 +277,27 @@ function createDataBackup(reason = 'manuel', actorUser = null) {
   }
 }
 
+const pendingDataBackupReasons = new Set();
+let pendingDataBackupActor = null;
+let pendingDataBackupTimer = null;
+
+function scheduleDataBackup(reason, actorUser = null) {
+  pendingDataBackupReasons.add(reason || 'auto');
+  if (actorUser) pendingDataBackupActor = actorUser;
+  if (pendingDataBackupTimer) return;
+
+  pendingDataBackupTimer = setTimeout(() => {
+    const reasons = [...pendingDataBackupReasons];
+    const actor = pendingDataBackupActor;
+    pendingDataBackupReasons.clear();
+    pendingDataBackupActor = null;
+    pendingDataBackupTimer = null;
+    createDataBackup(reasons.length === 1 ? reasons[0] : `batch_${reasons.length}_actions`, actor);
+  }, DATA_BACKUP_DEBOUNCE_DELAY);
+
+  pendingDataBackupTimer.unref?.();
+}
+
 function loadJsonFile(fileName, fallback, options = {}) {
   if (!fs.existsSync(fileName)) return fallback;
 
@@ -392,6 +415,7 @@ if (!productStockState.unavailable || typeof productStockState.unavailable !== '
 const pendingRecharges = new Map();
 const pendingWalletActions = new Map();
 const pendingRefundActions = new Map();
+const interactionActionLocks = new Map();
 const guildInviteUses = new Map();
 const crashReportCooldowns = new Map();
 const ticketCleanupTimers = new Map();
@@ -449,6 +473,55 @@ function saveDiscountState() {
 
 function saveProductStock() {
   saveJsonFile(PRODUCT_STOCK_FILE, productStockState);
+}
+
+function acquireInteractionActionLock(key) {
+  if (!key) return true;
+  if (interactionActionLocks.has(key)) return false;
+
+  const timeout = setTimeout(() => {
+    interactionActionLocks.delete(key);
+  }, 30_000);
+  timeout.unref?.();
+  interactionActionLocks.set(key, timeout);
+  return true;
+}
+
+function releaseInteractionActionLock(key) {
+  if (!key) return;
+  const timeout = interactionActionLocks.get(key);
+  if (timeout) clearTimeout(timeout);
+  interactionActionLocks.delete(key);
+}
+
+function interactionActionLockKey(interaction) {
+  if (!interaction?.isButton?.()) return null;
+
+  const customId = interaction.customId || '';
+  const channelId = interaction.channel?.id || interaction.channelId;
+  if (!channelId) return null;
+
+  const ticketActions = [
+    'complete_order:',
+    'take_ticket:',
+    'confirm_delete_ticket:',
+    'accept_recharge_proof:',
+    'reject_recharge_proof:'
+  ];
+
+  if (ticketActions.some(prefix => customId.startsWith(prefix))) {
+    return `ticket-action:${channelId}`;
+  }
+
+  if (customId.startsWith('confirm_wallet_action:') || customId.startsWith('cancel_wallet_action:')) {
+    return `wallet-action:${customId.split(':')[1] || channelId}`;
+  }
+
+  if (customId.startsWith('confirm_refund_action:') || customId.startsWith('cancel_refund_action:')) {
+    return `refund-action:${customId.split(':')[1] || channelId}`;
+  }
+
+  return null;
 }
 
 function isAdminMember(member) {
@@ -721,7 +794,7 @@ function setMaintenanceState(enabled, user, reason = '') {
   maintenanceState.updatedBy = user.id;
   maintenanceState.reason = reason || null;
   saveMaintenanceState();
-  createDataBackup(enabled ? 'maintenance_on' : 'maintenance_off', user);
+  scheduleDataBackup(enabled ? 'maintenance_on' : 'maintenance_off', user);
 }
 
 async function replyMaintenance(interaction) {
@@ -1352,7 +1425,7 @@ async function applyWalletAdd({ user, amount, channel, guild, adminUser, ticketR
       });
     }
 
-    createDataBackup('recharge_validated', adminUser);
+    scheduleDataBackup('recharge_validated', adminUser);
 
     if (dmSent) {
       await channel.send('✅ Le ticket sera déplacé dans les tickets supprimés dans 10 secondes.');
@@ -1380,7 +1453,7 @@ async function applyWalletAdd({ user, amount, channel, guild, adminUser, ticketR
     return;
   }
 
-  createDataBackup('wallet_add', adminUser);
+  scheduleDataBackup('wallet_add', adminUser);
 
   await sendAdminLog('💰 Solde ajouté', [
     `Admin : ${logUser(adminUser)}`,
@@ -1411,7 +1484,7 @@ async function applyWalletRemove({ user, amount, channel, adminUser }) {
     actorId: adminUser.id
   });
   recordShopRemove(amount);
-  createDataBackup('wallet_remove', adminUser);
+  scheduleDataBackup('wallet_remove', adminUser);
 
   await sendAdminLog('💸 Solde retiré', [
     `Admin : ${logUser(adminUser)}`,
@@ -1596,7 +1669,7 @@ async function refundOrderTicket(message, ticketRequest) {
     product: ticketRequest.product || null,
     note: 'Remboursement de commande'
   });
-  createDataBackup('order_refunded', message.author);
+  scheduleDataBackup('order_refunded', message.author);
 
   const newBalanceText = formatWalletAmount(wallets[ticketRequest.userId].balance);
   const refundText = formatWalletAmount(amount);
@@ -1860,7 +1933,7 @@ async function handleRechargeProofButton(interaction) {
   ticketRequest.proofRejectedBy = interaction.user.id;
   saveRequests();
   upsertTicketHistory(ticketRequest);
-  createDataBackup('recharge_proof_rejected', interaction.user);
+  scheduleDataBackup('recharge_proof_rejected', interaction.user);
 
   await interaction.update({
     embeds: [
@@ -2556,7 +2629,7 @@ function setProductAvailability(productId, available, user) {
   productStockState.updatedAt = Date.now();
   productStockState.updatedBy = user?.id || null;
   saveProductStock();
-  createDataBackup(available ? 'stock_product_available' : 'stock_product_unavailable', user);
+  scheduleDataBackup(available ? 'stock_product_available' : 'stock_product_unavailable', user);
   return true;
 }
 
@@ -2602,7 +2675,7 @@ function setProductPrice(productId, price, user = null) {
 
   productPriceOverrides[productId] = Math.round(price * 100) / 100;
   saveProductPrices();
-  createDataBackup('product_price_changed', user);
+  scheduleDataBackup('product_price_changed', user);
   return true;
 }
 
@@ -2611,7 +2684,7 @@ function setGlobalDiscount(percent, user) {
   discountState.updatedAt = Date.now();
   discountState.updatedBy = user?.id || null;
   saveDiscountState();
-  createDataBackup('discount_enabled', user);
+  scheduleDataBackup('discount_enabled', user);
 }
 
 function resetGlobalDiscount(user) {
@@ -2619,7 +2692,7 @@ function resetGlobalDiscount(user) {
   discountState.updatedAt = Date.now();
   discountState.updatedBy = user?.id || null;
   saveDiscountState();
-  createDataBackup('discount_reset', user);
+  scheduleDataBackup('discount_reset', user);
 }
 
 function formatPercentValue(percent) {
@@ -3327,7 +3400,7 @@ async function completeOrderTicketChannel(channel, ticketRequest, user, ownerId 
     recordShopOrderCompleted(ticketRequest);
     upsertTicketHistory(ticketRequest);
     saveRequests();
-    createDataBackup('order_completed', user);
+    scheduleDataBackup('order_completed', user);
   }
 
   scheduleCompletedOrderTicketCleanup(channel.id, ticketRequest?.completedAt || Date.now());
@@ -3688,7 +3761,7 @@ async function handleProductOrder(interaction, productId) {
     product: product.label
   });
   recordShopOrderCreated(product.label, prix);
-  createDataBackup('order_created', interaction.user);
+  scheduleDataBackup('order_created', interaction.user);
 
   await ticket.send({
     content: `<@&${STAFF_ROLE_ID}>
@@ -5989,8 +6062,24 @@ client.on('messageCreate', async message => {
 });
 
 client.on(Events.InteractionCreate, async interaction => {
+  let actionLockKey = null;
+  let actionLockAcquired = false;
+
   try {
   if (interaction.isButton()) {
+    actionLockKey = interactionActionLockKey(interaction);
+
+    if (actionLockKey) {
+      actionLockAcquired = acquireInteractionActionLock(actionLockKey);
+
+      if (!actionLockAcquired) {
+        return interaction.reply({
+          content: '⏳ Une action est déjà en cours. Réessaie dans quelques secondes.',
+          ephemeral: true
+        }).catch(() => {});
+      }
+    }
+
     if (
       interaction.customId.startsWith('confirm_wallet_action:') ||
       interaction.customId.startsWith('cancel_wallet_action:')
@@ -6327,11 +6416,13 @@ client.on(Events.InteractionCreate, async interaction => {
         });
       }
 
+      await interaction.deferReply({ ephemeral: true });
+
       ticketRequest.takenBy = interaction.user.id;
       ticketRequest.takenAt = Date.now();
       upsertTicketHistory(ticketRequest);
       saveRequests();
-      createDataBackup('ticket_taken', interaction.user);
+      scheduleDataBackup('ticket_taken', interaction.user);
 
       await interaction.message.edit({
         components: [ticketButtonsForRequest(ticketRequest, ownerId)]
@@ -6359,10 +6450,7 @@ client.on(Events.InteractionCreate, async interaction => {
         `Client : <@${ticketRequest.userId}>`
       ], 0x3498DB);
 
-      return interaction.reply({
-        content: '✅ Ticket pris en charge.',
-        ephemeral: true
-      });
+      return interaction.editReply('✅ Ticket pris en charge.');
     }
 
     if (interaction.customId.startsWith('delete_ticket:')) {
@@ -6534,7 +6622,7 @@ client.on(Events.InteractionCreate, async interaction => {
         'Merci de rester disponible dans ce ticket.',
         'Le staff vous répondra dès que possible.'
       ].join('\n'));
-      createDataBackup('support_ticket_created', interaction.user);
+      scheduleDataBackup('support_ticket_created', interaction.user);
 
       sendAdminLog('🚨 Ticket support créé', [
         `Client : ${logUser(interaction.user)}`,
@@ -6878,7 +6966,7 @@ ${dmSent ? '📩 Instructions envoyées au client en MP.' : '⚠️ Impossible d
 ⏳ En attente du screenshot du paiement.`,
         components: [ticketButtons(interaction.user.id, request)]
       });
-      createDataBackup('recharge_request_created', interaction.user);
+      scheduleDataBackup('recharge_request_created', interaction.user);
 
       sendAdminLog('💳 Demande de recharge créée', [
         `Client : ${logUser(interaction.user)}`,
@@ -6905,6 +6993,8 @@ ${dmSent ? '📩 Instructions envoyées au client en MP.' : '⚠️ Impossible d
   }
   } catch (error) {
     await handleInteractionError(interaction, error);
+  } finally {
+    if (actionLockAcquired) releaseInteractionActionLock(actionLockKey);
   }
 });
 
