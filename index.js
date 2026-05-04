@@ -43,6 +43,7 @@ const SUPPORT_CHANNEL_ID = '1498434089450078258';
 const LOG_CHANNEL_ID = '1310354201704136747';
 const ADMIN_COMMAND_LOG_CHANNEL_ID = '1499758004797702225';
 const ADMIN_CHANGELOG_CHANNEL_ID = '1500475167313231983';
+const AVAILABILITY_CHANNEL_ID = '1310355422993186896';
 const AVIS_CHANNEL_ID = '1497652398259306516';
 const INVITE_ANNOUNCE_CHANNEL_ID = '1310355769824383059';
 const INVITE_ADMIN_CHANNEL_ID = '1499523428112142568';
@@ -75,11 +76,16 @@ const MAINTENANCE_FILE = 'maintenance-state.json';
 const SHOP_STATS_FILE = 'shop-stats.json';
 const WARNINGS_FILE = 'warnings.json';
 const BOT_CHANGELOG_FILE = 'bot-changelog-state.json';
-const BOT_CHANGELOG_VERSION = '2026-05-04-prefix-command-delete';
+const AVAILABILITY_STATE_FILE = 'availability-message-state.json';
+const PRODUCT_PRICES_FILE = 'product-prices.json';
+const DISCOUNT_STATE_FILE = 'discount-state.json';
+const BOT_CHANGELOG_VERSION = '2026-05-04-global-discount';
 // Garder uniquement les changements de cette version, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Correction de la suppression automatique des messages de commandes admin commençant par !.'
+  'Ajout des commandes owner !reduc et !resetreduc pour appliquer ou retirer une réduction globale.'
 ];
+const AVAILABILITY_TIMEZONE = 'Europe/Paris';
+const AVAILABILITY_CHECK_INTERVAL = 60_000;
 const AUTO_MOD_NOTICE_DELAY = 7_000;
 const WARNING_SANCTIONS = [
   { warns: 1, label: 'Rappel en MP', timeout: 0 },
@@ -262,6 +268,13 @@ let shopStats = loadJsonFile(SHOP_STATS_FILE, {
 });
 let warnings = loadJsonFile(WARNINGS_FILE, { users: {} });
 let botChangelogState = loadJsonFile(BOT_CHANGELOG_FILE, { announcedVersions: {} });
+let availabilityState = loadJsonFile(AVAILABILITY_STATE_FILE, {
+  lastMessageId: null,
+  lastSlot: null,
+  sentDates: {}
+});
+let productPriceOverrides = loadJsonFile(PRODUCT_PRICES_FILE, {});
+let discountState = loadJsonFile(DISCOUNT_STATE_FILE, { percent: 0, updatedAt: null, updatedBy: null });
 
 if (fs.existsSync(WALLET_FILE)) {
   try {
@@ -278,6 +291,15 @@ if (typeof maintenanceState.enabled !== 'boolean') maintenanceState.enabled = fa
 if (!shopStats.products) shopStats.products = {};
 if (!warnings.users) warnings.users = {};
 if (!botChangelogState.announcedVersions) botChangelogState.announcedVersions = {};
+if (!availabilityState.sentDates) availabilityState.sentDates = {};
+if (!productPriceOverrides || typeof productPriceOverrides !== 'object' || Array.isArray(productPriceOverrides)) {
+  productPriceOverrides = {};
+}
+if (!discountState || typeof discountState !== 'object' || Array.isArray(discountState)) {
+  discountState = { percent: 0, updatedAt: null, updatedBy: null };
+}
+discountState.percent = Number(discountState.percent) || 0;
+if (discountState.percent < 0) discountState.percent = 0;
 
 const pendingRecharges = new Map();
 const pendingWalletActions = new Map();
@@ -286,6 +308,7 @@ const guildInviteUses = new Map();
 const crashReportCooldowns = new Map();
 const ticketCleanupTimers = new Map();
 const ticketNoResponseReminderTimers = new Map();
+let availabilitySchedulerTimer = null;
 const CRASH_LOG_COOLDOWN = 60_000;
 
 function saveWallets() {
@@ -322,6 +345,18 @@ function saveWarnings() {
 
 function saveBotChangelogState() {
   saveJsonFile(BOT_CHANGELOG_FILE, botChangelogState);
+}
+
+function saveAvailabilityState() {
+  saveJsonFile(AVAILABILITY_STATE_FILE, availabilityState);
+}
+
+function saveProductPrices() {
+  saveJsonFile(PRODUCT_PRICES_FILE, productPriceOverrides);
+}
+
+function saveDiscountState() {
+  saveJsonFile(DISCOUNT_STATE_FILE, discountState);
 }
 
 function isAdminMember(member) {
@@ -541,6 +576,22 @@ function pendingRechargeKey(interaction) {
 
 function parseWalletAmount(value) {
   return Number.parseFloat(String(value || '').replace(',', '.'));
+}
+
+function parseProductPriceInput(value) {
+  const normalized = String(value || '').trim().replace(',', '.');
+  if (!/^\d+(?:\.\d{1,2})?$/.test(normalized)) return NaN;
+  return Number.parseFloat(normalized);
+}
+
+function parseDiscountPercent(value) {
+  const normalized = String(value || '')
+    .trim()
+    .replace(',', '.')
+    .replace(/%/g, '')
+    .replace(/^\+/, '');
+  if (!/^-?\d+(?:\.\d{1,2})?$/.test(normalized)) return NaN;
+  return Math.abs(Number.parseFloat(normalized));
 }
 
 function formatWalletAmount(amount) {
@@ -2135,7 +2186,108 @@ const products = [
   { label: 'McDonald\'s 1100-1199 Points', description: '67€', value: '1100_1199', price: 67 }
 ];
 
-const prices = Object.fromEntries(products.map(product => [product.value, product.price]));
+function getProduct(productId) {
+  return products.find(product => product.value === productId) || null;
+}
+
+function getDiscountPercent() {
+  const percent = Number(discountState.percent);
+  if (!Number.isFinite(percent) || percent <= 0) return 0;
+  return Math.min(percent, 100);
+}
+
+function isDiscountActive() {
+  return getDiscountPercent() > 0;
+}
+
+function getProductBasePrice(productId) {
+  const product = getProduct(productId);
+  if (!product) return undefined;
+
+  const override = Number(productPriceOverrides[productId]);
+  return Number.isFinite(override) && override > 0 ? override : product.price;
+}
+
+function getProductPrice(productId) {
+  const basePrice = getProductBasePrice(productId);
+  if (basePrice === undefined) return undefined;
+
+  const discountPercent = getDiscountPercent();
+  if (!discountPercent) return basePrice;
+
+  const baseCents = eurosToCents(basePrice);
+  const discountedCents = Math.max(0, Math.round(baseCents * (100 - discountPercent) / 100));
+  return discountedCents / 100;
+}
+
+function setProductPrice(productId, price) {
+  const product = getProduct(productId);
+  if (!product || !Number.isFinite(price) || price <= 0) return false;
+
+  productPriceOverrides[productId] = Math.round(price * 100) / 100;
+  saveProductPrices();
+  return true;
+}
+
+function setGlobalDiscount(percent, user) {
+  discountState.percent = Math.round(percent * 100) / 100;
+  discountState.updatedAt = Date.now();
+  discountState.updatedBy = user?.id || null;
+  saveDiscountState();
+}
+
+function resetGlobalDiscount(user) {
+  discountState.percent = 0;
+  discountState.updatedAt = Date.now();
+  discountState.updatedBy = user?.id || null;
+  saveDiscountState();
+}
+
+function formatPercentValue(percent) {
+  return Number.isInteger(percent) ? String(percent) : percent.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+}
+
+function formatDiscountPercent() {
+  return formatPercentValue(getDiscountPercent());
+}
+
+function formatProductPrice(productId, options = {}) {
+  const { includeDiscount = true } = options;
+  const basePrice = getProductBasePrice(productId);
+  const price = getProductPrice(productId);
+
+  if (price === undefined || basePrice === undefined) return 'Non défini';
+  if (!includeDiscount || !isDiscountActive() || price === basePrice) return formatWalletAmount(price);
+
+  return `${formatWalletAmount(price)} au lieu de ${formatWalletAmount(basePrice)} (-${formatDiscountPercent()}%)`;
+}
+
+function productPointsLabel(product) {
+  return product.label
+    .replace(/^McDonald'?s\s*/i, '')
+    .replace(/\s+Points$/i, ' pts');
+}
+
+function buildPriceEditorRows() {
+  const rows = [];
+
+  for (let index = 0; index < products.length; index += 5) {
+    const row = new ActionRowBuilder().addComponents(
+      products.slice(index, index + 5).map(product => (
+        new ButtonBuilder()
+          .setCustomId(`edit_price:${product.value}`)
+          .setLabel(`${productPointsLabel(product)} - ${formatProductPrice(product.value, { includeDiscount: false })}`.slice(0, 80))
+          .setEmoji(MCDONALDS_BUTTON_EMOJI)
+          .setStyle(ButtonStyle.Primary)
+      ))
+    );
+
+    rows.push(row);
+  }
+
+  return rows;
+}
+
 const ticketAllow = [
   PermissionFlagsBits.ViewChannel,
   PermissionFlagsBits.SendMessages,
@@ -2812,6 +2964,25 @@ function paymentInstruction(method) {
 function rechargeInstructionMessage(request) {
   const methodName = paymentLabel(request.method);
 
+  if (request.method === 'virement') {
+    return [
+      `🧭 **Recharge ${methodName} — Étape 2/2**`,
+      '',
+      `Montant déclaré : **${request.amount}** | Demande n°**${request.id}**`,
+      `Date indiquée : **${request.paymentDate || 'Non précisée'}** | Heure : **${request.paymentTime || 'Non précisée'}**`,
+      '',
+      '🏦 **Copie l’IBAN ci-dessous :**',
+      '```text',
+      IBAN,
+      '```',
+      '',
+      '⚠️ **Ne mets aucune note / aucun libellé dans le virement.**',
+      '',
+      'Puis réponds à ce message en joignant ton screenshot du virement.',
+      '⏳ Tu as **24h** pour l\'envoyer.'
+    ].join('\n');
+  }
+
   return [
     `🧭 **Recharge ${methodName} — Étape 2/2**`,
     '',
@@ -2890,7 +3061,7 @@ function productListText(options = {}) {
         ? product.label.replace(/\b\d+-\d+\b/g, match => `**${match}**`)
         : product.label;
 
-      return `💰  ${label.padEnd(15, ' ')} →   ${product.description}`;
+      return `💰  ${label.padEnd(15, ' ')} →   ${formatProductPrice(product.value)}`;
     })
     .join('\n\n');
 }
@@ -2903,25 +3074,50 @@ async function handleProductOrder(interaction, productId) {
   const uid = interaction.user.id;
   if (!wallets[uid]) wallets[uid] = { balance: 0 };
 
-  const product = products.find(item => item.value === productId);
-  const prix = prices[productId];
+  const product = getProduct(productId);
+  const prix = getProductPrice(productId);
 
   if (!product || prix === undefined) {
     return replyTemp(interaction, { content: '❌ Produit introuvable.', ephemeral: true });
   }
 
   if (wallets[uid].balance < prix) {
+    const currentBalance = wallets[uid].balance;
+    const missingAmount = Math.max(prix - currentBalance, 0);
+
     sendActionLog(interaction.member, '⚠️ Commande refusée - solde insuffisant', [
       `Client : ${logUser(interaction.user)}`,
       `Produit : **${product.label}**`,
-      `Prix : **${prix}€**`,
-      `Solde : **${wallets[uid].balance.toFixed(2)}€**`
+      `Prix : **${formatWalletAmount(prix)}**`,
+      `Solde : **${formatWalletAmount(currentBalance)}**`,
+      `Manque : **${formatWalletAmount(missingAmount)}**`
     ], 0xF1C40F);
 
+    const rechargeRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('recharger')
+        .setLabel('Recharger mon solde')
+        .setEmoji('➕')
+        .setStyle(ButtonStyle.Primary)
+    );
+
+    const insufficientBalanceEmbed = new EmbedBuilder()
+      .setColor(0xE74C3C)
+      .setTitle('❌ Solde insuffisant')
+      .setDescription([
+        `Produit : **${product.label}**`,
+        `Prix : **${formatWalletAmount(prix)}**`,
+        `Ton solde : **${formatWalletAmount(currentBalance)}**`,
+        `Il te manque : **${formatWalletAmount(missingAmount)}**`,
+        '',
+        'Recharge ton portefeuille pour finaliser ta commande.'
+      ].join('\n'));
+
     return replyTemp(interaction, {
-      content: `❌ Solde insuffisant\n💰 Prix : ${prix}€\n👛 Solde : ${wallets[uid].balance.toFixed(2)}€`,
+      embeds: [insufficientBalanceEmbed],
+      components: [rechargeRow],
       ephemeral: true
-    });
+    }, 120_000);
   }
 
   const ticketConfirmation = await confirmOpeningAnotherTicket(interaction, 'commande');
@@ -3086,6 +3282,140 @@ function sendAdminLog(title, lines, color = 0x95A5A6) {
 
 function sendAdminCommandLog(title, lines, color = 0x95A5A6) {
   return sendAdminLog(title, lines, color);
+}
+
+const availabilityFormatter = new Intl.DateTimeFormat('fr-FR', {
+  timeZone: AVAILABILITY_TIMEZONE,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  hourCycle: 'h23'
+});
+
+const AVAILABILITY_SLOTS = {
+  morning: {
+    key: 'morning',
+    hour: 11,
+    title: 'La Rent’a est disponible toute la journée',
+    lines: [
+      'Nous sommes dispo pour prendre vos commandes aujourd’hui.',
+      'Pensez à vérifier votre portefeuille avant de commander.'
+    ]
+  },
+  evening: {
+    key: 'evening',
+    hour: 18,
+    title: 'La Rent’a est disponible toute la soirée',
+    lines: [
+      'Nous sommes dispo pour prendre vos commandes ce soir.',
+      'Rechargez votre solde si besoin, puis passez commande depuis la boutique.'
+    ]
+  }
+};
+
+function getParisDateTimeParts(date = new Date()) {
+  const parts = Object.fromEntries(
+    availabilityFormatter.formatToParts(date)
+      .filter(part => part.type !== 'literal')
+      .map(part => [part.type, part.value])
+  );
+
+  return {
+    dateKey: `${parts.year}-${parts.month}-${parts.day}`,
+    hour: Number(parts.hour),
+    minute: Number(parts.minute)
+  };
+}
+
+function buildAvailabilityMessage(slot) {
+  return [
+    '@everyone',
+    '',
+    `${MCDONALDS_EMOJI} **${slot.title}**`,
+    '',
+    ...slot.lines,
+    '',
+    `📍 Pour commander : <#${SHOP_CHANNEL_ID}>`
+  ].join('\n');
+}
+
+async function deletePreviousAvailabilityMessage(channel) {
+  if (!availabilityState.lastMessageId) return;
+
+  const previousMessage = await channel.messages.fetch(availabilityState.lastMessageId).catch(() => null);
+  if (!previousMessage) return;
+
+  await previousMessage.delete().catch(error => sendAdminLog('⚠️ Message disponibilité non supprimé', [
+    `Salon : ${logChannel(channel)}`,
+    `Message : **${availabilityState.lastMessageId}**`,
+    `Erreur : **${error.message}**`
+  ], 0xF1C40F));
+}
+
+async function sendAvailabilityMessage(slotKey, dateKey) {
+  const slot = AVAILABILITY_SLOTS[slotKey];
+  if (!slot) return;
+
+  const channel = client.channels.cache.get(AVAILABILITY_CHANNEL_ID)
+    || await client.channels.fetch(AVAILABILITY_CHANNEL_ID).catch(() => null);
+
+  if (!channel || typeof channel.send !== 'function') {
+    await sendAdminLog('⚠️ Message disponibilité impossible', [
+      `Salon introuvable : <#${AVAILABILITY_CHANNEL_ID}>`,
+      `Créneau : **${slotKey}**`
+    ], 0xF1C40F);
+    return;
+  }
+
+  const previousMessageId = availabilityState.lastMessageId;
+  await deletePreviousAvailabilityMessage(channel);
+
+  const sentMessage = await channel.send({
+    content: buildAvailabilityMessage(slot),
+    allowedMentions: { parse: ['everyone'] }
+  })
+    .catch(async error => {
+      await reportCrash('Message disponibilité impossible', error, [
+        `Salon : ${logChannel(channel)}`,
+        `Créneau : **${slotKey}**`
+      ]);
+      return null;
+    });
+
+  if (!sentMessage) return;
+
+  availabilityState.lastMessageId = sentMessage.id;
+  availabilityState.lastSlot = slotKey;
+  availabilityState.sentDates[slotKey] = dateKey;
+  saveAvailabilityState();
+
+  await sendAdminLog('📣 Message disponibilité envoyé', [
+    `Salon : ${logChannel(channel)}`,
+    `Créneau : **${slotKey === 'morning' ? '11h' : '18h'}**`,
+    `Message précédent : ${previousMessageId ? 'supprimé si présent' : 'aucun'}`
+  ], 0x2ECC71);
+}
+
+async function checkAvailabilitySchedule() {
+  const now = getParisDateTimeParts();
+  const slot = Object.values(AVAILABILITY_SLOTS)
+    .find(item => item.hour === now.hour && now.minute === 0);
+
+  if (!slot) return;
+  if (availabilityState.sentDates[slot.key] === now.dateKey) return;
+
+  await sendAvailabilityMessage(slot.key, now.dateKey);
+}
+
+function startAvailabilityScheduler() {
+  if (availabilitySchedulerTimer) clearInterval(availabilitySchedulerTimer);
+
+  checkAvailabilitySchedule().catch(error => reportCrash('Scheduler disponibilité impossible', error));
+  availabilitySchedulerTimer = setInterval(() => {
+    checkAvailabilitySchedule().catch(error => reportCrash('Scheduler disponibilité impossible', error));
+  }, AVAILABILITY_CHECK_INTERVAL);
 }
 
 async function announceBotChangelog() {
@@ -3643,6 +3973,7 @@ client.once('ready', async () => {
     await syncReferralExclusions();
     await syncActiveTicketPermissions();
     scheduleTicketCleanups();
+    startAvailabilityScheduler();
     await announceBotChangelog();
     sendBotLog('🟢 Bot connecté', `Connecté en tant que **${client.user.tag}**`, 0x2ECC71);
   } catch (error) {
@@ -4060,6 +4391,112 @@ client.on('messageCreate', async message => {
     const confirm = await message.channel.send('✅ Tarifs envoyés.');
     setTimeout(() => confirm.delete().catch(() => {}), 2000);
     return;
+  }
+
+  if (message.content === '!prix') {
+    if (!isOwnerMember(message.member)) {
+      const reply = await message.channel.send('❌ Seul le rôle owner peut modifier les prix.');
+      return deleteLater(reply);
+    }
+
+    const embed = new EmbedBuilder()
+      .setColor(0xD4AF37)
+      .setAuthor({ name: 'Tarifs McDonald\'s', iconURL: message.guild.iconURL({ dynamic: true }) })
+      .setTitle(`Modifier les prix ${MCDONALDS_EMOJI}`)
+      .setDescription([
+        'Choisis le produit à modifier.',
+        '',
+        'Un formulaire va s’ouvrir pour entrer le nouveau prix.',
+        '',
+        'Les nouveaux prix sont appliqués immédiatement aux prochaines commandes.'
+      ].join('\n'))
+      .setFooter({ text: 'Owner • Modification des tarifs' });
+
+    await sendAdminLog('💰 Panneau prix ouvert', [
+      `Owner : ${logUser(message.author)}`,
+      `Salon : ${logChannel(message.channel)}`
+    ], 0x3498DB);
+
+    return message.channel.send({ embeds: [embed], components: buildPriceEditorRows() });
+  }
+
+  if (message.content.trim().split(/\s+/)[0] === '!reduc') {
+    if (!isOwnerMember(message.member)) {
+      const reply = await message.channel.send('❌ Seul le rôle owner peut appliquer une réduction.');
+      return deleteLater(reply);
+    }
+
+    const args = message.content.trim().split(/\s+/);
+    const percent = parseDiscountPercent(args[1]);
+
+    if (!Number.isFinite(percent) || percent <= 0 || percent > 100) {
+      const reply = await message.channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0xE74C3C)
+            .setTitle('❌ Réduction invalide')
+            .setDescription([
+              'Utilisation : `!reduc 20` ou `!reduc -20%`',
+              '',
+              'Tu peux mettre n’importe quel nombre entre **0.01** et **100**.'
+            ].join('\n'))
+        ]
+      });
+
+      return deleteLater(reply);
+    }
+
+    setGlobalDiscount(percent, message.author);
+
+    await sendAdminLog('🏷️ Réduction boutique appliquée', [
+      `Owner : ${logUser(message.author)}`,
+      `Réduction : **-${formatDiscountPercent()}%**`,
+      `Salon : ${logChannel(message.channel)}`
+    ], 0x2ECC71);
+
+    return message.channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0x2ECC71)
+          .setTitle('🏷️ Réduction appliquée')
+          .setDescription([
+            `Réduction active : **-${formatDiscountPercent()}%**`,
+            '',
+            'Elle s’applique à toute la boutique, sur les prix actuels.',
+            'Utilise `!resetreduc` pour retirer la réduction.'
+          ].join('\n'))
+      ]
+    });
+  }
+
+  if (message.content.trim() === '!resetreduc') {
+    if (!isOwnerMember(message.member)) {
+      const reply = await message.channel.send('❌ Seul le rôle owner peut retirer une réduction.');
+      return deleteLater(reply);
+    }
+
+    const previousDiscount = getDiscountPercent();
+    const previousDiscountText = previousDiscount ? `-${formatPercentValue(previousDiscount)}%` : 'aucune';
+    resetGlobalDiscount(message.author);
+
+    await sendAdminLog('🏷️ Réduction boutique retirée', [
+      `Owner : ${logUser(message.author)}`,
+      `Ancienne réduction : **${previousDiscountText}**`,
+      `Salon : ${logChannel(message.channel)}`
+    ], 0x2ECC71);
+
+    return message.channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0x2ECC71)
+          .setTitle('✅ Réduction retirée')
+          .setDescription([
+            'La boutique utilise de nouveau les prix de base.',
+            '',
+            'Les prix modifiés avec `!prix` sont conservés.'
+          ].join('\n'))
+      ]
+    });
   }
 
   if (message.content === '!mdp') {
@@ -4730,6 +5167,41 @@ client.on(Events.InteractionCreate, async interaction => {
       return handleRefundActionButton(interaction);
     }
 
+    if (interaction.customId.startsWith('edit_price:')) {
+      if (!isOwnerMember(interaction.member)) {
+        return interaction.reply({
+          content: '❌ Seul le rôle owner peut modifier les prix.',
+          ephemeral: true
+        });
+      }
+
+      const productId = interaction.customId.split(':')[1];
+      const product = getProduct(productId);
+
+      if (!product) {
+        return interaction.reply({
+          content: '❌ Produit introuvable.',
+          ephemeral: true
+        });
+      }
+
+      const modal = new ModalBuilder()
+        .setCustomId(`edit_price_modal:${productId}`)
+        .setTitle(`Prix ${productPointsLabel(product)}`.slice(0, 45));
+
+      const priceInput = new TextInputBuilder()
+        .setCustomId('price')
+        .setLabel('Nouveau prix en euros')
+        .setPlaceholder(`Prix actuel : ${formatProductPrice(productId, { includeDiscount: false })} | Exemple : 4.50`)
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMinLength(1)
+        .setMaxLength(8);
+
+      modal.addComponents(new ActionRowBuilder().addComponents(priceInput));
+      return interaction.showModal(modal);
+    }
+
     if (interaction.customId === 'get_referral_invite') {
       const invite = await getOrCreatePersonalInvite(interaction.guild, interaction.user).catch(async error => {
         console.error('Impossible de créer le lien de parrainage :', error.message);
@@ -5166,7 +5638,7 @@ client.on(Events.InteractionCreate, async interaction => {
           .setPlaceholder('Choisir un produit McDonald’s...')
           .addOptions(products.map(product => ({
             label: product.label.replace('Points', 'pts').slice(0, 100),
-            description: `Prix : ${product.description}`,
+            description: `Prix : ${formatProductPrice(product.value)}`,
             value: product.value,
             emoji: MCDONALDS_BUTTON_EMOJI
           })))
@@ -5174,6 +5646,47 @@ client.on(Events.InteractionCreate, async interaction => {
 
       return replyTemp(interaction, { embeds: [orderEmbed], components: [productMenu], ephemeral: true }, 120_000);
     }
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('edit_price_modal:')) {
+    if (!isOwnerMember(interaction.member)) {
+      return interaction.reply({
+        content: '❌ Seul le rôle owner peut modifier les prix.',
+        ephemeral: true
+      });
+    }
+
+    const productId = interaction.customId.split(':')[1];
+    const product = getProduct(productId);
+    const price = parseProductPriceInput(interaction.fields.getTextInputValue('price'));
+
+    if (!product || !Number.isFinite(price) || price <= 0 || price > 500) {
+      return interaction.reply({
+        content: '❌ Prix invalide. Entre un prix entre 0.01€ et 500€.',
+        ephemeral: true
+      });
+    }
+
+    const oldPrice = getProductBasePrice(productId);
+    setProductPrice(productId, price);
+    const newPrice = getProductBasePrice(productId);
+
+    await sendAdminLog('💰 Prix McDonald’s modifié', [
+      `Owner : ${logUser(interaction.user)}`,
+      `Produit : **${product.label}**`,
+      `Ancien prix : **${formatWalletAmount(oldPrice)}**`,
+      `Nouveau prix : **${formatWalletAmount(newPrice)}**`,
+      isDiscountActive() ? `Prix boutique avec réduction : **${formatProductPrice(productId)}**` : null,
+      `Salon : ${logChannel(interaction.channel)}`
+    ], 0x2ECC71);
+
+    return interaction.reply({
+      content: [
+        `✅ Prix modifié : **${product.label}** passe de **${formatWalletAmount(oldPrice)}** à **${formatWalletAmount(newPrice)}**.`,
+        isDiscountActive() ? `🏷️ Prix boutique avec réduction : **${formatProductPrice(productId)}**.` : null
+      ].filter(Boolean).join('\n'),
+      ephemeral: true
+    });
   }
 
   if (interaction.isModalSubmit() && interaction.customId === 'recharge_amount') {
