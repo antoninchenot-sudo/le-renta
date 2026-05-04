@@ -2845,10 +2845,11 @@ function productListText(options = {}) {
 }
 
 function productButtonLabel(product) {
-  return product.label
+  const pointsLabel = product.label
     .replace(/^McDonald'?s\s*/i, '')
-    .replace(/\s+Points$/i, ' pts')
-    .slice(0, 80);
+    .replace(/\s+Points$/i, ' pts');
+
+  return `${pointsLabel} - ${formatWalletAmount(product.price)}`.slice(0, 80);
 }
 
 function productButtonRows() {
