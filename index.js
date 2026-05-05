@@ -64,6 +64,13 @@ const INFO_IMAGE = process.env.INFO_IMAGE || 'https://i0.wp.com/direct-actu.fr/w
 const PAYPAL_LINK = 'https://www.paypal.me/LaRenta23';
 const REVOLUT_LINK = 'https://revolut.me/arthur23320/pocket/vNrIna0VcG';
 const IBAN = 'FR76 2823 3000 0165 8385 8232 516';
+const DEFAULT_PAYMENT_CONFIG = {
+  paypal: PAYPAL_LINK,
+  revolut: REVOLUT_LINK,
+  iban: IBAN,
+  updatedAt: null,
+  updatedBy: null
+};
 const NO_NOTE_TEXT = '❗❗ Ne mettre aucune note lors du paiement ❗❗';
 const WALLET_FILE = 'wallets.json';
 const WALLET_HISTORY_FILE = 'wallet-history.json';
@@ -85,6 +92,7 @@ const AVAILABILITY_STATE_FILE = 'availability-message-state.json';
 const PRODUCT_PRICES_FILE = 'product-prices.json';
 const DISCOUNT_STATE_FILE = 'discount-state.json';
 const PRODUCT_STOCK_FILE = 'product-stock.json';
+const PAYMENT_CONFIG_FILE = 'payment-config.json';
 const DATA_BACKUP_FILES = [
   WALLET_FILE,
   WALLET_HISTORY_FILE,
@@ -97,13 +105,13 @@ const DATA_BACKUP_FILES = [
   AVAILABILITY_STATE_FILE,
   PRODUCT_PRICES_FILE,
   DISCOUNT_STATE_FILE,
-  PRODUCT_STOCK_FILE
+  PRODUCT_STOCK_FILE,
+  PAYMENT_CONFIG_FILE
 ];
-const BOT_CHANGELOG_VERSION = '2026-05-04-latency-ticket-locks';
+const BOT_CHANGELOG_VERSION = '2026-05-05-payment-config-discord';
 // Garder uniquement les changements de cette version, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Optimisation des sauvegardes globales pour réduire la latence du bot.',
-  'Ajout d’un verrou anti double-clic sur les actions sensibles des tickets.'
+  'Ajout de !paiements pour modifier PayPal, Revolut et IBAN depuis Discord.'
 ];
 const AVAILABILITY_TIMEZONE = 'Europe/Paris';
 const AVAILABILITY_CHECK_INTERVAL = 60_000;
@@ -379,6 +387,7 @@ let availabilityState = loadJsonFile(AVAILABILITY_STATE_FILE, {
 let productPriceOverrides = loadJsonFile(PRODUCT_PRICES_FILE, {});
 let discountState = loadJsonFile(DISCOUNT_STATE_FILE, { percent: 0, updatedAt: null, updatedBy: null });
 let productStockState = loadJsonFile(PRODUCT_STOCK_FILE, { unavailable: {}, updatedAt: null, updatedBy: null });
+let paymentConfig = loadJsonFile(PAYMENT_CONFIG_FILE, { ...DEFAULT_PAYMENT_CONFIG });
 
 if (fs.existsSync(WALLET_FILE)) {
   try {
@@ -411,6 +420,14 @@ if (!productStockState || typeof productStockState !== 'object' || Array.isArray
 if (!productStockState.unavailable || typeof productStockState.unavailable !== 'object' || Array.isArray(productStockState.unavailable)) {
   productStockState.unavailable = {};
 }
+if (!paymentConfig || typeof paymentConfig !== 'object' || Array.isArray(paymentConfig)) {
+  paymentConfig = { ...DEFAULT_PAYMENT_CONFIG };
+}
+for (const key of ['paypal', 'revolut', 'iban']) {
+  if (!String(paymentConfig[key] || '').trim()) paymentConfig[key] = DEFAULT_PAYMENT_CONFIG[key];
+}
+paymentConfig.updatedAt = paymentConfig.updatedAt || null;
+paymentConfig.updatedBy = paymentConfig.updatedBy || null;
 
 const pendingRecharges = new Map();
 const pendingWalletActions = new Map();
@@ -473,6 +490,10 @@ function saveDiscountState() {
 
 function saveProductStock() {
   saveJsonFile(PRODUCT_STOCK_FILE, productStockState);
+}
+
+function savePaymentConfig() {
+  saveJsonFile(PAYMENT_CONFIG_FILE, paymentConfig);
 }
 
 function acquireInteractionActionLock(key) {
@@ -3535,17 +3556,94 @@ function paymentLabel(method) {
   }[method] || method;
 }
 
+function paymentConfigValue(method) {
+  const key = method === 'virement' ? 'iban' : method;
+  return String(paymentConfig[key] || DEFAULT_PAYMENT_CONFIG[key] || '').trim();
+}
+
+function paymentConfigFieldLabel(method) {
+  return {
+    paypal: 'PayPal',
+    revolut: 'Revolut',
+    iban: 'IBAN'
+  }[method] || method;
+}
+
+function paymentConfigInlineValue(value) {
+  return String(value || '').replace(/`/g, "'").slice(0, 1000);
+}
+
+function paymentConfigBlockValue(value) {
+  return String(value || '').replace(/```/g, "'''").slice(0, 1000);
+}
+
+function setPaymentConfigValue(method, value, user) {
+  if (!['paypal', 'revolut', 'iban'].includes(method)) return false;
+
+  paymentConfig[method] = String(value || '').trim();
+  paymentConfig.updatedAt = Date.now();
+  paymentConfig.updatedBy = user?.id || null;
+  savePaymentConfig();
+  scheduleDataBackup('payment_config_updated', user);
+  return true;
+}
+
+function buildPaymentConfigEmbed(guild) {
+  const updated = paymentConfig.updatedAt
+    ? `<t:${Math.floor(paymentConfig.updatedAt / 1000)}:R>`
+    : 'jamais modifié depuis Discord';
+  const updatedBy = paymentConfig.updatedBy ? `<@${paymentConfig.updatedBy}>` : 'Non précisé';
+
+  return new EmbedBuilder()
+    .setColor(0x3498DB)
+    .setAuthor({ name: 'Configuration paiements', iconURL: guild.iconURL({ dynamic: true }) })
+    .setTitle('Moyens de paiement configurés')
+    .setDescription([
+      'Modifie les moyens de paiement utilisés dans les MP de recharge.',
+      '',
+      `Dernière modification : **${updated}**`,
+      `Par : ${updatedBy}`
+    ].join('\n'))
+    .addFields(
+      { name: 'PayPal', value: `\`${paymentConfigInlineValue(paymentConfigValue('paypal'))}\``, inline: false },
+      { name: 'Revolut', value: `\`${paymentConfigInlineValue(paymentConfigValue('revolut'))}\``, inline: false },
+      { name: 'IBAN', value: `\`\`\`text\n${paymentConfigBlockValue(paymentConfigValue('virement'))}\n\`\`\``, inline: false }
+    )
+    .setFooter({ text: 'La Rent’a • Paiements configurables' })
+    .setTimestamp();
+}
+
+function paymentConfigButtons() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('edit_payment_config:paypal')
+      .setLabel('Modifier PayPal')
+      .setEmoji('🅿️')
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId('edit_payment_config:revolut')
+      .setLabel('Modifier Revolut')
+      .setEmoji('💳')
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId('edit_payment_config:iban')
+      .setLabel('Modifier IBAN')
+      .setEmoji('🏦')
+      .setStyle(ButtonStyle.Primary)
+  );
+}
+
 function paymentInstruction(method) {
   if (method === 'paypal') {
-    return `ENVOIE ICI EN AMI PROCHE & SANS NOTES : ${PAYPAL_LINK} | Puis réponds à ce message en joignant ton screenshot PayPal (capture d'écran du paiement).`;
+    return `ENVOIE ICI EN AMI PROCHE & SANS NOTES : ${paymentConfigValue('paypal')} | Puis réponds à ce message en joignant ton screenshot PayPal (capture d'écran du paiement).`;
   }
 
   if (method === 'revolut') {
-    return `ENVOIE ICI SANS NOTES : ${REVOLUT_LINK} | Puis réponds à ce message en joignant ton screenshot Revolut (capture d'écran du paiement).`;
+    return `ENVOIE ICI SANS NOTES : ${paymentConfigValue('revolut')} | Puis réponds à ce message en joignant ton screenshot Revolut (capture d'écran du paiement).`;
   }
 
   if (method === 'virement') {
-    return `EFFECTUE LE VIREMENT SANS NOTES : IBAN ${IBAN} | Puis réponds à ce message en joignant ton screenshot du virement.`;
+    return `EFFECTUE LE VIREMENT SANS NOTES : IBAN ${paymentConfigValue('virement')} | Puis réponds à ce message en joignant ton screenshot du virement.`;
   }
 
   return 'Puis réponds à ce message en joignant ton screenshot du paiement.';
@@ -3563,7 +3661,7 @@ function rechargeInstructionMessage(request) {
       '',
       '🏦 **Copie l’IBAN ci-dessous :**',
       '```text',
-      IBAN,
+      paymentConfigValue('virement'),
       '```',
       '',
       '⚠️ **Ne mets aucune note / aucun libellé dans le virement.**',
@@ -3875,6 +3973,7 @@ function buildHelpEmbed(guild) {
           ['maintenance on/off/status', 'active, désactive ou consulte la maintenance.'],
           ['autodispo on/off/status', 'active, coupe ou consulte les messages automatiques de 11h et 18h.'],
           ['annonce', 'ouvre un formulaire pour envoyer une annonce dans le salon des disponibilités.'],
+          ['paiements', 'modifie PayPal, Revolut et IBAN depuis Discord.'],
           ['backup', 'crée une sauvegarde manuelle des données importantes du bot.'],
           ['history @membre', 'affiche l’historique portefeuille.'],
           ['tickets @membre', 'affiche l’historique tickets.'],
@@ -4949,6 +5048,23 @@ client.on('messageCreate', async message => {
           ].join('\n'))
           .setTimestamp()
       ]
+    });
+  }
+
+  if (message.content === '!paiements') {
+    if (!isOwnerMember(message.member)) {
+      const reply = await message.channel.send('❌ Seul le rôle owner peut modifier les moyens de paiement.');
+      return deleteLater(reply);
+    }
+
+    await sendAdminLog('💳 Configuration paiements ouverte', [
+      `Owner : ${logUser(message.author)}`,
+      `Salon : ${logChannel(message.channel)}`
+    ], 0x3498DB);
+
+    return message.channel.send({
+      embeds: [buildPaymentConfigEmbed(message.guild)],
+      components: [paymentConfigButtons()]
     });
   }
 
@@ -6108,6 +6224,39 @@ client.on(Events.InteractionCreate, async interaction => {
       });
     }
 
+    if (interaction.customId.startsWith('edit_payment_config:')) {
+      if (!isOwnerMember(interaction.member)) {
+        return interaction.reply({
+          content: '❌ Seul le rôle owner peut modifier les moyens de paiement.',
+          ephemeral: true
+        });
+      }
+
+      const method = interaction.customId.split(':')[1];
+      if (!['paypal', 'revolut', 'iban'].includes(method)) {
+        return interaction.reply({
+          content: '❌ Moyen de paiement invalide.',
+          ephemeral: true
+        });
+      }
+
+      const modal = new ModalBuilder()
+        .setCustomId(`payment_config_modal:${method}`)
+        .setTitle(`Modifier ${paymentConfigFieldLabel(method)}`.slice(0, 45));
+
+      const valueInput = new TextInputBuilder()
+        .setCustomId('payment_config_value')
+        .setLabel(paymentConfigFieldLabel(method))
+        .setStyle(method === 'iban' ? TextInputStyle.Paragraph : TextInputStyle.Short)
+        .setRequired(true)
+        .setMinLength(3)
+        .setMaxLength(method === 'iban' ? 500 : 300)
+        .setValue((method === 'iban' ? paymentConfigValue('virement') : paymentConfigValue(method)).slice(0, method === 'iban' ? 500 : 300));
+
+      modal.addComponents(new ActionRowBuilder().addComponents(valueInput));
+      return interaction.showModal(modal);
+    }
+
     if (interaction.customId.startsWith('open_announcement_modal:')) {
       if (!isOwnerMember(interaction.member)) {
         return interaction.reply({
@@ -6799,6 +6948,41 @@ client.on(Events.InteractionCreate, async interaction => {
 
     return interaction.reply({
       content: `✅ Annonce envoyée dans <#${AVAILABILITY_CHANNEL_ID}>.`,
+      ephemeral: true
+    });
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('payment_config_modal:')) {
+    if (!isOwnerMember(interaction.member)) {
+      return interaction.reply({
+        content: '❌ Seul le rôle owner peut modifier les moyens de paiement.',
+        ephemeral: true
+      });
+    }
+
+    const method = interaction.customId.split(':')[1];
+    const value = interaction.fields.getTextInputValue('payment_config_value').trim();
+
+    if (!['paypal', 'revolut', 'iban'].includes(method) || value.length < 3) {
+      return interaction.reply({
+        content: '❌ Valeur invalide.',
+        ephemeral: true
+      });
+    }
+
+    const oldValue = method === 'iban' ? paymentConfigValue('virement') : paymentConfigValue(method);
+    setPaymentConfigValue(method, value, interaction.user);
+
+    await sendAdminLog('💳 Moyen de paiement modifié', [
+      `Owner : ${logUser(interaction.user)}`,
+      `Moyen : **${paymentConfigFieldLabel(method)}**`,
+      `Ancienne valeur : \`${paymentConfigInlineValue(oldValue).slice(0, 900)}\``,
+      `Nouvelle valeur : \`${paymentConfigInlineValue(value).slice(0, 900)}\``
+    ], 0x3498DB);
+
+    return interaction.reply({
+      embeds: [buildPaymentConfigEmbed(interaction.guild)],
+      content: `✅ ${paymentConfigFieldLabel(method)} modifié.`,
       ephemeral: true
     });
   }
