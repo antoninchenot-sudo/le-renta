@@ -114,10 +114,10 @@ const DATA_BACKUP_FILES = [
   PRODUCT_STOCK_FILE,
   PAYMENT_CONFIG_FILE
 ];
-const BOT_CHANGELOG_VERSION = '2026-05-05-tiktok-invite-source';
+const BOT_CHANGELOG_VERSION = '2026-05-05-guide-general-access';
 // Garder uniquement les changements de cette version, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Ajout de la source TikTok pour les membres arrivés via le lien dédié.'
+  'Ajout de l’explication d’accès au Général dans !guide.'
 ];
 const AVAILABILITY_TIMEZONE = 'Europe/Paris';
 const AVAILABILITY_CHECK_INTERVAL = 60_000;
@@ -5312,6 +5312,20 @@ client.on('messageCreate', async message => {
         '4. Choisis ton McDonald’s dans le menu.',
         '',
         '5. Si ton solde est suffisant, un ticket privé est créé pour ta commande.',
+        '',
+        '**Accès au Général 🔒**',
+        '',
+        'Le salon Général est réservé aux membres ayant déjà terminé une commande.',
+        '',
+        'Pour y accéder :',
+        '',
+        '1. Recharge ton solde.',
+        '',
+        '2. Passe une commande.',
+        '',
+        '3. Quand un owner marque la commande comme terminée, le rôle client t’est ajouté automatiquement.',
+        '',
+        'Le rôle membre seul ne suffit pas pour accéder au Général.',
         '',
         '**Besoin d’aide ? 🆘**',
         '',
