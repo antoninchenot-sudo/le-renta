@@ -47,6 +47,9 @@ const AVAILABILITY_CHANNEL_ID = '1310355422993186896';
 const AVIS_CHANNEL_ID = '1497652398259306516';
 const INVITE_ANNOUNCE_CHANNEL_ID = '1310355769824383059';
 const INVITE_ADMIN_CHANNEL_ID = '1499523428112142568';
+const TIKTOK_INVITE_CODE = '3EnBr2xJQS';
+const TIKTOK_SOURCE_EMOJI = '<:tiktok:1501320448477106186>';
+const TIKTOK_SOURCE_LABEL = `Arrivé de TikTok ${TIKTOK_SOURCE_EMOJI}`;
 const RULES_ROLE_ID = '1310359454377840650';
 const CUSTOMER_ROLE_ID = '1499537426463461586';
 const DELETE_DELAY = 10_000;
@@ -111,11 +114,10 @@ const DATA_BACKUP_FILES = [
   PRODUCT_STOCK_FILE,
   PAYMENT_CONFIG_FILE
 ];
-const BOT_CHANGELOG_VERSION = '2026-05-05-persistent-wallet-volume';
+const BOT_CHANGELOG_VERSION = '2026-05-05-tiktok-invite-source';
 // Garder uniquement les changements de cette version, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Déplacement des wallets et fichiers critiques vers le volume persistant Railway.',
-  'Migration automatique des anciens fichiers JSON vers le volume au premier démarrage.'
+  'Ajout de la source TikTok pour les membres arrivés via le lien dédié.'
 ];
 const AVAILABILITY_TIMEZONE = 'Europe/Paris';
 const AVAILABILITY_CHECK_INTERVAL = 60_000;
@@ -2166,7 +2168,17 @@ async function fetchGuildMemberForReferral(guild, userId) {
 }
 
 function isReferralCountable(referral) {
-  return Boolean(referral && !referral.excludedAt);
+  return Boolean(referral && !referral.sourceOnly && !referral.excludedAt);
+}
+
+function isTikTokReferralSource(referral) {
+  return referral?.source === 'tiktok';
+}
+
+function referralArrivalLabel(referral) {
+  if (isTikTokReferralSource(referral)) return TIKTOK_SOURCE_LABEL;
+  if (referral?.inviterId) return `<@${referral.inviterId}>`;
+  return 'non détecté';
 }
 
 function excludeReferral(referral, reason, saveNow = true) {
@@ -2461,6 +2473,25 @@ async function recordMemberInvite(member) {
 
   if (!usedInvite) {
     return null;
+  }
+
+  if (usedInvite.code === TIKTOK_INVITE_CODE) {
+    if (!referrals.invitedBy[member.id]) {
+      referrals.invitedBy[member.id] = {
+        guildId: member.guild.id,
+        inviterId: null,
+        inviteCode: usedInvite.code,
+        source: 'tiktok',
+        sourceLabel: TIKTOK_SOURCE_LABEL,
+        sourceOnly: true,
+        joinedAt: Date.now(),
+        validated: false,
+        rewardedAt: null
+      };
+      saveReferrals();
+    }
+
+    return referrals.invitedBy[member.id];
   }
 
   const personalInviteOwnerId = findPersonalInviteOwner(usedInvite.code);
@@ -4821,7 +4852,13 @@ async function sendInviteJoinAnnouncement(member, referral) {
 
   if (!channel || typeof channel.send !== 'function') return;
 
-  const description = referral
+  const description = isTikTokReferralSource(referral)
+    ? [
+        `👋 Bienvenue ${member} sur le serveur !`,
+        '',
+        `👥 ${TIKTOK_SOURCE_LABEL}`
+      ]
+    : referral
     ? [
         `👋 Bienvenue ${member} sur le serveur !`,
         '',
@@ -4854,7 +4891,14 @@ async function sendInviteAdminAnnouncement(member, referral) {
 
   if (!channel || typeof channel.send !== 'function') return;
 
-  const description = referral
+  const description = isTikTokReferralSource(referral)
+    ? [
+        `👤 Nouveau membre : ${member} (${member.user.tag})`,
+        `👥 ${TIKTOK_SOURCE_LABEL}`,
+        '',
+        'Statut : source TikTok enregistrée, ne compte pas comme parrainage.'
+      ]
+    : referral
     ? [
         `👤 Nouveau membre : ${member} (${member.user.tag})`,
         `👥 Invité par : <@${referral.inviterId}>`,
@@ -4870,7 +4914,7 @@ async function sendInviteAdminAnnouncement(member, referral) {
   await channel.send({
     embeds: [
       new EmbedBuilder()
-        .setColor(referral ? 0x3498DB : 0x95A5A6)
+        .setColor(isTikTokReferralSource(referral) ? 0x111111 : referral ? 0x3498DB : 0x95A5A6)
         .setTitle('Suivi invitation 👥')
         .setDescription(description.join('\n'))
         .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
@@ -5903,7 +5947,13 @@ client.on('messageCreate', async message => {
       .map(referral => `⏳ <@${referral.invitedUserId}>`)
       .join('\n') || 'Aucun filleul en attente.';
 
-    const invitedByText = invitedBy
+    const invitedByText = isTikTokReferralSource(invitedBy)
+      ? [
+          `Arrivée : **${TIKTOK_SOURCE_LABEL}**`,
+          'Statut : **Source TikTok**',
+          `Date : ${formatReferralDate(invitedBy.joinedAt)}`
+        ].join('\n')
+      : invitedBy
       ? [
           `Parrain : <@${invitedBy.inviterId}>`,
           `Statut : **${invitedBy.validated ? 'Validé' : 'En attente de première recharge'}**`,
