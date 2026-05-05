@@ -85,6 +85,8 @@ const TICKET_HISTORY_FILE = dataPath('ticket-history.json');
 const TICKET_HISTORY_LIMIT = 50;
 const WALLET_BACKUP_DIR = dataPath('backups', 'wallets');
 const WALLET_BACKUP_LIMIT = 50;
+const REFERRAL_BACKUP_DIR = dataPath('backups', 'referrals');
+const REFERRAL_BACKUP_LIMIT = 50;
 const DATA_BACKUP_DIR = dataPath('backups', 'data');
 const DATA_BACKUP_LIMIT = 50;
 const DATA_BACKUP_DEBOUNCE_DELAY = 1_500;
@@ -114,10 +116,10 @@ const DATA_BACKUP_FILES = [
   PRODUCT_STOCK_FILE,
   PAYMENT_CONFIG_FILE
 ];
-const BOT_CHANGELOG_VERSION = '2026-05-05-order-code-warning';
+const BOT_CHANGELOG_VERSION = '2026-05-06-referral-persistent-restore';
 // Garder uniquement les changements de cette version, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Ajout d’une confirmation avant récupération du code-barres : valable 24h et garanti 15 minutes.'
+  'Renforcement des sauvegardes parrainage : restauration automatique même si le fichier principal disparaît.'
 ];
 const AVAILABILITY_TIMEZONE = 'Europe/Paris';
 const AVAILABILITY_CHECK_INTERVAL = 60_000;
@@ -238,7 +240,7 @@ function cleanupBackups(backupDir, limit) {
     });
 }
 
-function backupJsonSnapshot(fileName, backupDir) {
+function backupJsonSnapshot(fileName, backupDir, limit = WALLET_BACKUP_LIMIT) {
   if (!fs.existsSync(fileName)) return null;
 
   ensureDirectory(backupDir);
@@ -246,7 +248,7 @@ function backupJsonSnapshot(fileName, backupDir) {
   const parsed = path.parse(fileName);
   const backupPath = path.join(backupDir, `${parsed.name}-${backupTimestamp()}.json`);
   fs.copyFileSync(fileName, backupPath);
-  cleanupBackups(backupDir, WALLET_BACKUP_LIMIT);
+  cleanupBackups(backupDir, limit);
   return backupPath;
 }
 
@@ -385,7 +387,7 @@ function saveJsonFile(fileName, data, options = {}) {
     fs.renameSync(tempFile, fileName);
 
     if (options.backupDir) {
-      backupJsonSnapshot(fileName, options.backupDir);
+      backupJsonSnapshot(fileName, options.backupDir, options.backupLimit || WALLET_BACKUP_LIMIT);
     }
 
     return true;
@@ -408,7 +410,7 @@ let wallets = loadJsonFile(WALLET_FILE, {}, { backupDir: WALLET_BACKUP_DIR });
 let walletHistory = loadJsonFile(WALLET_HISTORY_FILE, { users: {} });
 let ticketHistory = loadJsonFile(TICKET_HISTORY_FILE, { users: {} });
 let requests = loadJsonFile(REQUESTS_FILE, { counter: 0, tickets: {} });
-let referrals = loadJsonFile(REFERRALS_FILE, { invitedBy: {}, stats: {}, inviteLinks: {} });
+let referrals = loadJsonFile(REFERRALS_FILE, { invitedBy: {}, stats: {}, inviteLinks: {} }, { backupDir: REFERRAL_BACKUP_DIR });
 let maintenanceState = loadJsonFile(MAINTENANCE_FILE, { enabled: false, updatedAt: null, updatedBy: null });
 let shopStats = loadJsonFile(SHOP_STATS_FILE, {
   totalRechargedCents: 0,
@@ -436,6 +438,14 @@ if (fs.existsSync(WALLET_FILE)) {
     backupJsonSnapshot(WALLET_FILE, WALLET_BACKUP_DIR);
   } catch (error) {
     console.error('Impossible de créer la sauvegarde initiale du portefeuille.', error);
+  }
+}
+
+if (fs.existsSync(REFERRALS_FILE)) {
+  try {
+    backupJsonSnapshot(REFERRALS_FILE, REFERRAL_BACKUP_DIR, REFERRAL_BACKUP_LIMIT);
+  } catch (error) {
+    console.error('Impossible de créer la sauvegarde initiale du parrainage.', error);
   }
 }
 
@@ -499,7 +509,12 @@ function saveRequests() {
 }
 
 function saveReferrals() {
-  saveJsonFile(REFERRALS_FILE, referrals);
+  const saved = saveJsonFile(REFERRALS_FILE, referrals, {
+    backupDir: REFERRAL_BACKUP_DIR,
+    backupLimit: REFERRAL_BACKUP_LIMIT
+  });
+
+  if (saved) scheduleDataBackup('referrals_updated');
 }
 
 function saveShopStats() {
