@@ -114,10 +114,10 @@ const DATA_BACKUP_FILES = [
   PRODUCT_STOCK_FILE,
   PAYMENT_CONFIG_FILE
 ];
-const BOT_CHANGELOG_VERSION = '2026-05-05-invite-welcome-colors';
+const BOT_CHANGELOG_VERSION = '2026-05-05-order-code-warning';
 // Garder uniquement les changements de cette version, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Couleur du message de bienvenue selon la source d’invitation : TikTok en violet, parrainage en vert.'
+  'Ajout d’une confirmation avant récupération du code-barres : valable 24h et garanti 15 minutes.'
 ];
 const AVAILABILITY_TIMEZONE = 'Europe/Paris';
 const AVAILABILITY_CHECK_INTERVAL = 60_000;
@@ -721,6 +721,85 @@ async function findActiveTicketByUser(userId, type = null) {
   return null;
 }
 
+async function sendEphemeralPrompt(interaction, options) {
+  const payload = { ...options, ephemeral: true, fetchReply: true };
+
+  if (interaction.replied || interaction.deferred) {
+    return interaction.followUp(payload);
+  }
+
+  return interaction.reply(payload);
+}
+
+async function confirmOrderCodeRetrieval(interaction, product, price) {
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('confirm_order_code_retrieval')
+      .setLabel('Oui, récupérer maintenant')
+      .setEmoji('✅')
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId('cancel_order_code_retrieval')
+      .setLabel('Non, annuler')
+      .setEmoji('❌')
+      .setStyle(ButtonStyle.Secondary)
+  );
+
+  const prompt = await sendEphemeralPrompt(interaction, {
+    embeds: [
+      new EmbedBuilder()
+        .setColor(0xF1C40F)
+        .setTitle('⚠️ Récupération du code-barres')
+        .setDescription([
+          `Produit : **${product.label}**`,
+          `Prix : **${formatWalletAmount(price)}**`,
+          '',
+          'Le code-barres est valable **24h**.',
+          'Il est garanti **15 minutes** après récupération.',
+          '',
+          'Es-tu sûr de vouloir le récupérer maintenant ?'
+        ].join('\n'))
+    ],
+    components: [row]
+  });
+
+  try {
+    const confirmation = await prompt.awaitMessageComponent({
+      filter: componentInteraction => (
+        componentInteraction.user.id === interaction.user.id &&
+        ['confirm_order_code_retrieval', 'cancel_order_code_retrieval'].includes(componentInteraction.customId)
+      ),
+      time: 30_000
+    });
+
+    if (confirmation.customId === 'cancel_order_code_retrieval') {
+      await confirmation.update({
+        content: '❌ Commande annulée. Aucun solde n’a été débité.',
+        embeds: [],
+        components: []
+      });
+
+      return { confirmed: false };
+    }
+
+    await confirmation.update({
+      content: '✅ Confirmation reçue, création de la commande en cours...',
+      embeds: [],
+      components: []
+    });
+
+    return { confirmed: true, interaction: confirmation };
+  } catch {
+    await prompt.edit({
+      content: '⏱️ Commande annulée. Aucun solde n’a été débité.',
+      embeds: [],
+      components: []
+    }).catch(() => {});
+
+    return { confirmed: false };
+  }
+}
+
 async function confirmOpeningAnotherTicket(interaction, type) {
   const activeTicket = await findActiveTicketByUser(interaction.user.id, type);
   if (!activeTicket) return { confirmed: true, interaction };
@@ -746,7 +825,7 @@ async function confirmOpeningAnotherTicket(interaction, type) {
       .setStyle(ButtonStyle.Secondary)
   );
 
-  const prompt = await interaction.reply({
+  const prompt = await sendEphemeralPrompt(interaction, {
     content: isRecharge
       ? [
           '⚠️ Vous avez déjà une recharge en cours.',
@@ -759,9 +838,7 @@ async function confirmOpeningAnotherTicket(interaction, type) {
           '',
           'Êtes-vous sûr de vouloir en ouvrir un autre ?'
         ].join('\n'),
-    components: [row],
-    ephemeral: true,
-    fetchReply: true
+    components: [row]
   });
 
   try {
@@ -794,7 +871,7 @@ async function confirmOpeningAnotherTicket(interaction, type) {
 
     return { confirmed: true, interaction: confirmation };
   } catch {
-    await interaction.editReply({
+    await prompt.edit({
       content: '⏱️ Ouverture du nouveau ticket annulée.',
       components: []
     }).catch(() => {});
@@ -3912,7 +3989,10 @@ async function handleProductOrder(interaction, productId) {
     }, 120_000);
   }
 
-  const ticketConfirmation = await confirmOpeningAnotherTicket(interaction, 'commande');
+  const codeConfirmation = await confirmOrderCodeRetrieval(interaction, product, prix);
+  if (!codeConfirmation.confirmed) return;
+
+  const ticketConfirmation = await confirmOpeningAnotherTicket(codeConfirmation.interaction, 'commande');
   if (!ticketConfirmation.confirmed) return;
   const responseInteraction = ticketConfirmation.interaction;
 
