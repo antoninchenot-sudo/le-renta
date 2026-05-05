@@ -64,6 +64,9 @@ const INFO_IMAGE = process.env.INFO_IMAGE || 'https://i0.wp.com/direct-actu.fr/w
 const PAYPAL_LINK = 'https://www.paypal.me/LaRenta23';
 const REVOLUT_LINK = 'https://revolut.me/arthur23320/pocket/vNrIna0VcG';
 const IBAN = 'FR76 2823 3000 0165 8385 8232 516';
+const DATA_ROOT_DIR = path.resolve(process.env.RENTA_DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || '.');
+const USE_EXTERNAL_DATA_DIR = path.resolve(DATA_ROOT_DIR) !== path.resolve('.');
+const dataPath = (...segments) => path.join(DATA_ROOT_DIR, ...segments);
 const DEFAULT_PAYMENT_CONFIG = {
   paypal: PAYPAL_LINK,
   revolut: REVOLUT_LINK,
@@ -72,27 +75,27 @@ const DEFAULT_PAYMENT_CONFIG = {
   updatedBy: null
 };
 const NO_NOTE_TEXT = '❗❗ Ne mettre aucune note lors du paiement ❗❗';
-const WALLET_FILE = 'wallets.json';
-const WALLET_HISTORY_FILE = 'wallet-history.json';
+const WALLET_FILE = dataPath('wallets.json');
+const WALLET_HISTORY_FILE = dataPath('wallet-history.json');
 const WALLET_HISTORY_LIMIT = 50;
-const TICKET_HISTORY_FILE = 'ticket-history.json';
+const TICKET_HISTORY_FILE = dataPath('ticket-history.json');
 const TICKET_HISTORY_LIMIT = 50;
-const WALLET_BACKUP_DIR = path.join('backups', 'wallets');
+const WALLET_BACKUP_DIR = dataPath('backups', 'wallets');
 const WALLET_BACKUP_LIMIT = 50;
-const DATA_BACKUP_DIR = path.join('backups', 'data');
+const DATA_BACKUP_DIR = dataPath('backups', 'data');
 const DATA_BACKUP_LIMIT = 50;
 const DATA_BACKUP_DEBOUNCE_DELAY = 1_500;
-const REQUESTS_FILE = 'requests.json';
-const REFERRALS_FILE = 'referrals.json';
-const MAINTENANCE_FILE = 'maintenance-state.json';
-const SHOP_STATS_FILE = 'shop-stats.json';
-const WARNINGS_FILE = 'warnings.json';
-const BOT_CHANGELOG_FILE = 'bot-changelog-state.json';
-const AVAILABILITY_STATE_FILE = 'availability-message-state.json';
-const PRODUCT_PRICES_FILE = 'product-prices.json';
-const DISCOUNT_STATE_FILE = 'discount-state.json';
-const PRODUCT_STOCK_FILE = 'product-stock.json';
-const PAYMENT_CONFIG_FILE = 'payment-config.json';
+const REQUESTS_FILE = dataPath('requests.json');
+const REFERRALS_FILE = dataPath('referrals.json');
+const MAINTENANCE_FILE = dataPath('maintenance-state.json');
+const SHOP_STATS_FILE = dataPath('shop-stats.json');
+const WARNINGS_FILE = dataPath('warnings.json');
+const BOT_CHANGELOG_FILE = dataPath('bot-changelog-state.json');
+const AVAILABILITY_STATE_FILE = dataPath('availability-message-state.json');
+const PRODUCT_PRICES_FILE = dataPath('product-prices.json');
+const DISCOUNT_STATE_FILE = dataPath('discount-state.json');
+const PRODUCT_STOCK_FILE = dataPath('product-stock.json');
+const PAYMENT_CONFIG_FILE = dataPath('payment-config.json');
 const DATA_BACKUP_FILES = [
   WALLET_FILE,
   WALLET_HISTORY_FILE,
@@ -108,10 +111,11 @@ const DATA_BACKUP_FILES = [
   PRODUCT_STOCK_FILE,
   PAYMENT_CONFIG_FILE
 ];
-const BOT_CHANGELOG_VERSION = '2026-05-05-payment-config-discord';
+const BOT_CHANGELOG_VERSION = '2026-05-05-persistent-wallet-volume';
 // Garder uniquement les changements de cette version, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Ajout de !paiements pour modifier PayPal, Revolut et IBAN depuis Discord.'
+  'Déplacement des wallets et fichiers critiques vers le volume persistant Railway.',
+  'Migration automatique des anciens fichiers JSON vers le volume au premier démarrage.'
 ];
 const AVAILABILITY_TIMEZONE = 'Europe/Paris';
 const AVAILABILITY_CHECK_INTERVAL = 60_000;
@@ -163,6 +167,37 @@ function ensureDirectory(dirPath) {
   if (!fs.existsSync(dirPath)) {
     fs.mkdirSync(dirPath, { recursive: true });
   }
+}
+
+ensureDirectory(DATA_ROOT_DIR);
+
+function legacyDataPath(filePath) {
+  return path.join(process.cwd(), path.basename(filePath));
+}
+
+function migratePersistentDataFile(filePath) {
+  const legacyPath = legacyDataPath(filePath);
+  if (path.resolve(legacyPath) === path.resolve(filePath)) return null;
+  if (fs.existsSync(filePath) || !fs.existsSync(legacyPath)) return null;
+
+  ensureDirectory(path.dirname(filePath));
+  fs.copyFileSync(legacyPath, filePath);
+  return {
+    from: legacyPath,
+    to: filePath
+  };
+}
+
+function migratePersistentDataFiles() {
+  if (!USE_EXTERNAL_DATA_DIR) return [];
+
+  const migrations = [];
+  for (const filePath of DATA_BACKUP_FILES) {
+    const migration = migratePersistentDataFile(filePath);
+    if (migration) migrations.push(migration);
+  }
+
+  return migrations;
 }
 
 function backupTimestamp() {
@@ -240,18 +275,20 @@ function createDataBackup(reason = 'manuel', actorUser = null) {
 
     const files = {};
     for (const fileName of DATA_BACKUP_FILES) {
+      const fileKey = path.basename(fileName);
+
       if (!fs.existsSync(fileName)) {
-        files[fileName] = { exists: false };
+        files[fileKey] = { exists: false };
         continue;
       }
 
       try {
-        files[fileName] = {
+        files[fileKey] = {
           exists: true,
           data: JSON.parse(fs.readFileSync(fileName, 'utf8'))
         };
       } catch (error) {
-        files[fileName] = {
+        files[fileKey] = {
           exists: true,
           error: error.message
         };
@@ -334,10 +371,13 @@ function loadJsonFile(fileName, fallback, options = {}) {
   }
 }
 
+const persistentDataMigrations = migratePersistentDataFiles();
+
 function saveJsonFile(fileName, data, options = {}) {
   let tempFile = null;
 
   try {
+    ensureDirectory(path.dirname(fileName));
     tempFile = `${fileName}.tmp-${Date.now()}`;
     fs.writeFileSync(tempFile, JSON.stringify(data, null, 2));
     fs.renameSync(tempFile, fileName);
@@ -4122,6 +4162,23 @@ function sendAdminCommandLog(title, lines, color = 0x95A5A6) {
   return sendAdminLog(title, lines, color);
 }
 
+function announcePersistentStorageStatus() {
+  const lines = [
+    process.env.RAILWAY_VOLUME_MOUNT_PATH
+      ? `Volume Railway détecté : \`${process.env.RAILWAY_VOLUME_MOUNT_PATH}\``
+      : 'Volume Railway : non détecté par variable env.',
+    `Dossier utilisé : \`${DATA_ROOT_DIR}\``,
+    USE_EXTERNAL_DATA_DIR
+      ? 'Les wallets et fichiers critiques sont écrits hors du dossier du code.'
+      : 'Mode local : les fichiers restent dans le dossier du bot.',
+    persistentDataMigrations.length
+      ? `Migration au démarrage : **${persistentDataMigrations.length}** fichier(s) copié(s) vers le volume.`
+      : 'Migration au démarrage : aucun fichier à copier.'
+  ];
+
+  return sendBotLog('💾 Stockage données', lines, USE_EXTERNAL_DATA_DIR ? 0x2ECC71 : 0xF1C40F);
+}
+
 const availabilityFormatter = new Intl.DateTimeFormat('fr-FR', {
   timeZone: AVAILABILITY_TIMEZONE,
   year: 'numeric',
@@ -4832,6 +4889,7 @@ client.once('ready', async () => {
     scheduleTicketCleanups();
     startAvailabilityScheduler();
     await announceBotChangelog();
+    await announcePersistentStorageStatus();
     sendBotLog('🟢 Bot connecté', `Connecté en tant que **${client.user.tag}**`, 0x2ECC71);
   } catch (error) {
     await reportCrash('Erreur au démarrage ready', error);
