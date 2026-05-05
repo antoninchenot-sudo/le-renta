@@ -114,10 +114,10 @@ const DATA_BACKUP_FILES = [
   PRODUCT_STOCK_FILE,
   PAYMENT_CONFIG_FILE
 ];
-const BOT_CHANGELOG_VERSION = '2026-05-05-guide-general-access';
+const BOT_CHANGELOG_VERSION = '2026-05-05-invite-welcome-colors';
 // Garder uniquement les changements de cette version, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Ajout de l’explication d’accès au Général dans !guide.'
+  'Couleur du message de bienvenue selon la source d’invitation : TikTok en violet, parrainage en vert.'
 ];
 const AVAILABILITY_TIMEZONE = 'Europe/Paris';
 const AVAILABILITY_CHECK_INTERVAL = 60_000;
@@ -596,6 +596,17 @@ function isAdminMember(member) {
 
 function isOwnerMember(member) {
   return Boolean(member?.roles?.cache?.has(ADMIN_ROLE_ID));
+}
+
+function canUseBanCommand(member) {
+  const roles = member?.roles?.cache;
+
+  return Boolean(
+    roles?.has(ADMIN_ROLE_ID) ||
+    roles?.has(STAFF_ROLE_ID) ||
+    roles?.has(TICKET_ACCESS_ROLE_ID) ||
+    member?.permissions?.has?.(PermissionFlagsBits.Administrator)
+  );
 }
 
 function createRequest(type, channelId, userId, data = {}) {
@@ -4025,6 +4036,7 @@ function buildHelpEmbed(guild) {
           ['clear', 'nettoie le salon où la commande est utilisée.'],
           ['warnings @membre', 'affiche les warns d’un membre.'],
           ['warn @membre raison', 'ajoute un warn manuel.'],
+          ['ban @membre', 'ouvre un formulaire staff pour bannir avec raison et heure enregistrées.'],
           ['unwarn @membre [nombre]', 'retire les derniers warns.'],
           ['clearwarns @membre', 'supprime tous les warns du membre.'],
           ['wallet @membre', 'affiche le solde d’un membre.'],
@@ -4527,6 +4539,84 @@ async function sendModerationDm(user, title, lines) {
   }).then(() => true).catch(() => false);
 }
 
+function buildBanBlockedEmbed(title, description) {
+  return new EmbedBuilder()
+    .setColor(0xE74C3C)
+    .setTitle(title)
+    .setDescription(description);
+}
+
+function buildBanPanelEmbed(user, moderator) {
+  return new EmbedBuilder()
+    .setColor(0xE74C3C)
+    .setTitle('🚫 Bannissement')
+    .setDescription([
+      `Membre ciblé : ${user}`,
+      `Staff : ${moderator}`,
+      '',
+      'Clique sur le bouton ci-dessous pour ouvrir le formulaire.',
+      'La raison est obligatoire et l’heure sera enregistrée automatiquement.'
+    ].join('\n'))
+    .setThumbnail(user.displayAvatarURL({ dynamic: true }))
+    .setFooter({ text: 'Staff • Ce panneau expire dans 5 minutes' })
+    .setTimestamp();
+}
+
+function buildBanPanelRow(userId, moderatorId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`open_ban_modal:${userId}:${moderatorId}`)
+      .setLabel('Ouvrir le formulaire')
+      .setEmoji('🚫')
+      .setStyle(ButtonStyle.Danger)
+  );
+}
+
+function banTimestampLines(timestamp) {
+  const discordTimestamp = Math.floor(timestamp / 1000);
+  return {
+    date: `<t:${discordTimestamp}:f>`,
+    hour: `<t:${discordTimestamp}:T>`
+  };
+}
+
+async function validateBanTarget(guild, targetUserId, moderatorUserId) {
+  const user = await client.users.fetch(targetUserId).catch(() => null);
+  const member = targetUserId ? await guild.members.fetch(targetUserId).catch(() => null) : null;
+
+  if (!user || !member) {
+    return {
+      error: 'Impossible de trouver ce membre sur le serveur.'
+    };
+  }
+
+  if (user.id === moderatorUserId) {
+    return {
+      user,
+      member,
+      error: 'Tu ne peux pas te bannir toi-même.'
+    };
+  }
+
+  if (user.bot || canBypassAutoModeration(member)) {
+    return {
+      user,
+      member,
+      error: 'Tu ne peux pas bannir un bot, un owner ou un membre du staff.'
+    };
+  }
+
+  if (!member.bannable) {
+    return {
+      user,
+      member,
+      error: 'Le bot ne peut pas bannir ce membre. Vérifie la hiérarchie des rôles et la permission Bannir des membres.'
+    };
+  }
+
+  return { user, member, error: null };
+}
+
 async function applyWarningSanction(message, violation) {
   const member = message.member;
   const userWarnings = ensureWarningUser(message.author.id);
@@ -4832,18 +4922,10 @@ async function handleInteractionError(interaction, error) {
   await interaction.reply(payload).catch(() => {});
 }
 
-function randomInviteColor() {
-  const colors = [
-    0xD4AF37,
-    0x2ECC71,
-    0x3498DB,
-    0x9B59B6,
-    0xE67E22,
-    0xE91E63,
-    0x1ABC9C
-  ];
-
-  return colors[Math.floor(Math.random() * colors.length)];
+function inviteWelcomeColor(referral) {
+  if (isTikTokReferralSource(referral)) return 0x9B59B6;
+  if (referral?.inviterId) return 0x2ECC71;
+  return 0x95A5A6;
 }
 
 async function sendInviteJoinAnnouncement(member, referral) {
@@ -4875,7 +4957,7 @@ async function sendInviteJoinAnnouncement(member, referral) {
   await channel.send({
     embeds: [
       new EmbedBuilder()
-        .setColor(randomInviteColor())
+        .setColor(inviteWelcomeColor(referral))
         .setTitle('Nouvelle arrivée 🎉')
         .setDescription(description.join('\n'))
         .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
@@ -5095,8 +5177,10 @@ client.on('messageCreate', async message => {
 
   if (message.content.startsWith('!')) {
     await deleteCommandMessage(message);
+    const commandName = message.content.trim().split(/\s+/)[0].toLowerCase();
+    const canUseCommand = isAdminMember(message.member) || (commandName === '!ban' && canUseBanCommand(message.member));
 
-    if (!isAdminMember(message.member)) {
+    if (!canUseCommand) {
       await sendActionLog(message.member, '⛔ Commande refusée', [
         `Utilisateur : ${logUser(message.author)}`,
         `Salon : ${logChannel(message.channel)}`,
@@ -5669,6 +5753,60 @@ client.on('messageCreate', async message => {
 
   if (message.content === '!avis') {
     return message.channel.send({ embeds: [buildAvisEmbed()] });
+  }
+
+  if (message.content.trim().split(/\s+/)[0].toLowerCase() === '!ban') {
+    if (!canUseBanCommand(message.member)) {
+      const reply = await message.channel.send({
+        embeds: [
+          buildBanBlockedEmbed(
+            '❌ Permission refusée',
+            'Seul le staff ou les owners peuvent utiliser cette commande.'
+          )
+        ]
+      });
+
+      return deleteLater(reply);
+    }
+
+    const user = message.mentions.users.first();
+
+    if (!user) {
+      const reply = await message.channel.send({
+        embeds: [
+          buildBanBlockedEmbed(
+            '❌ Commande invalide',
+            'Utilisation : `!ban @membre`\nLe bouton ouvrira ensuite le formulaire de bannissement.'
+          )
+        ]
+      });
+
+      return deleteLater(reply);
+    }
+
+    const { member, error } = await validateBanTarget(message.guild, user.id, message.author.id);
+
+    if (error) {
+      const reply = await message.channel.send({
+        embeds: [buildBanBlockedEmbed('❌ Ban impossible', error)]
+      });
+
+      return deleteLater(reply);
+    }
+
+    await sendAdminLog('🚫 Formulaire ban ouvert', [
+      `Staff : ${logUser(message.author)}`,
+      `Membre ciblé : ${logUser(user)}`,
+      `Salon : ${logChannel(message.channel)}`,
+      `Bannissable : **${member.bannable ? 'oui' : 'non'}**`
+    ], 0xE74C3C);
+
+    const panel = await message.channel.send({
+      embeds: [buildBanPanelEmbed(user, message.author)],
+      components: [buildBanPanelRow(user.id, message.author.id)]
+    });
+    deleteLater(panel, 5 * 60_000);
+    return;
   }
 
   if (message.content.startsWith('!warnings')) {
@@ -6344,6 +6482,61 @@ client.on(Events.InteractionCreate, async interaction => {
         embeds: [buildGuideFaqEmbed(interaction.guild)],
         ephemeral: true
       });
+    }
+
+    if (interaction.customId.startsWith('open_ban_modal:')) {
+      if (!canUseBanCommand(interaction.member)) {
+        return interaction.reply({
+          content: '❌ Seul le staff ou les owners peuvent utiliser cette action.',
+          ephemeral: true
+        });
+      }
+
+      const [, targetUserId, launcherId] = interaction.customId.split(':');
+
+      if (interaction.user.id !== launcherId && !isOwnerMember(interaction.member)) {
+        return interaction.reply({
+          content: '❌ Seul le staff qui a lancé la commande ou un owner peut ouvrir ce formulaire.',
+          ephemeral: true
+        });
+      }
+
+      const { user, error } = await validateBanTarget(interaction.guild, targetUserId, interaction.user.id);
+
+      if (error) {
+        return interaction.reply({
+          content: `❌ ${error}`,
+          ephemeral: true
+        });
+      }
+
+      const modal = new ModalBuilder()
+        .setCustomId(`ban_member_modal:${targetUserId}:${launcherId}`)
+        .setTitle('Bannir un membre');
+
+      const reasonInput = new TextInputBuilder()
+        .setCustomId('ban_reason')
+        .setLabel('Raison du bannissement')
+        .setPlaceholder('Exemple : pub, arnaque, spam, manque de respect...')
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(true)
+        .setMinLength(2)
+        .setMaxLength(1000);
+
+      const detailsInput = new TextInputBuilder()
+        .setCustomId('ban_details')
+        .setLabel('Heure / contexte (optionnel)')
+        .setPlaceholder('Exemple : message à 18h12 dans général')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setMaxLength(200);
+
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(reasonInput),
+        new ActionRowBuilder().addComponents(detailsInput)
+      );
+
+      return interaction.showModal(modal);
     }
 
     if (interaction.customId.startsWith('edit_payment_config:')) {
@@ -7071,6 +7264,120 @@ client.on(Events.InteractionCreate, async interaction => {
     return interaction.reply({
       content: `✅ Annonce envoyée dans <#${AVAILABILITY_CHANNEL_ID}>.`,
       ephemeral: true
+    });
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('ban_member_modal:')) {
+    if (!canUseBanCommand(interaction.member)) {
+      return interaction.reply({
+        content: '❌ Seul le staff ou les owners peuvent bannir un membre.',
+        ephemeral: true
+      });
+    }
+
+    const [, targetUserId, launcherId] = interaction.customId.split(':');
+
+    if (interaction.user.id !== launcherId && !isOwnerMember(interaction.member)) {
+      return interaction.reply({
+        content: '❌ Seul le staff qui a lancé la commande ou un owner peut valider ce ban.',
+        ephemeral: true
+      });
+    }
+
+    const reason = interaction.fields.getTextInputValue('ban_reason').trim().slice(0, 1000);
+    const details = interaction.fields.getTextInputValue('ban_details').trim().slice(0, 200);
+
+    if (reason.length < 2) {
+      return interaction.reply({
+        content: '❌ Raison invalide. Indique une vraie raison de ban.',
+        ephemeral: true
+      });
+    }
+
+    const { user, member, error } = await validateBanTarget(interaction.guild, targetUserId, interaction.user.id);
+
+    if (error) {
+      return interaction.reply({
+        content: `❌ ${error}`,
+        ephemeral: true
+      });
+    }
+
+    const bannedAt = Date.now();
+    const { date, hour } = banTimestampLines(bannedAt);
+    const dmSent = await sendModerationDm(user, '🚫 Bannissement', [
+      `Serveur : **${interaction.guild.name}**`,
+      `Raison : **${reason}**`,
+      details ? `Détails : **${details}**` : null,
+      `Modérateur : **${interaction.user.tag}**`,
+      `Date : ${date}`,
+      `Heure : ${hour}`,
+      '',
+      'Tu as été banni du serveur.'
+    ]);
+    const auditReason = [
+      `Ban manuel par ${interaction.user.tag}`,
+      `Raison: ${reason}`,
+      details ? `Details: ${details}` : null
+    ].filter(Boolean).join(' | ').slice(0, 512);
+
+    let banError = null;
+    await member.ban({ reason: auditReason })
+      .catch(error => {
+        banError = error;
+      });
+
+    if (banError) {
+      await sendAdminLog('❌ Ban impossible', [
+        `Staff : ${logUser(interaction.user)}`,
+        `Membre : ${logUser(user)}`,
+        `Raison : **${reason}**`,
+        details ? `Détails : **${details}**` : null,
+        `Date : ${date}`,
+        `Heure : ${hour}`,
+        `Erreur : **${banError.message}**`,
+        dmSent ? 'MP : envoyé avant erreur' : 'MP : impossible à envoyer'
+      ], 0xE74C3C);
+
+      return interaction.reply({
+        embeds: [
+          buildBanBlockedEmbed(
+            '❌ Ban impossible',
+            `Impossible de bannir ${user} : ${banError.message}`
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    await sendAdminLog('🚫 Membre banni', [
+      `Staff : ${logUser(interaction.user)}`,
+      `Membre : ${logUser(user)}`,
+      `Raison : **${reason}**`,
+      details ? `Détails : **${details}**` : null,
+      `Date : ${date}`,
+      `Heure : ${hour}`,
+      `Salon : ${logChannel(interaction.channel)}`,
+      dmSent ? 'MP : envoyé' : 'MP : impossible à envoyer'
+    ], 0xE74C3C);
+
+    return interaction.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0xE74C3C)
+          .setTitle('🚫 Membre banni')
+          .setDescription([
+            `Membre : ${user}`,
+            `Par : ${interaction.user}`,
+            `Raison : **${reason}**`,
+            details ? `Détails : **${details}**` : null,
+            `Date : ${date}`,
+            `Heure : ${hour}`,
+            dmSent ? 'MP : envoyé' : 'MP : impossible à envoyer'
+          ].filter(Boolean).join('\n'))
+          .setThumbnail(user.displayAvatarURL({ dynamic: true }))
+          .setTimestamp()
+      ]
     });
   }
 
