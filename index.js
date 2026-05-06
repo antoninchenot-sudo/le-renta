@@ -87,6 +87,8 @@ const WALLET_BACKUP_DIR = dataPath('backups', 'wallets');
 const WALLET_BACKUP_LIMIT = 50;
 const REFERRAL_BACKUP_DIR = dataPath('backups', 'referrals');
 const REFERRAL_BACKUP_LIMIT = 50;
+const PRODUCT_CATALOG_BACKUP_DIR = dataPath('backups', 'product-catalog');
+const PRODUCT_CATALOG_BACKUP_LIMIT = 50;
 const DATA_BACKUP_DIR = dataPath('backups', 'data');
 const DATA_BACKUP_LIMIT = 50;
 const DATA_BACKUP_DEBOUNCE_DELAY = 1_500;
@@ -98,6 +100,7 @@ const WARNINGS_FILE = dataPath('warnings.json');
 const BOT_CHANGELOG_FILE = dataPath('bot-changelog-state.json');
 const AVAILABILITY_STATE_FILE = dataPath('availability-message-state.json');
 const PRODUCT_PRICES_FILE = dataPath('product-prices.json');
+const PRODUCT_CATALOG_FILE = dataPath('product-catalog.json');
 const DISCOUNT_STATE_FILE = dataPath('discount-state.json');
 const PRODUCT_STOCK_FILE = dataPath('product-stock.json');
 const PAYMENT_CONFIG_FILE = dataPath('payment-config.json');
@@ -112,14 +115,16 @@ const DATA_BACKUP_FILES = [
   WARNINGS_FILE,
   AVAILABILITY_STATE_FILE,
   PRODUCT_PRICES_FILE,
+  PRODUCT_CATALOG_FILE,
   DISCOUNT_STATE_FILE,
   PRODUCT_STOCK_FILE,
   PAYMENT_CONFIG_FILE
 ];
-const BOT_CHANGELOG_VERSION = '2026-05-06-referral-persistent-restore';
+const BOT_CHANGELOG_VERSION = '2026-05-06-product-catalog-editor';
 // Garder uniquement les changements de cette version, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Renforcement des sauvegardes parrainage : restauration automatique même si le fichier principal disparaît.'
+  'Ajout d’un catalogue produits modifiable depuis Discord, relié à la boutique et au !tarifs.',
+  'Restauration automatique des fichiers critiques depuis leurs sauvegardes si un fichier principal disparaît.'
 ];
 const AVAILABILITY_TIMEZONE = 'Europe/Paris';
 const AVAILABILITY_CHECK_INTERVAL = 60_000;
@@ -348,7 +353,25 @@ function scheduleDataBackup(reason, actorUser = null) {
 }
 
 function loadJsonFile(fileName, fallback, options = {}) {
-  if (!fs.existsSync(fileName)) return fallback;
+  if (!fs.existsSync(fileName)) {
+    if (options.backupDir) {
+      const backupData = loadLatestJsonBackup(options.backupDir);
+
+      if (backupData) {
+        try {
+          ensureDirectory(path.dirname(fileName));
+          fs.writeFileSync(fileName, JSON.stringify(backupData, null, 2));
+          console.log(`Restauration de ${fileName} depuis la dernière sauvegarde valide.`);
+        } catch (restoreError) {
+          console.error(`Impossible de restaurer ${fileName} depuis une sauvegarde.`, restoreError);
+        }
+
+        return backupData;
+      }
+    }
+
+    return fallback;
+  }
 
   try {
     return JSON.parse(fs.readFileSync(fileName, 'utf8'));
@@ -429,6 +452,7 @@ let availabilityState = loadJsonFile(AVAILABILITY_STATE_FILE, {
   sentDates: {}
 });
 let productPriceOverrides = loadJsonFile(PRODUCT_PRICES_FILE, {});
+let productCatalogState = loadJsonFile(PRODUCT_CATALOG_FILE, null, { backupDir: PRODUCT_CATALOG_BACKUP_DIR });
 let discountState = loadJsonFile(DISCOUNT_STATE_FILE, { percent: 0, updatedAt: null, updatedBy: null });
 let productStockState = loadJsonFile(PRODUCT_STOCK_FILE, { unavailable: {}, updatedAt: null, updatedBy: null });
 let paymentConfig = loadJsonFile(PAYMENT_CONFIG_FILE, { ...DEFAULT_PAYMENT_CONFIG });
@@ -446,6 +470,14 @@ if (fs.existsSync(REFERRALS_FILE)) {
     backupJsonSnapshot(REFERRALS_FILE, REFERRAL_BACKUP_DIR, REFERRAL_BACKUP_LIMIT);
   } catch (error) {
     console.error('Impossible de créer la sauvegarde initiale du parrainage.', error);
+  }
+}
+
+if (fs.existsSync(PRODUCT_CATALOG_FILE)) {
+  try {
+    backupJsonSnapshot(PRODUCT_CATALOG_FILE, PRODUCT_CATALOG_BACKUP_DIR, PRODUCT_CATALOG_BACKUP_LIMIT);
+  } catch (error) {
+    console.error('Impossible de créer la sauvegarde initiale du catalogue produits.', error);
   }
 }
 
@@ -539,6 +571,16 @@ function saveAvailabilityState() {
 
 function saveProductPrices() {
   saveJsonFile(PRODUCT_PRICES_FILE, productPriceOverrides);
+}
+
+function saveProductCatalog() {
+  const saved = saveJsonFile(PRODUCT_CATALOG_FILE, productCatalogState, {
+    backupDir: PRODUCT_CATALOG_BACKUP_DIR,
+    backupLimit: PRODUCT_CATALOG_BACKUP_LIMIT
+  });
+
+  if (saved) scheduleDataBackup('product_catalog_updated');
+  return saved;
 }
 
 function saveDiscountState() {
@@ -2780,28 +2822,120 @@ async function validateReferralReward(user, ticketRequest, amountText, guild = n
   };
 }
 
-const products = [
-  { label: 'McDonald\'s 50-74 Points', description: '2€', value: '50_74', price: 2 },
-  { label: 'McDonald\'s 75-99 Points', description: '4€', value: '75_99', price: 4 },
-  { label: 'McDonald\'s 100-124 Points', description: '6€', value: '100_124', price: 6 },
-  { label: 'McDonald\'s 125-149 Points', description: '7€', value: '125_149', price: 7 },
-  { label: 'McDonald\'s 150-174 Points', description: '8€', value: '150_174', price: 8 },
-  { label: 'McDonald\'s 175-199 Points', description: '10€', value: '175_199', price: 10 },
-  { label: 'McDonald\'s 200-224 Points', description: '11€', value: '200_224', price: 11 },
-  { label: 'McDonald\'s 225-249 Points', description: '12€', value: '225_249', price: 12 },
-  { label: 'McDonald\'s 250-274 Points', description: '13€', value: '250_274', price: 13 },
-  { label: 'McDonald\'s 275-299 Points', description: '14€', value: '275_299', price: 14 },
-  { label: 'McDonald\'s 300-324 Points', description: '15€', value: '300_324', price: 15 },
-  { label: 'McDonald\'s 325-349 Points', description: '16€', value: '325_349', price: 16 },
-  { label: 'McDonald\'s 350-374 Points', description: '17€', value: '350_374', price: 17 },
-  { label: 'McDonald\'s 400-499 Points', description: '18€', value: '400_499', price: 18 },
-  { label: 'McDonald\'s 500-599 Points', description: '21€', value: '500_599', price: 21 },
-  { label: 'McDonald\'s 600-699 Points', description: '30€', value: '600_699', price: 30 },
-  { label: 'McDonald\'s 700-799 Points', description: '34€', value: '700_799', price: 34 },
-  { label: 'McDonald\'s 800-899 Points', description: '40€', value: '800_899', price: 40 },
-  { label: 'McDonald\'s 1000-1099 Points', description: '51€', value: '1000_1099', price: 51 },
-  { label: 'McDonald\'s 1100-1199 Points', description: '67€', value: '1100_1199', price: 67 }
+const DEFAULT_PRODUCTS = [
+  { rangeLabel: '50-74', value: '50_74', price: 2 },
+  { rangeLabel: '75-99', value: '75_99', price: 4 },
+  { rangeLabel: '100-124', value: '100_124', price: 6 },
+  { rangeLabel: '125-149', value: '125_149', price: 7 },
+  { rangeLabel: '150-174', value: '150_174', price: 8 },
+  { rangeLabel: '175-199', value: '175_199', price: 10 },
+  { rangeLabel: '200-224', value: '200_224', price: 11 },
+  { rangeLabel: '225-249', value: '225_249', price: 12 },
+  { rangeLabel: '250-274', value: '250_274', price: 13 },
+  { rangeLabel: '275-299', value: '275_299', price: 14 },
+  { rangeLabel: '300-324', value: '300_324', price: 15 },
+  { rangeLabel: '325-349', value: '325_349', price: 16 },
+  { rangeLabel: '350-374', value: '350_374', price: 17 },
+  { rangeLabel: '400-499', value: '400_499', price: 18 },
+  { rangeLabel: '500-599', value: '500_599', price: 21 },
+  { rangeLabel: '600-699', value: '600_699', price: 30 },
+  { rangeLabel: '700-799', value: '700_799', price: 34 },
+  { rangeLabel: '800-899', value: '800_899', price: 40 },
+  { rangeLabel: '1000-1099', value: '1000_1099', price: 51 },
+  { rangeLabel: '1100-1199', value: '1100_1199', price: 67 }
 ];
+
+function productLabelFromRange(rangeLabel) {
+  return `McDonald's ${rangeLabel} Points`;
+}
+
+function parseProductRangeInput(value) {
+  const match = String(value || '').trim().match(/^(\d{1,5})\s*(?:[-–—_]|à|a|to)\s*(\d{1,5})(?:\s*(?:pts|points))?$/i);
+  if (!match) return null;
+
+  const start = Number.parseInt(match[1], 10);
+  const end = Number.parseInt(match[2], 10);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start <= 0 || end <= 0 || start > end) return null;
+
+  return {
+    start,
+    end,
+    rangeLabel: `${start}-${end}`,
+    value: `${start}_${end}`
+  };
+}
+
+function productRangeFromLabel(label) {
+  const match = String(label || '').match(/(\d{1,5})\s*[-–—]\s*(\d{1,5})/);
+  if (!match) return null;
+  return `${Number.parseInt(match[1], 10)}-${Number.parseInt(match[2], 10)}`;
+}
+
+function normalizeProduct(product, index = 0, useLegacyPriceOverride = false) {
+  const rangeLabel = product.rangeLabel || productRangeFromLabel(product.label);
+  const parsedRange = parseProductRangeInput(rangeLabel || '');
+  if (!parsedRange) return null;
+
+  const price = Number(product.price);
+  const legacyOverride = useLegacyPriceOverride ? Number(productPriceOverrides[product.value || parsedRange.value]) : NaN;
+  const resolvedPrice = Number.isFinite(legacyOverride) && legacyOverride > 0
+    ? legacyOverride
+    : price;
+
+  if (!Number.isFinite(resolvedPrice) || resolvedPrice <= 0) return null;
+
+  return {
+    value: parsedRange.value,
+    rangeLabel: parsedRange.rangeLabel,
+    label: productLabelFromRange(parsedRange.rangeLabel),
+    description: `${formatWalletAmount(resolvedPrice)}`,
+    price: Math.round(resolvedPrice * 100) / 100,
+    createdAt: product.createdAt || Date.now() + index,
+    updatedAt: product.updatedAt || null,
+    updatedBy: product.updatedBy || null
+  };
+}
+
+function productSortValue(product) {
+  const parsed = parseProductRangeInput(product.rangeLabel || productRangeFromLabel(product.label) || '');
+  return parsed?.start || Number.MAX_SAFE_INTEGER;
+}
+
+function normalizeProductCatalogProducts(sourceProducts) {
+  const useLegacyPriceOverride = !Array.isArray(sourceProducts) || sourceProducts.length === 0;
+  const source = useLegacyPriceOverride ? DEFAULT_PRODUCTS : sourceProducts;
+  const seen = new Set();
+
+  return source
+    .map((product, index) => normalizeProduct(product, index, useLegacyPriceOverride))
+    .filter(Boolean)
+    .filter(product => {
+      if (seen.has(product.value)) return false;
+      seen.add(product.value);
+      return true;
+    })
+    .sort((a, b) => productSortValue(a) - productSortValue(b));
+}
+
+function refreshProductsFromCatalog() {
+  const normalizedProducts = normalizeProductCatalogProducts(productCatalogState?.products);
+  productCatalogState = {
+    version: 1,
+    products: normalizedProducts,
+    updatedAt: productCatalogState?.updatedAt || null,
+    updatedBy: productCatalogState?.updatedBy || null
+  };
+  products = productCatalogState.products;
+  return products;
+}
+
+const shouldSeedProductCatalog = !fs.existsSync(PRODUCT_CATALOG_FILE)
+  || !productCatalogState
+  || !Array.isArray(productCatalogState.products)
+  || productCatalogState.products.length === 0;
+let products = [];
+refreshProductsFromCatalog();
+if (shouldSeedProductCatalog) saveProductCatalog();
 
 function getProduct(productId) {
   return products.find(product => product.value === productId) || null;
@@ -2848,8 +2982,7 @@ function getProductBasePrice(productId) {
   const product = getProduct(productId);
   if (!product) return undefined;
 
-  const override = Number(productPriceOverrides[productId]);
-  return Number.isFinite(override) && override > 0 ? override : product.price;
+  return product.price;
 }
 
 function getProductPrice(productId) {
@@ -2868,10 +3001,92 @@ function setProductPrice(productId, price, user = null) {
   const product = getProduct(productId);
   if (!product || !Number.isFinite(price) || price <= 0) return false;
 
-  productPriceOverrides[productId] = Math.round(price * 100) / 100;
-  saveProductPrices();
+  product.price = Math.round(price * 100) / 100;
+  product.description = formatWalletAmount(product.price);
+  product.updatedAt = Date.now();
+  product.updatedBy = user?.id || null;
+  productCatalogState.updatedAt = product.updatedAt;
+  productCatalogState.updatedBy = product.updatedBy;
+  refreshProductsFromCatalog();
+  saveProductCatalog();
   scheduleDataBackup('product_price_changed', user);
   return true;
+}
+
+function productExistsWithRange(rangeLabel, exceptProductId = null) {
+  const parsed = parseProductRangeInput(rangeLabel);
+  if (!parsed) return false;
+  return products.some(product => product.value === parsed.value && product.value !== exceptProductId);
+}
+
+function addProductToCatalog(rangeLabel, price, user = null) {
+  const parsed = parseProductRangeInput(rangeLabel);
+  if (!parsed || !Number.isFinite(price) || price <= 0 || price > 500) {
+    return { ok: false, error: 'Gamme ou prix invalide.' };
+  }
+
+  if (productExistsWithRange(parsed.rangeLabel)) {
+    return { ok: false, error: 'Cette gamme existe déjà dans la boutique.' };
+  }
+
+  const now = Date.now();
+  productCatalogState.products.push({
+    value: parsed.value,
+    rangeLabel: parsed.rangeLabel,
+    label: productLabelFromRange(parsed.rangeLabel),
+    description: formatWalletAmount(price),
+    price: Math.round(price * 100) / 100,
+    createdAt: now,
+    updatedAt: now,
+    updatedBy: user?.id || null
+  });
+  productCatalogState.updatedAt = now;
+  productCatalogState.updatedBy = user?.id || null;
+  refreshProductsFromCatalog();
+  saveProductCatalog();
+  return { ok: true, product: getProduct(parsed.value) };
+}
+
+function updateProductInCatalog(productId, rangeLabel, price, user = null) {
+  const product = getProduct(productId);
+  const parsed = parseProductRangeInput(rangeLabel);
+
+  if (!product || !parsed || !Number.isFinite(price) || price <= 0 || price > 500) {
+    return { ok: false, error: 'Produit, gamme ou prix invalide.' };
+  }
+
+  if (productExistsWithRange(parsed.rangeLabel, productId)) {
+    return { ok: false, error: 'Cette gamme existe déjà dans la boutique.' };
+  }
+
+  const oldValue = product.value;
+  const now = Date.now();
+  product.value = parsed.value;
+  product.rangeLabel = parsed.rangeLabel;
+  product.label = productLabelFromRange(parsed.rangeLabel);
+  product.price = Math.round(price * 100) / 100;
+  product.description = formatWalletAmount(product.price);
+  product.updatedAt = now;
+  product.updatedBy = user?.id || null;
+
+  if (oldValue !== product.value) {
+    if (productStockState.unavailable?.[oldValue]) {
+      productStockState.unavailable[product.value] = true;
+      delete productStockState.unavailable[oldValue];
+      saveProductStock();
+    }
+
+    if (productPriceOverrides[oldValue]) {
+      delete productPriceOverrides[oldValue];
+      saveProductPrices();
+    }
+  }
+
+  productCatalogState.updatedAt = now;
+  productCatalogState.updatedBy = user?.id || null;
+  refreshProductsFromCatalog();
+  saveProductCatalog();
+  return { ok: true, product: getProduct(parsed.value), oldValue };
 }
 
 function setGlobalDiscount(percent, user) {
@@ -2912,52 +3127,131 @@ function formatProductPrice(productId, options = {}) {
 }
 
 function productPointsLabel(product) {
+  if (product?.rangeLabel) return `${product.rangeLabel} pts`;
+
   return product.label
     .replace(/^McDonald'?s\s*/i, '')
     .replace(/\s+Points$/i, ' pts');
 }
 
-function buildPriceEditorRows() {
+function productSelectOption(product) {
+  return {
+    label: productPointsLabel(product).slice(0, 100),
+    description: `Prix : ${formatProductPrice(product.value, { includeDiscount: false, ignoreAvailability: true })}`.slice(0, 100),
+    value: product.value,
+    emoji: MCDONALDS_BUTTON_EMOJI
+  };
+}
+
+function buildProductSelectRows(customIdPrefix, placeholder, optionBuilder = productSelectOption) {
   const rows = [];
 
-  for (let index = 0; index < products.length; index += 5) {
+  for (let index = 0; index < products.length; index += 25) {
+    const chunk = products.slice(index, index + 25);
+    const page = Math.floor(index / 25) + 1;
+    const totalPages = Math.ceil(products.length / 25);
     const row = new ActionRowBuilder().addComponents(
-      products.slice(index, index + 5).map(product => (
-        new ButtonBuilder()
-          .setCustomId(`edit_price:${product.value}`)
-          .setLabel(`${productPointsLabel(product)} - ${formatProductPrice(product.value, { includeDiscount: false, ignoreAvailability: true })}`.slice(0, 80))
-          .setEmoji(MCDONALDS_BUTTON_EMOJI)
-          .setStyle(ButtonStyle.Primary)
-      ))
+      new StringSelectMenuBuilder()
+        .setCustomId(`${customIdPrefix}:${page}`)
+        .setPlaceholder(totalPages > 1 ? `${placeholder} (${page}/${totalPages})` : placeholder)
+        .addOptions(chunk.map(optionBuilder))
     );
 
     rows.push(row);
+    if (rows.length >= 5) break;
   }
 
   return rows;
 }
 
-function stockButtonLabel(product) {
-  return `${isProductAvailable(product.value) ? '✅' : '❌'} ${productPointsLabel(product)}`.slice(0, 80);
+function buildPriceEditorRows() {
+  return buildProductSelectRows('edit_price_select', 'Choisir un produit à modifier...');
+}
+
+function buildProductCatalogEditorComponents() {
+  const addRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('open_add_product_modal')
+      .setLabel('Ajouter une gamme')
+      .setEmoji('➕')
+      .setStyle(ButtonStyle.Success)
+  );
+
+  return [
+    addRow,
+    ...buildProductSelectRows('edit_product_catalog_select', 'Modifier une gamme...')
+  ].slice(0, 5);
+}
+
+function buildProductCatalogEditorEmbed(guild) {
+  return new EmbedBuilder()
+    .setColor(0xD4AF37)
+    .setAuthor({ name: 'Catalogue McDonald\'s', iconURL: guild.iconURL({ dynamic: true }) })
+    .setTitle(`Modifier les produits ${MCDONALDS_EMOJI}`)
+    .setDescription([
+      'Ajoute une nouvelle gamme ou modifie une gamme existante.',
+      '',
+      `Produits actuels : **${products.length}**`,
+      '',
+      'Les changements sont appliqués automatiquement à :',
+      '• la boutique',
+      '• le menu Commander',
+      '• la commande !tarifs',
+      '• la commande !prix'
+    ].join('\n'))
+    .setFooter({ text: 'Owner • Catalogue boutique' });
+}
+
+function buildProductCatalogModal(product = null) {
+  const isEdit = Boolean(product);
+  const modal = new ModalBuilder()
+    .setCustomId(isEdit ? `edit_product_catalog_modal:${product.value}` : 'add_product_catalog_modal')
+    .setTitle(isEdit ? 'Modifier une gamme' : 'Ajouter une gamme');
+
+  const rangeInput = new TextInputBuilder()
+    .setCustomId('product_range')
+    .setLabel('Gamme de points')
+    .setPlaceholder('Exemple : 1200-1299')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMinLength(3)
+    .setMaxLength(20);
+
+  const priceInput = new TextInputBuilder()
+    .setCustomId('product_price')
+    .setLabel('Prix en euros')
+    .setPlaceholder('Exemple : 75')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMinLength(1)
+    .setMaxLength(8);
+
+  if (product) {
+    rangeInput.setValue(product.rangeLabel);
+    priceInput.setValue(String(getProductBasePrice(product.value)));
+  }
+
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(rangeInput),
+    new ActionRowBuilder().addComponents(priceInput)
+  );
+
+  return modal;
+}
+
+function stockSelectOption(product) {
+  const available = isProductAvailable(product.value);
+
+  return {
+    label: `${available ? 'Disponible' : 'Indisponible'} - ${productPointsLabel(product)}`.slice(0, 100),
+    description: available ? 'Clique pour barrer le produit dans la boutique.' : 'Clique pour remettre le produit disponible.',
+    value: product.value,
+    emoji: MCDONALDS_BUTTON_EMOJI
+  };
 }
 
 function buildStockEditorRows() {
-  const rows = [];
-
-  for (let index = 0; index < products.length; index += 5) {
-    const row = new ActionRowBuilder().addComponents(
-      products.slice(index, index + 5).map(product => (
-        new ButtonBuilder()
-          .setCustomId(`toggle_stock:${product.value}`)
-          .setLabel(stockButtonLabel(product))
-          .setStyle(isProductAvailable(product.value) ? ButtonStyle.Success : ButtonStyle.Danger)
-      ))
-    );
-
-    rows.push(row);
-  }
-
-  return rows;
+  return buildProductSelectRows('toggle_stock_select', 'Changer le stock...', stockSelectOption);
 }
 
 function buildStockEditorEmbed(guild) {
@@ -2968,7 +3262,7 @@ function buildStockEditorEmbed(guild) {
     .setAuthor({ name: 'Stock McDonald\'s', iconURL: guild.iconURL({ dynamic: true }) })
     .setTitle(`Gestion du stock ${MCDONALDS_EMOJI}`)
     .setDescription([
-      'Clique sur un produit pour changer son état.',
+      'Sélectionne un produit pour changer son état.',
       '',
       '✅ Disponible',
       '❌ Indisponible',
@@ -2981,13 +3275,26 @@ function buildStockEditorEmbed(guild) {
 }
 
 function productMenuLabel(product) {
-  const label = product.label.replace('Points', 'pts');
+  const label = `McDonald's ${product.rangeLabel || productPointsLabel(product).replace(/\s*pts$/i, '')} pts`;
   return (isProductAvailable(product.value) ? label : `❌ ${label}`).slice(0, 100);
 }
 
 function productMenuDescription(product) {
   if (!isProductAvailable(product.value)) return 'Indisponible';
   return `Prix : ${formatProductPrice(product.value)}`;
+}
+
+function productOrderSelectOption(product) {
+  return {
+    label: productMenuLabel(product),
+    description: productMenuDescription(product),
+    value: product.value,
+    emoji: MCDONALDS_BUTTON_EMOJI
+  };
+}
+
+function buildProductOrderRows() {
+  return buildProductSelectRows('produits', 'Choisir un produit McDonald’s...', productOrderSelectOption);
 }
 
 const ticketAllow = [
@@ -4144,7 +4451,8 @@ function buildHelpEmbed(guild) {
         name: 'Owner',
         value: helpCommandLines([
           ['prix', 'modifie les tarifs via boutons et formulaire.'],
-          ['stock', 'affiche les produits en boutons pour les rendre disponibles ou indisponibles.'],
+          ['produits', 'ajoute ou modifie les gammes McDonald’s et leurs prix.'],
+          ['stock', 'affiche les produits en menu pour les rendre disponibles ou indisponibles.'],
           ['reduc nombre', 'applique une réduction globale à la boutique.'],
           ['resetreduc', 'retire la réduction globale.'],
           ['stats', 'affiche les statistiques boutique.'],
@@ -5628,6 +5936,24 @@ client.on('messageCreate', async message => {
     return message.channel.send({ embeds: [embed], components: buildPriceEditorRows() });
   }
 
+  if (message.content === '!produits') {
+    if (!isOwnerMember(message.member)) {
+      const reply = await message.channel.send('❌ Seul le rôle owner peut modifier les produits.');
+      return deleteLater(reply);
+    }
+
+    await sendAdminLog('🍟 Panneau produits ouvert', [
+      `Owner : ${logUser(message.author)}`,
+      `Salon : ${logChannel(message.channel)}`,
+      `Produits : **${products.length}**`
+    ], 0x3498DB);
+
+    return message.channel.send({
+      embeds: [buildProductCatalogEditorEmbed(message.guild)],
+      components: buildProductCatalogEditorComponents()
+    });
+  }
+
   if (message.content === '!stock') {
     if (!isOwnerMember(message.member)) {
       const reply = await message.channel.send('❌ Seul le rôle owner peut gérer le stock.');
@@ -6714,6 +7040,17 @@ client.on(Events.InteractionCreate, async interaction => {
       return interaction.showModal(modal);
     }
 
+    if (interaction.customId === 'open_add_product_modal') {
+      if (!isOwnerMember(interaction.member)) {
+        return interaction.reply({
+          content: '❌ Seul le rôle owner peut ajouter un produit.',
+          ephemeral: true
+        });
+      }
+
+      return interaction.showModal(buildProductCatalogModal());
+    }
+
     if (interaction.customId.startsWith('toggle_stock:')) {
       if (!isOwnerMember(interaction.member)) {
         return interaction.reply({
@@ -7287,19 +7624,11 @@ client.on(Events.InteractionCreate, async interaction => {
         ].join('\n'))
         .setFooter({ text: 'La Rent’a • Sélection produit' });
 
-      const productMenu = new ActionRowBuilder().addComponents(
-        new StringSelectMenuBuilder()
-          .setCustomId('produits')
-          .setPlaceholder('Choisir un produit McDonald’s...')
-          .addOptions(products.map(product => ({
-            label: productMenuLabel(product),
-            description: productMenuDescription(product),
-            value: product.value,
-            emoji: MCDONALDS_BUTTON_EMOJI
-          })))
-      );
-
-      return replyTemp(interaction, { embeds: [orderEmbed], components: [productMenu], ephemeral: true }, 120_000);
+      return replyTemp(interaction, {
+        embeds: [orderEmbed],
+        components: buildProductOrderRows(),
+        ephemeral: true
+      }, 120_000);
     }
   }
 
@@ -7511,6 +7840,80 @@ client.on(Events.InteractionCreate, async interaction => {
     });
   }
 
+  if (interaction.isModalSubmit() && interaction.customId === 'add_product_catalog_modal') {
+    if (!isOwnerMember(interaction.member)) {
+      return interaction.reply({
+        content: '❌ Seul le rôle owner peut ajouter un produit.',
+        ephemeral: true
+      });
+    }
+
+    const range = interaction.fields.getTextInputValue('product_range').trim();
+    const price = parseProductPriceInput(interaction.fields.getTextInputValue('product_price'));
+    const result = addProductToCatalog(range, price, interaction.user);
+
+    if (!result.ok) {
+      return interaction.reply({
+        content: `❌ ${result.error}`,
+        ephemeral: true
+      });
+    }
+
+    await sendAdminLog('🍟 Produit ajouté', [
+      `Owner : ${logUser(interaction.user)}`,
+      `Produit : **${result.product.label}**`,
+      `Prix : **${formatWalletAmount(result.product.price)}**`,
+      `Salon : ${logChannel(interaction.channel)}`
+    ], 0x2ECC71);
+
+    return interaction.reply({
+      embeds: [buildProductCatalogEditorEmbed(interaction.guild)],
+      components: buildProductCatalogEditorComponents(),
+      content: `✅ Produit ajouté : **${result.product.label}** à **${formatWalletAmount(result.product.price)}**.`,
+      ephemeral: true
+    });
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('edit_product_catalog_modal:')) {
+    if (!isOwnerMember(interaction.member)) {
+      return interaction.reply({
+        content: '❌ Seul le rôle owner peut modifier les produits.',
+        ephemeral: true
+      });
+    }
+
+    const productId = interaction.customId.split(':')[1];
+    const product = getProduct(productId);
+    const range = interaction.fields.getTextInputValue('product_range').trim();
+    const price = parseProductPriceInput(interaction.fields.getTextInputValue('product_price'));
+    const oldLabel = product?.label || 'Produit inconnu';
+    const oldPrice = product ? getProductBasePrice(productId) : null;
+    const result = updateProductInCatalog(productId, range, price, interaction.user);
+
+    if (!result.ok) {
+      return interaction.reply({
+        content: `❌ ${result.error}`,
+        ephemeral: true
+      });
+    }
+
+    await sendAdminLog('🍟 Produit modifié', [
+      `Owner : ${logUser(interaction.user)}`,
+      `Ancien produit : **${oldLabel}**`,
+      `Nouveau produit : **${result.product.label}**`,
+      oldPrice ? `Ancien prix : **${formatWalletAmount(oldPrice)}**` : null,
+      `Nouveau prix : **${formatWalletAmount(result.product.price)}**`,
+      `Salon : ${logChannel(interaction.channel)}`
+    ], 0x2ECC71);
+
+    return interaction.reply({
+      embeds: [buildProductCatalogEditorEmbed(interaction.guild)],
+      components: buildProductCatalogEditorComponents(),
+      content: `✅ Produit modifié : **${result.product.label}** à **${formatWalletAmount(result.product.price)}**.`,
+      ephemeral: true
+    });
+  }
+
   if (interaction.isModalSubmit() && interaction.customId.startsWith('edit_price_modal:')) {
     if (!isOwnerMember(interaction.member)) {
       return interaction.reply({
@@ -7611,6 +8014,101 @@ client.on(Events.InteractionCreate, async interaction => {
   }
 
   if (interaction.isStringSelectMenu()) {
+    if (interaction.customId.startsWith('toggle_stock_select:')) {
+      if (!isOwnerMember(interaction.member)) {
+        return interaction.reply({
+          content: '❌ Seul le rôle owner peut gérer le stock.',
+          ephemeral: true
+        });
+      }
+
+      const productId = interaction.values[0];
+      const product = getProduct(productId);
+
+      if (!product) {
+        return interaction.reply({
+          content: '❌ Produit introuvable.',
+          ephemeral: true
+        });
+      }
+
+      const available = toggleProductAvailability(productId, interaction.user);
+
+      await sendAdminLog(available ? '📦 Produit remis en stock' : '📦 Produit mis indisponible', [
+        `Owner : ${logUser(interaction.user)}`,
+        `Produit : **${product.label}**`,
+        `Nouvel état : **${available ? 'Disponible' : 'Indisponible'}**`,
+        `Salon : ${logChannel(interaction.channel)}`
+      ], available ? 0x2ECC71 : 0xE67E22);
+
+      await interaction.update({
+        embeds: [buildStockEditorEmbed(interaction.guild)],
+        components: buildStockEditorRows()
+      });
+
+      return interaction.followUp({
+        content: available
+          ? `✅ **${product.label}** est maintenant disponible.`
+          : `❌ **${product.label}** est maintenant indisponible.`,
+        ephemeral: true
+      });
+    }
+
+    if (interaction.customId.startsWith('edit_price_select:')) {
+      if (!isOwnerMember(interaction.member)) {
+        return interaction.reply({
+          content: '❌ Seul le rôle owner peut modifier les prix.',
+          ephemeral: true
+        });
+      }
+
+      const productId = interaction.values[0];
+      const product = getProduct(productId);
+
+      if (!product) {
+        return interaction.reply({
+          content: '❌ Produit introuvable.',
+          ephemeral: true
+        });
+      }
+
+      const modal = new ModalBuilder()
+        .setCustomId(`edit_price_modal:${productId}`)
+        .setTitle(`Prix ${productPointsLabel(product)}`.slice(0, 45));
+
+      const priceInput = new TextInputBuilder()
+        .setCustomId('price')
+        .setLabel('Nouveau prix en euros')
+        .setPlaceholder(`Prix actuel : ${formatProductPrice(productId, { includeDiscount: false, ignoreAvailability: true })} | Exemple : 4.50`)
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMinLength(1)
+        .setMaxLength(8);
+
+      modal.addComponents(new ActionRowBuilder().addComponents(priceInput));
+      return interaction.showModal(modal);
+    }
+
+    if (interaction.customId.startsWith('edit_product_catalog_select:')) {
+      if (!isOwnerMember(interaction.member)) {
+        return interaction.reply({
+          content: '❌ Seul le rôle owner peut modifier les produits.',
+          ephemeral: true
+        });
+      }
+
+      const product = getProduct(interaction.values[0]);
+
+      if (!product) {
+        return interaction.reply({
+          content: '❌ Produit introuvable.',
+          ephemeral: true
+        });
+      }
+
+      return interaction.showModal(buildProductCatalogModal(product));
+    }
+
     if (interaction.customId.startsWith('payment_method:')) {
       if (isMaintenanceEnabledFor(interaction.member)) {
         return replyMaintenance(interaction);
@@ -7695,7 +8193,7 @@ ${dmSent ? '📩 Instructions envoyées au client en MP.' : '⚠️ Impossible d
       });
     }
 
-    if (interaction.customId === 'produits') {
+    if (interaction.customId.startsWith('produits')) {
       return handleProductOrder(interaction, interaction.values[0]);
     }
   }
