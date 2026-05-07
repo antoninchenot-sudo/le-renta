@@ -143,6 +143,8 @@ const BOT_CHANGELOG_ITEMS = [
   'Archives tickets renommées par type : archive-support ou archive-recharge avec pseudo et date.',
   'Bouton Prendre en charge ouvert au staff sur les tickets support uniquement.',
   'Sauvegarde dédiée des invites/parrainages sans suppression automatique des anciens backups.',
+  'Produits indisponibles retirés de la boutique publique, de Commander et des tarifs.',
+  'Affichage !tarifs remis en liste continue, reliée au stock et aux prix actuels.',
   'Ban automatique uniquement des nouveaux membres qui rejoignent avec le lien d’une personne déjà bannie.'
 ];
 const AVAILABILITY_TIMEZONE = 'Europe/Paris';
@@ -3391,6 +3393,10 @@ function isProductAvailable(productId) {
   return productStockState.unavailable?.[productId] !== true;
 }
 
+function availableProducts() {
+  return products.filter(product => isProductAvailable(product.value));
+}
+
 function setProductAvailability(productId, available, user) {
   const product = getProduct(productId);
   if (!product) return false;
@@ -3589,13 +3595,13 @@ function productSelectOption(product) {
   };
 }
 
-function buildProductSelectRows(customIdPrefix, placeholder, optionBuilder = productSelectOption) {
+function buildProductSelectRows(customIdPrefix, placeholder, optionBuilder = productSelectOption, productList = products) {
   const rows = [];
 
-  for (let index = 0; index < products.length; index += 25) {
-    const chunk = products.slice(index, index + 25);
+  for (let index = 0; index < productList.length; index += 25) {
+    const chunk = productList.slice(index, index + 25);
     const page = Math.floor(index / 25) + 1;
-    const totalPages = Math.ceil(products.length / 25);
+    const totalPages = Math.ceil(productList.length / 25);
     const row = new ActionRowBuilder().addComponents(
       new StringSelectMenuBuilder()
         .setCustomId(`${customIdPrefix}:${page}`)
@@ -3690,7 +3696,7 @@ function stockSelectOption(product) {
 
   return {
     label: `${available ? 'Disponible' : 'Indisponible'} - ${productPointsLabel(product)}`.slice(0, 100),
-    description: available ? 'Clique pour barrer le produit dans la boutique.' : 'Clique pour remettre le produit disponible.',
+    description: available ? 'Clique pour masquer ce produit de la boutique.' : 'Clique pour remettre le produit disponible.',
     value: product.value,
     emoji: MCDONALDS_BUTTON_EMOJI
   };
@@ -3715,18 +3721,17 @@ function buildStockEditorEmbed(guild) {
       '',
       `Produits indisponibles : **${unavailableCount}/${products.length}**`,
       '',
-      'Les produits indisponibles restent visibles dans Commander, mais ils ne peuvent pas être commandés.'
+      'Les produits indisponibles disparaissent de la boutique publique, de Commander et de !tarifs.'
     ].join('\n'))
     .setFooter({ text: 'Owner • Gestion du stock' });
 }
 
 function productMenuLabel(product) {
   const label = `McDonald's ${product.rangeLabel || productPointsLabel(product).replace(/\s*pts$/i, '')} pts`;
-  return (isProductAvailable(product.value) ? label : `❌ ${label}`).slice(0, 100);
+  return label.slice(0, 100);
 }
 
 function productMenuDescription(product) {
-  if (!isProductAvailable(product.value)) return 'Indisponible';
   return `Prix : ${formatProductPrice(product.value)}`;
 }
 
@@ -3740,7 +3745,7 @@ function productOrderSelectOption(product) {
 }
 
 function buildProductOrderRows() {
-  return buildProductSelectRows('produits', 'Choisir un produit McDonald’s...', productOrderSelectOption);
+  return buildProductSelectRows('produits', 'Choisir un produit McDonald’s...', productOrderSelectOption, availableProducts());
 }
 
 const ticketAllow = [
@@ -4838,74 +4843,79 @@ async function replyTemp(interaction, options, delay = DELETE_DELAY) {
 }
 
 function productListText(options = {}) {
-  const { boldRanges = false } = options;
+  const { boldRanges = false, includeUnavailable = false } = options;
+  const listedProducts = products.filter(product => includeUnavailable || isProductAvailable(product.value));
 
-  return products
+  return listedProducts
     .map(product => {
       const label = boldRanges
         ? product.label.replace(/\b\d+-\d+\b/g, match => `**${match}**`)
         : product.label;
 
-      return `💰  ${label.padEnd(15, ' ')} →   ${formatProductPrice(product.value)}`;
+      return `${MCDONALDS_EMOJI} ${label} → **${formatProductPrice(product.value)}**`;
     })
-    .join('\n\n');
-}
-
-function compactProductPriceLabel(product) {
-  if (!isProductAvailable(product.value)) return 'Indisponible';
-
-  const basePrice = getProductBasePrice(product.value);
-  const price = getProductPrice(product.value);
-
-  if (price === undefined || basePrice === undefined) return 'Non défini';
-  if (!isDiscountActive() || price === basePrice) return formatWalletAmount(price);
-
-  return `${formatWalletAmount(price)} ~~${formatWalletAmount(basePrice)}~~`;
-}
-
-function tariffGroupName(index) {
-  return [
-    `${MCDONALDS_EMOJI} Petites gammes`,
-    '🍟 Gammes classiques',
-    '📦 Grandes gammes',
-    '⭐ Très grandes gammes'
-  ][index] || `⭐ Gammes ${index + 1}`;
+    .join('\n');
 }
 
 function tariffProductLine(product) {
   return [
     `**${productPointsLabel(product)}**`,
-    `**${compactProductPriceLabel(product)}**`
+    `**${formatProductPrice(product.value)}**`
   ].join('  •  ');
 }
 
-function buildTariffEmbed(guild) {
-  const sortedProducts = [...products].sort((a, b) => productSortValue(a) - productSortValue(b));
-  const groups = [];
+function tariffLineChunks(lines, maxLength = 950) {
+  const chunks = [];
+  let current = '';
 
-  for (let index = 0; index < sortedProducts.length; index += 6) {
-    groups.push(sortedProducts.slice(index, index + 6));
+  for (const line of lines) {
+    const next = current ? `${current}\n${line}` : line;
+
+    if (next.length > maxLength && current) {
+      chunks.push(current);
+      current = line;
+    } else {
+      current = next;
+    }
   }
+
+  if (current) chunks.push(current);
+  return chunks;
+}
+
+function buildTariffEmbed(guild) {
+  const sortedProducts = availableProducts().sort((a, b) => productSortValue(a) - productSortValue(b));
+  const tariffLines = sortedProducts.map(tariffProductLine);
 
   const embed = new EmbedBuilder()
     .setColor(0xD4AF37)
     .setAuthor({ name: 'La Rent’a', iconURL: guild.iconURL({ dynamic: true }) })
     .setTitle(`Tarifs McDonald’s ${MCDONALDS_EMOJI}`)
     .setDescription([
-      'Choisis ta gamme, recharge ton portefeuille, puis commande depuis la boutique.',
+      'Liste des produits actuellement disponibles.',
+      'Les prix affichés suivent automatiquement les changements de tarifs et le stock.',
       '',
       isDiscountActive()
         ? `🏷️ Réduction active : **-${formatDiscountPercent()}%** déjà appliquée aux prix affichés.`
-        : '💰 Prix affichés en euros, débités automatiquement du portefeuille.'
+        : '💰 Prix débités automatiquement du portefeuille.'
     ].join('\n'))
     .setThumbnail(guild.iconURL({ dynamic: true }))
     .setFooter({ text: 'McDonald’s • Solde obligatoire avant commande' })
     .setTimestamp();
 
-  groups.forEach((group, index) => {
+  if (!tariffLines.length) {
     embed.addFields({
-      name: tariffGroupName(index),
-      value: group.map(tariffProductLine).join('\n'),
+      name: 'Aucun produit disponible',
+      value: 'Aucun tarif n’est affiché tant que les produits sont indisponibles.',
+      inline: false
+    });
+    return embed;
+  }
+
+  tariffLineChunks(tariffLines).forEach((chunk, index) => {
+    embed.addFields({
+      name: index === 0 ? 'Produits disponibles' : 'Produits disponibles - suite',
+      value: chunk,
       inline: false
     });
   });
@@ -7898,8 +7908,8 @@ client.on(Events.InteractionCreate, async interaction => {
 
       return interaction.followUp({
         content: available
-          ? `✅ **${product.label}** est maintenant disponible.`
-          : `❌ **${product.label}** est maintenant indisponible.`,
+          ? `✅ **${product.label}** est maintenant disponible dans la boutique.`
+          : `❌ **${product.label}** est maintenant retiré de la boutique, de Commander et de !tarifs.`,
         ephemeral: true
       });
     }
@@ -8427,21 +8437,28 @@ client.on(Events.InteractionCreate, async interaction => {
         `Salon : ${logChannel(interaction.channel)}`
       ], 0x3498DB);
 
+      const orderRows = buildProductOrderRows();
       const orderEmbed = new EmbedBuilder()
         .setColor(0xD4AF37)
         .setTitle(`Boutique McDonald's ${MCDONALDS_EMOJI}`)
-        .setDescription([
-          'Sélectionne le produit que tu veux commander.',
-          '',
-          'Les produits sont affichés avec leur nombre de **pts**.',
-          'Le prix est indiqué directement sous chaque produit dans le menu.',
-          'Le montant sera retiré automatiquement de ton portefeuille après ton choix.'
-        ].join('\n'))
+        .setDescription(orderRows.length
+          ? [
+              'Sélectionne le produit que tu veux commander.',
+              '',
+              'Les produits sont affichés avec leur nombre de **pts**.',
+              'Le prix est indiqué directement sous chaque produit dans le menu.',
+              'Le montant sera retiré automatiquement de ton portefeuille après ton choix.'
+            ].join('\n')
+          : [
+              'Aucun produit McDonald’s n’est disponible pour le moment.',
+              '',
+              'Reviens plus tard ou ouvre un ticket support si besoin.'
+            ].join('\n'))
         .setFooter({ text: 'La Rent’a • Sélection produit' });
 
       return replyTemp(interaction, {
         embeds: [orderEmbed],
-        components: buildProductOrderRows(),
+        components: orderRows,
         ephemeral: true
       }, 120_000);
     }
@@ -8906,8 +8923,8 @@ client.on(Events.InteractionCreate, async interaction => {
 
       return interaction.followUp({
         content: available
-          ? `✅ **${product.label}** est maintenant disponible.`
-          : `❌ **${product.label}** est maintenant indisponible.`,
+          ? `✅ **${product.label}** est maintenant disponible dans la boutique.`
+          : `❌ **${product.label}** est maintenant retiré de la boutique, de Commander et de !tarifs.`,
         ephemeral: true
       });
     }
