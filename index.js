@@ -22,6 +22,7 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildInvites,
+    GatewayIntentBits.GuildModeration,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.DirectMessages,
     GatewayIntentBits.MessageContent
@@ -38,6 +39,7 @@ const ORDER_CATEGORY = '1495800432776446063';
 const ORDER_DONE_CATEGORY = '1499779941934436403';
 const SUPPORT_CATEGORY = '1499036733986308146';
 const TICKET_ARCHIVE_CATEGORY = '1499765419399970908';
+const TICKET_RELANCE_CATEGORY = '1501964496145743945';
 const SHOP_CHANNEL_ID = '1310381741218988122';
 const SUPPORT_CHANNEL_ID = '1498434089450078258';
 const LOG_CHANNEL_ID = '1310354201704136747';
@@ -87,7 +89,7 @@ const TICKET_HISTORY_LIMIT = 50;
 const WALLET_BACKUP_DIR = dataPath('backups', 'wallets');
 const WALLET_BACKUP_LIMIT = 50;
 const REFERRAL_BACKUP_DIR = dataPath('backups', 'referrals');
-const REFERRAL_BACKUP_LIMIT = 50;
+const REFERRAL_BACKUP_LIMIT = Infinity;
 const PRODUCT_CATALOG_BACKUP_DIR = dataPath('backups', 'product-catalog');
 const PRODUCT_CATALOG_BACKUP_LIMIT = 50;
 const DATA_BACKUP_DIR = dataPath('backups', 'data');
@@ -123,10 +125,25 @@ const DATA_BACKUP_FILES = [
   PRODUCT_STOCK_FILE,
   PAYMENT_CONFIG_FILE
 ];
-const BOT_CHANGELOG_VERSION = '2026-05-07-invite-giveaway';
-// Garder uniquement les changements de cette version, pas l’historique complet du bot.
+const BOT_CHANGELOG_VERSION = '2026-05-07-modifs-groupees';
+// Garder les changements du lot en cours, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Ajout des giveaways spéciaux invitations avec compteur séparé du parrainage normal.'
+  'Catalogue produits McDonald’s modifiable depuis Discord, relié à la boutique, au menu Commander et à !tarifs.',
+  'Nouvelle présentation plus claire et lisible de la grille Tarifs McDonald’s.',
+  'Tickets recharge renommés avec statut, pseudo et date du ticket.',
+  'Tickets recharge relancés automatiquement : passage en relance, déplacement en Ticket-Relance et MP au membre.',
+  'Tickets relancés au bout d’1h déplacés automatiquement dans la catégorie Ticket-Relance.',
+  'Relance recharge clarifiée : le membre reçoit le vrai rappel en MP, le ticket sert de suivi staff.',
+  'Tickets commande terminés renommés avec le pseudo et la date de commande.',
+  'Message commande terminée ajusté avec les emojis demandés.',
+  'Consignes de paiement renforcées : PayPal entre proches obligatoire et aucune note sur tous les moyens de paiement.',
+  'Giveaway spécial invitations avec formulaire owner, annonce @everyone et classement temporaire séparé du parrainage normal.',
+  'Formulaire giveaway enrichi avec un message d’annonce personnalisable au lancement.',
+  'Commande !help corrigée avec une aide découpée en blocs plus courts.',
+  'Archives tickets renommées par type : archive-support ou archive-recharge avec pseudo et date.',
+  'Bouton Prendre en charge ouvert au staff sur les tickets support uniquement.',
+  'Sauvegarde dédiée des invites/parrainages sans suppression automatique des anciens backups.',
+  'Ban automatique uniquement des nouveaux membres qui rejoignent avec le lien d’une personne déjà bannie.'
 ];
 const AVAILABILITY_TIMEZONE = 'Europe/Paris';
 const AVAILABILITY_CHECK_INTERVAL = 60_000;
@@ -556,6 +573,36 @@ function saveReferrals() {
   });
 
   if (saved) scheduleDataBackup('referrals_updated');
+  return saved;
+}
+
+function referralBackupStats() {
+  return {
+    invitedCount: Object.keys(referrals?.invitedBy || {}).length,
+    inviterCount: Object.keys(referrals?.stats || {}).length,
+    inviteLinkCount: Object.keys(referrals?.inviteLinks || {}).length
+  };
+}
+
+function createReferralsBackup(reason = 'manual_invites_backup', actorUser = null) {
+  try {
+    if (!saveReferrals()) return null;
+
+    const backupPath = backupJsonSnapshot(REFERRALS_FILE, REFERRAL_BACKUP_DIR, REFERRAL_BACKUP_LIMIT);
+    const globalBackup = createDataBackup(reason, actorUser);
+
+    return {
+      filePath: backupPath,
+      globalFilePath: globalBackup?.filePath || null,
+      ...referralBackupStats()
+    };
+  } catch (error) {
+    console.error('Impossible de créer la sauvegarde des invites.', error);
+    reportCrash('Sauvegarde invites impossible', error, [
+      `Fichier : \`${REFERRALS_FILE}\``
+    ]);
+    return null;
+  }
 }
 
 function saveInviteGiveawayState() {
@@ -2330,6 +2377,58 @@ async function fetchGuildMemberForReferral(guild, userId) {
     || await guild.members.fetch(userId).catch(() => null);
 }
 
+async function fetchGuildBanForReferral(guild, userId) {
+  if (!guild || !userId) return null;
+
+  return guild.bans.fetch(userId).catch(() => null);
+}
+
+async function banFutureJoinFromBannedInviter(member, bannedInviterUser, usedInvite) {
+  const now = Date.now();
+  const inviterLabel = bannedInviterUser?.tag || bannedInviterUser?.id || 'membre banni';
+
+  referrals.invitedBy[member.id] = {
+    guildId: member.guild.id,
+    inviterId: bannedInviterUser?.id || null,
+    inviteCode: usedInvite?.code || null,
+    joinedAt: now,
+    validated: false,
+    rewardedAt: null,
+    sourceOnly: true,
+    excludedAt: now,
+    excludedReason: 'inviter_banned',
+    autoBannedFutureJoin: true
+  };
+  saveReferrals();
+
+  const dmSent = await sendModerationDm(member.user, '🚫 Bannissement automatique', [
+    `Serveur : **${member.guild.name}**`,
+    `Raison : tu as rejoint avec le lien d’invitation de **${inviterLabel}**, qui est banni du serveur.`,
+    '',
+    'Cette mesure est automatique pour protéger le serveur.'
+  ]);
+
+  const auditReason = `Auto-ban future join : invite d’un membre banni (${inviterLabel} / ${bannedInviterUser?.id || 'id inconnu'})`.slice(0, 512);
+  const banError = await member.ban({ reason: auditReason })
+    .then(() => null)
+    .catch(error => error);
+
+  await sendAdminLog(banError ? '❌ Auto-ban invité par banni impossible' : '🚫 Auto-ban invité par banni', [
+    `Nouveau membre : ${logUser(member.user)}`,
+    `Inviteur banni : ${bannedInviterUser ? logUser(bannedInviterUser) : inviterLabel}`,
+    usedInvite?.code ? `Code invitation : **${usedInvite.code}**` : null,
+    dmSent ? 'MP : envoyé' : 'MP : impossible à envoyer',
+    banError ? `Erreur : **${banError.message}**` : 'Action : **ban automatique appliqué**'
+  ], banError ? 0xE67E22 : 0xE74C3C);
+
+  return {
+    autoBannedFutureJoin: true,
+    banned: !banError,
+    inviterId: bannedInviterUser?.id || null,
+    inviteCode: usedInvite?.code || null
+  };
+}
+
 function isReferralCountable(referral) {
   return Boolean(referral && !referral.sourceOnly && !referral.excludedAt);
 }
@@ -2553,6 +2652,13 @@ function normalizeInviteGiveawayReward(value) {
     .slice(0, 120);
 }
 
+function normalizeInviteGiveawayAnnouncement(value) {
+  return String(value || '')
+    .trim()
+    .replace(/\n{3,}/g, '\n\n')
+    .slice(0, 1000);
+}
+
 function inviteGiveawayLeaderboard(giveaway = inviteGiveawayState.active) {
   const rows = new Map();
 
@@ -2656,9 +2762,18 @@ function buildInviteGiveawayModal() {
     .setMinLength(1)
     .setMaxLength(4);
 
+  const announcementInput = new TextInputBuilder()
+    .setCustomId('invite_giveaway_announcement')
+    .setLabel('Message envoyé au lancement')
+    .setPlaceholder('Exemple : La prochaine personne qui invite 3 amis gagne ce compte.')
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(false)
+    .setMaxLength(1000);
+
   modal.addComponents(
     new ActionRowBuilder().addComponents(rewardInput),
-    new ActionRowBuilder().addComponents(goalInput)
+    new ActionRowBuilder().addComponents(goalInput),
+    new ActionRowBuilder().addComponents(announcementInput)
   );
 
   return modal;
@@ -2714,18 +2829,26 @@ function buildInviteGiveawayWinnerEmbed(giveaway, winnerId) {
     .setTimestamp();
 }
 
+function buildInviteGiveawayAnnouncementContent(giveaway) {
+  return [
+    '@everyone',
+    giveaway.announcementMessage || null
+  ].filter(Boolean).join('\n\n');
+}
+
 async function fetchInviteGiveawayChannel() {
   return client.channels.cache.get(INVITE_GIVEAWAY_CHANNEL_ID)
     || await client.channels.fetch(INVITE_GIVEAWAY_CHANNEL_ID).catch(() => null);
 }
 
-async function startInviteGiveaway({ guild, ownerUser, reward, requiredInvites }) {
+async function startInviteGiveaway({ guild, ownerUser, reward, requiredInvites, announcementMessage }) {
   const giveaway = {
     id: `IG-${Date.now()}`,
     guildId: guild.id,
     channelId: INVITE_GIVEAWAY_CHANNEL_ID,
     reward,
     requiredInvites,
+    announcementMessage: announcementMessage || null,
     createdBy: ownerUser.id,
     startedAt: Date.now(),
     entries: []
@@ -2737,7 +2860,7 @@ async function startInviteGiveaway({ guild, ownerUser, reward, requiredInvites }
   const giveawayChannel = await fetchInviteGiveawayChannel();
   if (giveawayChannel?.send) {
     await giveawayChannel.send({
-      content: '@everyone',
+      content: buildInviteGiveawayAnnouncementContent(giveaway),
       embeds: [buildInviteGiveawayStartEmbed(giveaway, guild)],
       allowedMentions: { parse: ['everyone'] }
     }).catch(error => reportCrash('Annonce giveaway invite impossible', error, [
@@ -2750,6 +2873,7 @@ async function startInviteGiveaway({ guild, ownerUser, reward, requiredInvites }
     `Owner : ${logUser(ownerUser)}`,
     `Récompense : **${reward}**`,
     `Objectif : **${requiredInvites}** invitation${requiredInvites > 1 ? 's' : ''}`,
+    announcementMessage ? `Message : ${announcementMessage.slice(0, 500)}` : 'Message : annonce classique',
     `Salon : <#${INVITE_GIVEAWAY_CHANNEL_ID}>`
   ], 0xD4AF37);
 
@@ -2961,6 +3085,11 @@ async function recordMemberInvite(member) {
 
   if (!inviterId || inviterId === member.id || (!personalInviteOwnerId && inviterId === client.user?.id)) {
     return null;
+  }
+
+  const bannedInviter = await fetchGuildBanForReferral(member.guild, inviterId);
+  if (bannedInviter?.user) {
+    return banFutureJoinFromBannedInviter(member, bannedInviter.user, usedInvite);
   }
 
   const inviterMember = await fetchGuildMemberForReferral(member.guild, inviterId);
@@ -3682,6 +3811,13 @@ function ticketParentForType(type) {
   return ORDER_CATEGORY;
 }
 
+function archivedTicketTypeLabel(ticketRequest) {
+  if (ticketRequest?.type === 'recharge') return 'recharge de solde';
+  if (ticketRequest?.type === 'support') return 'support';
+  if (ticketRequest?.type === 'commande') return 'commande';
+  return 'ticket';
+}
+
 function restoreTicketPermissionOverwrites(guild, ticketRequest, ownerId) {
   const resolvedOwnerId = ticketRequest?.userId || ownerId;
 
@@ -3707,6 +3843,18 @@ function canManageTicket(interaction, ownerId) {
 
 function canCompleteOrderTicket(member) {
   return isOwnerMember(member);
+}
+
+function canTakeTicket(member, ticketRequest) {
+  if (isOwnerMember(member)) return true;
+  if (ticketRequest?.type !== 'support') return false;
+
+  const roles = member?.roles?.cache;
+  return Boolean(
+    roles?.has(STAFF_ROLE_ID) ||
+    roles?.has(TICKET_ACCESS_ROLE_ID) ||
+    member?.permissions?.has?.(PermissionFlagsBits.Administrator)
+  );
 }
 
 function takeTicketButton(ownerId, ticketRequest = null) {
@@ -3880,8 +4028,38 @@ async function moveTicketChannelToCategoryBottom(channel, reason = 'Relance auto
     });
 }
 
+async function moveRelancedTicketToCategory(channel, reason = 'Ticket relancé automatiquement') {
+  if (!channel?.guild || typeof channel.setParent !== 'function') return false;
+
+  const relanceCategory = channel.guild.channels.cache.get(TICKET_RELANCE_CATEGORY)
+    || await channel.guild.channels.fetch(TICKET_RELANCE_CATEGORY).catch(() => null);
+
+  if (!relanceCategory || relanceCategory.type !== ChannelType.GuildCategory) {
+    reportCrash('Catégorie Ticket-Relance introuvable', new Error('Catégorie Ticket-Relance introuvable'), [
+      `Ticket : ${logChannel(channel)}`,
+      `Catégorie demandée : **${TICKET_RELANCE_CATEGORY}**`
+    ]);
+    return moveTicketChannelToCategoryBottom(channel, reason);
+  }
+
+  if (channel.parentId !== TICKET_RELANCE_CATEGORY) {
+    await channel.setParent(TICKET_RELANCE_CATEGORY, { lockPermissions: false })
+      .catch(error => {
+        reportCrash('Déplacement ticket vers Ticket-Relance impossible', error, [
+          `Ticket : ${logChannel(channel)}`,
+          `Catégorie demandée : **${TICKET_RELANCE_CATEGORY}**`
+        ]);
+        return null;
+      });
+  }
+
+  return moveTicketChannelToCategoryBottom(channel, reason);
+}
+
 function rechargeReminderDmMessage(ticketRequest, closeAt) {
   return [
+    `<@${ticketRequest.userId}>`,
+    '',
     '⏰ **Relance recharge**',
     '',
     'Tu as ouvert une demande de recharge, mais nous n’avons toujours pas reçu ta preuve de paiement.',
@@ -3893,6 +4071,22 @@ function rechargeReminderDmMessage(ticketRequest, closeAt) {
     'Si tu veux toujours recharger ton solde, reprends les instructions de paiement envoyées plus haut et réponds à ce MP avec ton screenshot.',
     'Si tu ne veux plus recharger, tu peux ignorer ce message.',
     `Sans réponse, le ticket sera fermé automatiquement ${closeAt}.`
+  ].filter(Boolean).join('\n');
+}
+
+function rechargeReminderTicketMessage(ticketRequest, closeAt, dmSent) {
+  return [
+    '⏰ **Relance recharge envoyée**',
+    '',
+    `👤 Membre : <@${ticketRequest.userId}>`,
+    `🧾 Demande : **${ticketRequest.id}**`,
+    ticketRequest.amount ? `💶 Montant : **${ticketRequest.amount}**` : null,
+    ticketRequest.method ? `💳 Moyen : **${paymentLabel(ticketRequest.method)}**` : null,
+    '',
+    dmSent
+      ? '📩 Le membre a été relancé en message privé, car il n’a pas accès au ticket recharge.'
+      : '⚠️ Impossible d’envoyer le MP au membre.',
+    `Sans réponse du membre, le ticket sera fermé automatiquement ${closeAt}.`
   ].filter(Boolean).join('\n');
 }
 
@@ -3927,21 +4121,23 @@ async function sendOpenTicketNoResponseReminder(channelId) {
     'Nous attendons toujours ta réponse dans ce ticket.',
     `Sans réponse de ta part, ce ticket sera fermé automatiquement ${closeAt}.`
   ];
+  let reminderMessage = reminderLines.join('\n');
+
+  ticketRequest.noResponseReminderSentAt = Date.now();
+  delete ticketRequest.noResponseReminderAt;
 
   if (ticketRequest.type === 'recharge') {
-    ticketRequest.noResponseReminderSentAt = Date.now();
-    delete ticketRequest.noResponseReminderAt;
     await renameTicketChannelState(channel, ticketRequest, 'relance');
-    await moveTicketChannelToCategoryBottom(channel, 'Ticket recharge relancé automatiquement');
 
     const user = await client.users.fetch(ticketRequest.userId).catch(() => null);
-    if (user) await user.send(rechargeReminderDmMessage(ticketRequest, closeAt)).catch(() => {});
-  } else {
-    ticketRequest.noResponseReminderSentAt = Date.now();
-    delete ticketRequest.noResponseReminderAt;
+    const dmSent = user
+      ? await user.send(rechargeReminderDmMessage(ticketRequest, closeAt)).then(() => true).catch(() => false)
+      : false;
+    reminderMessage = rechargeReminderTicketMessage(ticketRequest, closeAt, dmSent);
   }
 
-  await channel.send(reminderLines.join('\n')).catch(() => {});
+  await moveRelancedTicketToCategory(channel, 'Ticket relancé automatiquement');
+  await channel.send(reminderMessage).catch(() => {});
   saveRequests();
 }
 
@@ -4171,16 +4367,17 @@ async function archiveTicketChannel(channel, ticketRequest, user, ownerId = tick
   clearTicketCleanup(channel.id);
   await channel.setParent(TICKET_ARCHIVE_CATEGORY, { lockPermissions: false });
   await channel.permissionOverwrites.set(archivedTicketPermissionOverwrites(channel.guild, ticketRequest));
-  await renameTicketChannelState(channel, ticketRequest, 'archive');
+  await renameTicketChannelState(channel, ticketRequest, ticketArchiveStateForRequest(ticketRequest));
 
   await channel.send({
     embeds: [
       new EmbedBuilder()
         .setColor(0xE67E22)
-        .setTitle('Ticket déplacé dans les tickets supprimés')
+        .setTitle(`Ticket déplacé dans les archives ${archivedTicketTypeLabel(ticketRequest)}`)
         .setDescription([
           `Déplacé par : ${user}`,
           ticketRequest ? `Demande : **${ticketRequest.id}**` : 'Demande : inconnue',
+          `Type d’archive : **${archivedTicketTypeLabel(ticketRequest)}**`,
           '',
           'Tu peux le réouvrir si la suppression était une erreur, ou le supprimer définitivement.',
           '',
@@ -4317,6 +4514,8 @@ const TICKET_CHANNEL_STATE_PREFIXES = [
   'commande',
   'recharge',
   'support',
+  'archive-recharge',
+  'archive-support',
   'archive',
   'relance',
   'termine',
@@ -4366,11 +4565,19 @@ function buildTicketChannelName(state, baseName, ticketRequest = null) {
   const cleanBaseName = sanitizeChannelName(baseName);
   const shouldAddDate = ticketRequest?.type === 'recharge'
     || (ticketRequest?.type === 'commande' && stateName === 'termine');
+  const shouldAddArchiveDate = stateName === 'archive-recharge' || stateName === 'archive-support';
   const dateSuffix = shouldAddDate
+    || shouldAddArchiveDate
     ? `-${ticketChannelDateSlug(ticketRequest.createdAt)}`
     : '';
 
   return `${stateName}-${cleanBaseName}${dateSuffix}`.slice(0, 100);
+}
+
+function ticketArchiveStateForRequest(ticketRequest) {
+  if (ticketRequest?.type === 'recharge') return 'archive-recharge';
+  if (ticketRequest?.type === 'support') return 'archive-support';
+  return 'archive';
 }
 
 function ticketStateForRequest(ticketRequest) {
@@ -4644,6 +4851,68 @@ function productListText(options = {}) {
     .join('\n\n');
 }
 
+function compactProductPriceLabel(product) {
+  if (!isProductAvailable(product.value)) return 'Indisponible';
+
+  const basePrice = getProductBasePrice(product.value);
+  const price = getProductPrice(product.value);
+
+  if (price === undefined || basePrice === undefined) return 'Non défini';
+  if (!isDiscountActive() || price === basePrice) return formatWalletAmount(price);
+
+  return `${formatWalletAmount(price)} ~~${formatWalletAmount(basePrice)}~~`;
+}
+
+function tariffGroupName(index) {
+  return [
+    `${MCDONALDS_EMOJI} Petites gammes`,
+    '🍟 Gammes classiques',
+    '📦 Grandes gammes',
+    '⭐ Très grandes gammes'
+  ][index] || `⭐ Gammes ${index + 1}`;
+}
+
+function tariffProductLine(product) {
+  return [
+    `**${productPointsLabel(product)}**`,
+    `**${compactProductPriceLabel(product)}**`
+  ].join('  •  ');
+}
+
+function buildTariffEmbed(guild) {
+  const sortedProducts = [...products].sort((a, b) => productSortValue(a) - productSortValue(b));
+  const groups = [];
+
+  for (let index = 0; index < sortedProducts.length; index += 6) {
+    groups.push(sortedProducts.slice(index, index + 6));
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor(0xD4AF37)
+    .setAuthor({ name: 'La Rent’a', iconURL: guild.iconURL({ dynamic: true }) })
+    .setTitle(`Tarifs McDonald’s ${MCDONALDS_EMOJI}`)
+    .setDescription([
+      'Choisis ta gamme, recharge ton portefeuille, puis commande depuis la boutique.',
+      '',
+      isDiscountActive()
+        ? `🏷️ Réduction active : **-${formatDiscountPercent()}%** déjà appliquée aux prix affichés.`
+        : '💰 Prix affichés en euros, débités automatiquement du portefeuille.'
+    ].join('\n'))
+    .setThumbnail(guild.iconURL({ dynamic: true }))
+    .setFooter({ text: 'McDonald’s • Solde obligatoire avant commande' })
+    .setTimestamp();
+
+  groups.forEach((group, index) => {
+    embed.addFields({
+      name: tariffGroupName(index),
+      value: group.map(tariffProductLine).join('\n'),
+      inline: false
+    });
+  });
+
+  return embed;
+}
+
 async function handleProductOrder(interaction, productId) {
   if (isMaintenanceEnabledFor(interaction.member)) {
     return replyMaintenance(interaction);
@@ -4857,21 +5126,34 @@ function buildHelpEmbed(guild) {
         inline: false
       },
       {
-        name: 'Owner',
+        name: 'Owner - boutique',
         value: helpCommandLines([
           ['prix', 'modifie les tarifs via boutons et formulaire.'],
           ['produits', 'ajoute ou modifie les gammes McDonald’s et leurs prix.'],
           ['stock', 'affiche les produits en menu pour les rendre disponibles ou indisponibles.'],
           ['reduc nombre', 'applique une réduction globale à la boutique.'],
           ['resetreduc', 'retire la réduction globale.'],
+          ['paiements', 'modifie PayPal, Revolut et IBAN depuis Discord.']
+        ]),
+        inline: false
+      },
+      {
+        name: 'Owner - gestion',
+        value: helpCommandLines([
           ['stats', 'affiche les statistiques boutique.'],
           ['maintenance on/off/status', 'active, désactive ou consulte la maintenance.'],
           ['autodispo on/off/status', 'active, coupe ou consulte les messages automatiques de 11h et 18h.'],
           ['annonce', 'ouvre un formulaire pour envoyer une annonce dans le salon des disponibilités.'],
           ['giveawayinvite', 'ouvre le formulaire pour lancer un giveaway spécial invitations.'],
           ['giveawayinvite stop', 'annule le giveaway invite actif.'],
-          ['paiements', 'modifie PayPal, Revolut et IBAN depuis Discord.'],
           ['backup', 'crée une sauvegarde manuelle des données importantes du bot.'],
+          ['backupinvites', 'crée une sauvegarde dédiée des invites et parrainages.']
+        ]),
+        inline: false
+      },
+      {
+        name: 'Owner - solde et historique',
+        value: helpCommandLines([
           ['history @membre', 'affiche l’historique portefeuille.'],
           ['tickets @membre', 'affiche l’historique tickets.'],
           ['refund', 'rembourse une commande depuis son ticket.'],
@@ -4942,7 +5224,7 @@ function buildAnnouncementEmbed(title, body, type) {
 function buildCompletedOrderTicketEmbed(ticketRequest, dmSent) {
   return new EmbedBuilder()
     .setColor(0x2ECC71)
-    .setTitle('✅ Commande terminée')
+    .setTitle('Commande terminée ✅')
     .setDescription([
       'La commande a été marquée comme livrée par un owner.',
       '',
@@ -4951,11 +5233,11 @@ function buildCompletedOrderTicketEmbed(ticketRequest, dmSent) {
       `📦 Produit : ${ticketRequest?.product || 'Non précisé'}`,
       '',
       dmSent
-        ? '📩 Le client a été prévenu en message privé.'
+        ? 'Le client a été prévenue en message privé. 📩'
         : '⚠️ Impossible d’envoyer un MP au client.',
       'Merci de conserver les informations de livraison dans ce ticket.',
       '',
-      '⭐ **Avis**',
+      '**Avis** ⭐️',
       '',
       'Ta commande est terminée, merci pour ta confiance !',
       '',
@@ -4964,7 +5246,7 @@ function buildCompletedOrderTicketEmbed(ticketRequest, dmSent) {
       '',
       'Bon appétit 😋',
       '',
-      '🕒 Ce ticket commande sera supprimé automatiquement dans 24h.'
+      'Ce ticket commande sera supprimé automatiquement dans 24h. 🕒'
     ].join('\n'))
     .setFooter({ text: 'Boutique' })
     .setTimestamp();
@@ -5899,6 +6181,10 @@ client.on(Events.GuildMemberAdd, async member => {
   try {
     const referral = await recordMemberInvite(member);
 
+    if (referral?.autoBannedFutureJoin) {
+      return;
+    }
+
     if (!referral) {
       await Promise.all([
         sendInviteJoinAnnouncement(member, null),
@@ -6013,7 +6299,7 @@ client.on('messageCreate', async message => {
     ], 0x95A5A6);
   }
 
-  if (message.content === '!help') {
+  if (message.content.trim() === '!help') {
     return message.channel.send({ embeds: [buildHelpEmbed(message.guild)] });
   }
 
@@ -6048,6 +6334,49 @@ client.on('messageCreate', async message => {
             '',
             `Le bot garde les **${DATA_BACKUP_LIMIT}** dernières sauvegardes globales.`
           ].join('\n'))
+          .setTimestamp()
+      ]
+    });
+  }
+
+  if (message.content === '!backupinvites') {
+    if (!isOwnerMember(message.member)) {
+      const reply = await message.channel.send('❌ Seul le rôle owner peut créer une sauvegarde des invites.');
+      return deleteLater(reply);
+    }
+
+    const backup = createReferralsBackup('manual_invites_backup', message.author);
+
+    if (!backup) {
+      const reply = await message.channel.send('❌ Impossible de créer la sauvegarde des invites. Regarde les logs du bot.');
+      return deleteLater(reply);
+    }
+
+    await sendAdminLog('💾 Sauvegarde invites créée', [
+      `Owner : ${logUser(message.author)}`,
+      `Salon : ${logChannel(message.channel)}`,
+      `Fichier invites : \`${backup.filePath || 'non disponible'}\``,
+      backup.globalFilePath ? `Sauvegarde globale : \`${backup.globalFilePath}\`` : null,
+      `Filleuls enregistrés : **${backup.invitedCount}**`,
+      `Parrains suivis : **${backup.inviterCount}**`,
+      `Liens suivis : **${backup.inviteLinkCount}**`
+    ].filter(Boolean), 0x3498DB);
+
+    return message.channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0x3498DB)
+          .setTitle('💾 Sauvegarde invites créée')
+          .setDescription([
+            `Fichier invites : \`${backup.filePath || 'non disponible'}\``,
+            backup.globalFilePath ? `Sauvegarde globale : \`${backup.globalFilePath}\`` : null,
+            '',
+            `Filleuls enregistrés : **${backup.invitedCount}**`,
+            `Parrains suivis : **${backup.inviterCount}**`,
+            `Liens suivis : **${backup.inviteLinkCount}**`,
+            '',
+            'Le bot conserve toutes les sauvegardes invites, sans suppression automatique.'
+          ].filter(Boolean).join('\n'))
           .setTimestamp()
       ]
     });
@@ -6298,25 +6627,7 @@ client.on('messageCreate', async message => {
   }
 
   if (message.content === '!tarifs') {
-    const embed = new EmbedBuilder()
-      .setColor(0xD4AF37)
-      .setAuthor({ name: 'Boutique', iconURL: message.guild.iconURL({ dynamic: true }) })
-      .setTitle(`Tarifs McDonald\'s ${MCDONALDS_EMOJI}`)
-      .setDescription([
-        '**Grille des tarifs disponibles.**',
-        '',
-        'Recharge ton solde puis utilise le bouton **Commander** sur le message boutique.',
-        '',
-        '**Tarifs**',
-        '',
-        '```',
-        productListText(),
-        '```'
-      ].join('\n'))
-      .setThumbnail(message.guild.iconURL({ dynamic: true }))
-      .setFooter({ text: 'McDonald\'s • Solde obligatoire avant commande' });
-
-    await message.channel.send({ embeds: [embed] });
+    await message.channel.send({ embeds: [buildTariffEmbed(message.guild)] });
     const confirm = await message.channel.send('✅ Tarifs envoyés.');
     setTimeout(() => confirm.delete().catch(() => {}), 2000);
     return;
@@ -7791,16 +8102,18 @@ client.on(Events.InteractionCreate, async interaction => {
       const ownerId = interaction.customId.split(':')[1];
       const ticketRequest = getTicketRequest(interaction.channel.id);
 
-      if (!isOwnerMember(interaction.member)) {
+      if (!ticketRequest || ticketRequest.archivedAt || ticketRequest.deletedAt || ticketRequest.completedAt) {
         return interaction.reply({
-          content: '❌ Seul le rôle owner peut prendre un ticket en charge.',
+          content: '❌ Ce ticket ne peut pas être pris en charge.',
           ephemeral: true
         });
       }
 
-      if (!ticketRequest || ticketRequest.archivedAt || ticketRequest.deletedAt || ticketRequest.completedAt) {
+      if (!canTakeTicket(interaction.member, ticketRequest)) {
         return interaction.reply({
-          content: '❌ Ce ticket ne peut pas être pris en charge.',
+          content: ticketRequest.type === 'support'
+            ? '❌ Seul le staff ou un owner peut prendre ce ticket support en charge.'
+            : '❌ Seul le rôle owner peut prendre ce ticket en charge.',
           ephemeral: true
         });
       }
@@ -7841,7 +8154,7 @@ client.on(Events.InteractionCreate, async interaction => {
       });
 
       await sendAdminLog('🙋 Ticket pris en charge', [
-        `Owner : ${logUser(interaction.user)}`,
+        `Pris par : ${logUser(interaction.user)}`,
         `Ticket : ${logChannel(interaction.channel)}`,
         `Demande : **${ticketRequest.id}**`,
         `Type : **${ticketTypeLabel(ticketRequest.type)}**`,
@@ -8324,6 +8637,9 @@ client.on(Events.InteractionCreate, async interaction => {
 
     const reward = normalizeInviteGiveawayReward(interaction.fields.getTextInputValue('invite_giveaway_reward'));
     const requiredInvites = parseInviteGiveawayGoal(interaction.fields.getTextInputValue('invite_giveaway_goal'));
+    const announcementMessage = normalizeInviteGiveawayAnnouncement(
+      interaction.fields.getTextInputValue('invite_giveaway_announcement')
+    );
 
     if (!reward || !Number.isFinite(requiredInvites)) {
       return interaction.reply({
@@ -8336,7 +8652,8 @@ client.on(Events.InteractionCreate, async interaction => {
       guild: interaction.guild,
       ownerUser: interaction.user,
       reward,
-      requiredInvites
+      requiredInvites,
+      announcementMessage
     });
 
     return interaction.reply({
