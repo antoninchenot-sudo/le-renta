@@ -47,6 +47,7 @@ const AVAILABILITY_CHANNEL_ID = '1310355422993186896';
 const AVIS_CHANNEL_ID = '1497652398259306516';
 const INVITE_ANNOUNCE_CHANNEL_ID = '1310355769824383059';
 const INVITE_ADMIN_CHANNEL_ID = '1499523428112142568';
+const INVITE_GIVEAWAY_CHANNEL_ID = '1498450310832717825';
 const TIKTOK_INVITE_CODE = '3EnBr2xJQS';
 const TIKTOK_SOURCE_EMOJI = '<:tiktok:1501320448477106186>';
 const TIKTOK_SOURCE_LABEL = `Arrivé de TikTok ${TIKTOK_SOURCE_EMOJI}`;
@@ -77,7 +78,7 @@ const DEFAULT_PAYMENT_CONFIG = {
   updatedAt: null,
   updatedBy: null
 };
-const NO_NOTE_TEXT = '❗❗ Ne mettre aucune note lors du paiement ❗❗';
+const NO_NOTE_TEXT = '❗❗ Aucune note / aucun commentaire / aucun libellé lors du paiement ❗❗';
 const WALLET_FILE = dataPath('wallets.json');
 const WALLET_HISTORY_FILE = dataPath('wallet-history.json');
 const WALLET_HISTORY_LIMIT = 50;
@@ -94,6 +95,7 @@ const DATA_BACKUP_LIMIT = 50;
 const DATA_BACKUP_DEBOUNCE_DELAY = 1_500;
 const REQUESTS_FILE = dataPath('requests.json');
 const REFERRALS_FILE = dataPath('referrals.json');
+const INVITE_GIVEAWAY_FILE = dataPath('invite-giveaway.json');
 const MAINTENANCE_FILE = dataPath('maintenance-state.json');
 const SHOP_STATS_FILE = dataPath('shop-stats.json');
 const WARNINGS_FILE = dataPath('warnings.json');
@@ -110,6 +112,7 @@ const DATA_BACKUP_FILES = [
   TICKET_HISTORY_FILE,
   REQUESTS_FILE,
   REFERRALS_FILE,
+  INVITE_GIVEAWAY_FILE,
   MAINTENANCE_FILE,
   SHOP_STATS_FILE,
   WARNINGS_FILE,
@@ -120,11 +123,10 @@ const DATA_BACKUP_FILES = [
   PRODUCT_STOCK_FILE,
   PAYMENT_CONFIG_FILE
 ];
-const BOT_CHANGELOG_VERSION = '2026-05-06-product-catalog-editor';
+const BOT_CHANGELOG_VERSION = '2026-05-07-invite-giveaway';
 // Garder uniquement les changements de cette version, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Ajout d’un catalogue produits modifiable depuis Discord, relié à la boutique et au !tarifs.',
-  'Restauration automatique des fichiers critiques depuis leurs sauvegardes si un fichier principal disparaît.'
+  'Ajout des giveaways spéciaux invitations avec compteur séparé du parrainage normal.'
 ];
 const AVAILABILITY_TIMEZONE = 'Europe/Paris';
 const AVAILABILITY_CHECK_INTERVAL = 60_000;
@@ -434,6 +436,7 @@ let walletHistory = loadJsonFile(WALLET_HISTORY_FILE, { users: {} });
 let ticketHistory = loadJsonFile(TICKET_HISTORY_FILE, { users: {} });
 let requests = loadJsonFile(REQUESTS_FILE, { counter: 0, tickets: {} });
 let referrals = loadJsonFile(REFERRALS_FILE, { invitedBy: {}, stats: {}, inviteLinks: {} }, { backupDir: REFERRAL_BACKUP_DIR });
+let inviteGiveawayState = loadJsonFile(INVITE_GIVEAWAY_FILE, { active: null, history: [] });
 let maintenanceState = loadJsonFile(MAINTENANCE_FILE, { enabled: false, updatedAt: null, updatedBy: null });
 let shopStats = loadJsonFile(SHOP_STATS_FILE, {
   totalRechargedCents: 0,
@@ -482,6 +485,12 @@ if (fs.existsSync(PRODUCT_CATALOG_FILE)) {
 }
 
 if (!referrals.inviteLinks) referrals.inviteLinks = {};
+if (!inviteGiveawayState || typeof inviteGiveawayState !== 'object' || Array.isArray(inviteGiveawayState)) {
+  inviteGiveawayState = { active: null, history: [] };
+}
+if (!Array.isArray(inviteGiveawayState.history)) inviteGiveawayState.history = [];
+if (inviteGiveawayState.active && typeof inviteGiveawayState.active !== 'object') inviteGiveawayState.active = null;
+if (inviteGiveawayState.active && !Array.isArray(inviteGiveawayState.active.entries)) inviteGiveawayState.active.entries = [];
 if (!walletHistory.users) walletHistory.users = {};
 if (!ticketHistory.users) ticketHistory.users = {};
 if (typeof maintenanceState.enabled !== 'boolean') maintenanceState.enabled = false;
@@ -547,6 +556,12 @@ function saveReferrals() {
   });
 
   if (saved) scheduleDataBackup('referrals_updated');
+}
+
+function saveInviteGiveawayState() {
+  const saved = saveJsonFile(INVITE_GIVEAWAY_FILE, inviteGiveawayState);
+
+  if (saved) scheduleDataBackup('invite_giveaway_updated');
 }
 
 function saveShopStats() {
@@ -669,16 +684,19 @@ function canUseBanCommand(member) {
 function createRequest(type, channelId, userId, data = {}) {
   requests.counter += 1;
   const prefix = type === 'recharge' ? 'R' : type === 'support' ? 'S' : 'C';
-  const createdAt = Date.now();
+  const requestedCreatedAt = Number(data.createdAt);
+  const createdAt = Number.isFinite(requestedCreatedAt) && requestedCreatedAt > 0
+    ? requestedCreatedAt
+    : Date.now();
   const request = {
+    ...data,
     id: `${prefix}-${String(requests.counter).padStart(4, '0')}`,
     type,
     channelId,
     userId,
     createdAt,
     noResponseReminderAt: createdAt + TICKET_NO_RESPONSE_REMINDER_DELAY,
-    noResponseCloseAt: createdAt + TICKET_NO_RESPONSE_TTL,
-    ...data
+    noResponseCloseAt: createdAt + TICKET_NO_RESPONSE_TTL
   };
 
   requests.tickets[channelId] = request;
@@ -2523,6 +2541,305 @@ function formatReferralDate(timestamp) {
   return `<t:${Math.floor(timestamp / 1000)}:f>`;
 }
 
+function parseInviteGiveawayGoal(value) {
+  const goal = Number.parseInt(String(value || '').trim(), 10);
+  return Number.isFinite(goal) && goal > 0 && goal <= 1000 ? goal : NaN;
+}
+
+function normalizeInviteGiveawayReward(value) {
+  return String(value || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .slice(0, 120);
+}
+
+function inviteGiveawayLeaderboard(giveaway = inviteGiveawayState.active) {
+  const rows = new Map();
+
+  for (const entry of giveaway?.entries || []) {
+    if (!entry?.inviterId) continue;
+
+    if (!rows.has(entry.inviterId)) {
+      rows.set(entry.inviterId, { inviterId: entry.inviterId, count: 0, invitedUserIds: [] });
+    }
+
+    const row = rows.get(entry.inviterId);
+    row.count += 1;
+    if (entry.invitedUserId) row.invitedUserIds.push(entry.invitedUserId);
+  }
+
+  return [...rows.values()]
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 10);
+}
+
+function inviteGiveawayProgressText(giveaway = inviteGiveawayState.active) {
+  const leaderboard = inviteGiveawayLeaderboard(giveaway);
+  if (!leaderboard.length) return 'Aucune invitation comptée depuis le début du giveaway.';
+
+  return leaderboard
+    .map((row, index) => {
+      const medal = ['🥇', '🥈', '🥉'][index] || `**${index + 1}.**`;
+      return `${medal} <@${row.inviterId}> — **${row.count}/${giveaway.requiredInvites}** invitation${row.count > 1 ? 's' : ''}`;
+    })
+    .join('\n');
+}
+
+function buildInviteGiveawayPanelEmbed(guild) {
+  const active = inviteGiveawayState.active;
+
+  if (!active) {
+    return new EmbedBuilder()
+      .setColor(0xD4AF37)
+      .setAuthor({ name: 'Giveaway invitations', iconURL: guild.iconURL({ dynamic: true }) })
+      .setTitle('Créer un giveaway spécial invite')
+      .setDescription([
+        `Le giveaway sera annoncé dans <#${INVITE_GIVEAWAY_CHANNEL_ID}> avec **@everyone**.`,
+        '',
+        'Le compteur commence à **0** au lancement.',
+        'Le classement normal du parrainage reste intact.',
+        '',
+        'Clique sur le bouton pour remplir le formulaire.'
+      ].join('\n'))
+      .setFooter({ text: 'Owner • Giveaway invite' });
+  }
+
+  return new EmbedBuilder()
+    .setColor(0x3498DB)
+    .setAuthor({ name: 'Giveaway invitations', iconURL: guild.iconURL({ dynamic: true }) })
+    .setTitle('Giveaway invite en cours')
+    .setDescription([
+      `Récompense : **${active.reward}**`,
+      `Objectif : **${active.requiredInvites}** invitation${active.requiredInvites > 1 ? 's' : ''}`,
+      `Démarré : <t:${Math.floor(active.startedAt / 1000)}:R>`,
+      `Salon : <#${INVITE_GIVEAWAY_CHANNEL_ID}>`,
+      '',
+      '**Classement temporaire**',
+      inviteGiveawayProgressText(active)
+    ].join('\n'))
+    .setFooter({ text: 'Le classement parrainage normal n’est pas modifié.' });
+}
+
+function buildInviteGiveawayPanelComponents() {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('open_invite_giveaway_modal')
+        .setLabel(inviteGiveawayState.active ? 'Giveaway déjà actif' : 'Créer le giveaway')
+        .setEmoji('🎁')
+        .setStyle(ButtonStyle.Primary)
+        .setDisabled(Boolean(inviteGiveawayState.active))
+    )
+  ];
+}
+
+function buildInviteGiveawayModal() {
+  const modal = new ModalBuilder()
+    .setCustomId('invite_giveaway_create_modal')
+    .setTitle('Giveaway spécial invite');
+
+  const rewardInput = new TextInputBuilder()
+    .setCustomId('invite_giveaway_reward')
+    .setLabel('Compte à gagner')
+    .setPlaceholder('Exemple : compte McDonald’s 50-74 pts')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMinLength(2)
+    .setMaxLength(120);
+
+  const goalInput = new TextInputBuilder()
+    .setCustomId('invite_giveaway_goal')
+    .setLabel('Nombre d’invitations nécessaires')
+    .setPlaceholder('Exemple : 3')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMinLength(1)
+    .setMaxLength(4);
+
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(rewardInput),
+    new ActionRowBuilder().addComponents(goalInput)
+  );
+
+  return modal;
+}
+
+function buildInviteGiveawayStartEmbed(giveaway, guild) {
+  return new EmbedBuilder()
+    .setColor(0xD4AF37)
+    .setAuthor({ name: 'La Rent’a', iconURL: guild.iconURL({ dynamic: true }) })
+    .setTitle('🎁 Giveaway spécial invitations')
+    .setDescription([
+      `Récompense : **${giveaway.reward}**`,
+      `Objectif : inviter **${giveaway.requiredInvites}** personne${giveaway.requiredInvites > 1 ? 's' : ''}`,
+      '',
+      'Le premier membre qui atteint l’objectif gagne.',
+      '',
+      'Le compteur de ce giveaway démarre maintenant à **0**.',
+      'Le classement parrainage habituel ne change pas.'
+    ].join('\n'))
+    .setFooter({ text: 'Giveaway invite • Classement temporaire' })
+    .setTimestamp();
+}
+
+function buildInviteGiveawayProgressEmbed(giveaway, inviterId, member) {
+  const count = inviteGiveawayLeaderboard(giveaway).find(row => row.inviterId === inviterId)?.count || 0;
+
+  return new EmbedBuilder()
+    .setColor(0x3498DB)
+    .setTitle('🎁 Progression giveaway invite')
+    .setDescription([
+      `<@${inviterId}> vient d’inviter **${member.user.tag}**.`,
+      '',
+      `Progression : **${count}/${giveaway.requiredInvites}** invitation${count > 1 ? 's' : ''}`,
+      '',
+      '**Classement temporaire**',
+      inviteGiveawayProgressText(giveaway)
+    ].join('\n'))
+    .setTimestamp();
+}
+
+function buildInviteGiveawayWinnerEmbed(giveaway, winnerId) {
+  return new EmbedBuilder()
+    .setColor(0x2ECC71)
+    .setTitle('🎉 Giveaway invite terminé')
+    .setDescription([
+      `Gagnant : <@${winnerId}>`,
+      `Récompense : **${giveaway.reward}**`,
+      `Objectif atteint : **${giveaway.requiredInvites}** invitation${giveaway.requiredInvites > 1 ? 's' : ''}`,
+      '',
+      'Le classement temporaire du giveaway est terminé.',
+      'Le classement parrainage normal reste inchangé.'
+    ].join('\n'))
+    .setTimestamp();
+}
+
+async function fetchInviteGiveawayChannel() {
+  return client.channels.cache.get(INVITE_GIVEAWAY_CHANNEL_ID)
+    || await client.channels.fetch(INVITE_GIVEAWAY_CHANNEL_ID).catch(() => null);
+}
+
+async function startInviteGiveaway({ guild, ownerUser, reward, requiredInvites }) {
+  const giveaway = {
+    id: `IG-${Date.now()}`,
+    guildId: guild.id,
+    channelId: INVITE_GIVEAWAY_CHANNEL_ID,
+    reward,
+    requiredInvites,
+    createdBy: ownerUser.id,
+    startedAt: Date.now(),
+    entries: []
+  };
+
+  inviteGiveawayState.active = giveaway;
+  saveInviteGiveawayState();
+
+  const giveawayChannel = await fetchInviteGiveawayChannel();
+  if (giveawayChannel?.send) {
+    await giveawayChannel.send({
+      content: '@everyone',
+      embeds: [buildInviteGiveawayStartEmbed(giveaway, guild)],
+      allowedMentions: { parse: ['everyone'] }
+    }).catch(error => reportCrash('Annonce giveaway invite impossible', error, [
+      `Salon : <#${INVITE_GIVEAWAY_CHANNEL_ID}>`,
+      `Giveaway : **${giveaway.id}**`
+    ]));
+  }
+
+  await sendAdminLog('🎁 Giveaway invite lancé', [
+    `Owner : ${logUser(ownerUser)}`,
+    `Récompense : **${reward}**`,
+    `Objectif : **${requiredInvites}** invitation${requiredInvites > 1 ? 's' : ''}`,
+    `Salon : <#${INVITE_GIVEAWAY_CHANNEL_ID}>`
+  ], 0xD4AF37);
+
+  return giveaway;
+}
+
+async function recordInviteGiveawayJoin(member, referral) {
+  const giveaway = inviteGiveawayState.active;
+  if (!giveaway || giveaway.guildId !== member.guild.id) return null;
+  if (!referral || !isReferralCountable(referral) || !referral.inviterId) return null;
+  if (referral.inviterId === member.id) return null;
+
+  const referralJoinedAt = Number(referral.joinedAt) || Date.now();
+  if (referralJoinedAt < Number(giveaway.startedAt || 0)) return null;
+
+  if (!Array.isArray(giveaway.entries)) giveaway.entries = [];
+  if (giveaway.entries.some(entry => entry.invitedUserId === member.id)) return null;
+
+  const [invitedMember, inviterMember] = await Promise.all([
+    fetchGuildMemberForReferral(member.guild, member.id),
+    fetchGuildMemberForReferral(member.guild, referral.inviterId)
+  ]);
+
+  if (isReferralExcludedMember(invitedMember) || isReferralExcludedMember(inviterMember)) return null;
+
+  giveaway.entries.push({
+    invitedUserId: member.id,
+    invitedTag: member.user.tag,
+    inviterId: referral.inviterId,
+    inviteCode: referral.inviteCode || null,
+    joinedAt: Date.now()
+  });
+
+  const leaderboard = inviteGiveawayLeaderboard(giveaway);
+  const winnerRow = leaderboard.find(row => row.inviterId === referral.inviterId && row.count >= giveaway.requiredInvites);
+  const giveawayChannel = await fetchInviteGiveawayChannel();
+
+  if (winnerRow) {
+    const completedGiveaway = {
+      ...giveaway,
+      winnerId: winnerRow.inviterId,
+      winnerCount: winnerRow.count,
+      endedAt: Date.now(),
+      status: 'completed'
+    };
+
+    inviteGiveawayState.history.unshift(completedGiveaway);
+    inviteGiveawayState.history = inviteGiveawayState.history.slice(0, 20);
+    inviteGiveawayState.active = null;
+    saveInviteGiveawayState();
+
+    if (giveawayChannel?.send) {
+      await giveawayChannel.send({
+        embeds: [buildInviteGiveawayWinnerEmbed(completedGiveaway, winnerRow.inviterId)]
+      }).catch(() => {});
+    }
+
+    const winner = await client.users.fetch(winnerRow.inviterId).catch(() => null);
+    if (winner) {
+      await winner.send([
+        '🎉 **Tu as gagné le giveaway invite !**',
+        '',
+        `Récompense : **${completedGiveaway.reward}**`,
+        `Invitations comptées : **${winnerRow.count}**`,
+        '',
+        'Un owner va te contacter pour te donner ton lot.'
+      ].join('\n')).catch(() => {});
+    }
+
+    await sendAdminLog('🎉 Giveaway invite terminé', [
+      `Gagnant : <@${winnerRow.inviterId}>`,
+      `Récompense : **${completedGiveaway.reward}**`,
+      `Invitations : **${winnerRow.count}/${completedGiveaway.requiredInvites}**`,
+      `Salon : <#${INVITE_GIVEAWAY_CHANNEL_ID}>`
+    ], 0x2ECC71);
+
+    return completedGiveaway;
+  }
+
+  saveInviteGiveawayState();
+
+  if (giveawayChannel?.send) {
+    await giveawayChannel.send({
+      embeds: [buildInviteGiveawayProgressEmbed(giveaway, referral.inviterId, member)]
+    }).catch(() => {});
+  }
+
+  return giveaway;
+}
+
 function findPersonalInviteOwner(inviteCode) {
   return Object.entries(referrals.inviteLinks || {})
     .find(([, invite]) => invite?.code === inviteCode)?.[0] || null;
@@ -3541,6 +3858,44 @@ function scheduleOpenTicketNoResponseCleanup(channelId, closeAt) {
   ticketCleanupTimers.set(channelId, timer);
 }
 
+async function moveTicketChannelToCategoryBottom(channel, reason = 'Relance automatique ticket') {
+  if (!channel?.guild || !channel.parentId || typeof channel.setPosition !== 'function') return false;
+
+  const siblingPositions = channel.guild.channels.cache
+    .filter(sibling => sibling.parentId === channel.parentId && sibling.type === channel.type)
+    .map(sibling => Number.isFinite(sibling.rawPosition) ? sibling.rawPosition : sibling.position)
+    .filter(position => Number.isFinite(position));
+  const bottomPosition = siblingPositions.length
+    ? Math.max(...siblingPositions)
+    : Number(channel.rawPosition || channel.position || 0);
+
+  return channel.setPosition(bottomPosition, { reason })
+    .then(() => true)
+    .catch(error => {
+      reportCrash('Déplacement ticket en bas de catégorie impossible', error, [
+        `Ticket : ${logChannel(channel)}`,
+        `Position demandée : **${bottomPosition}**`
+      ]);
+      return false;
+    });
+}
+
+function rechargeReminderDmMessage(ticketRequest, closeAt) {
+  return [
+    '⏰ **Relance recharge**',
+    '',
+    'Tu as ouvert une demande de recharge, mais nous n’avons toujours pas reçu ta preuve de paiement.',
+    '',
+    `🧾 Demande : **${ticketRequest.id}**`,
+    ticketRequest.amount ? `💶 Montant : **${ticketRequest.amount}**` : null,
+    ticketRequest.method ? `💳 Moyen : **${paymentLabel(ticketRequest.method)}**` : null,
+    '',
+    'Si tu veux toujours recharger ton solde, reprends les instructions de paiement envoyées plus haut et réponds à ce MP avec ton screenshot.',
+    'Si tu ne veux plus recharger, tu peux ignorer ce message.',
+    `Sans réponse, le ticket sera fermé automatiquement ${closeAt}.`
+  ].filter(Boolean).join('\n');
+}
+
 async function sendOpenTicketNoResponseReminder(channelId) {
   clearTicketNoResponseReminder(channelId);
 
@@ -3574,14 +3929,19 @@ async function sendOpenTicketNoResponseReminder(channelId) {
   ];
 
   if (ticketRequest.type === 'recharge') {
+    ticketRequest.noResponseReminderSentAt = Date.now();
+    delete ticketRequest.noResponseReminderAt;
+    await renameTicketChannelState(channel, ticketRequest, 'relance');
+    await moveTicketChannelToCategoryBottom(channel, 'Ticket recharge relancé automatiquement');
+
     const user = await client.users.fetch(ticketRequest.userId).catch(() => null);
-    if (user) await user.send(reminderLines.join('\n')).catch(() => {});
+    if (user) await user.send(rechargeReminderDmMessage(ticketRequest, closeAt)).catch(() => {});
+  } else {
+    ticketRequest.noResponseReminderSentAt = Date.now();
+    delete ticketRequest.noResponseReminderAt;
   }
 
   await channel.send(reminderLines.join('\n')).catch(() => {});
-
-  ticketRequest.noResponseReminderSentAt = Date.now();
-  delete ticketRequest.noResponseReminderAt;
   saveRequests();
 }
 
@@ -3949,6 +4309,7 @@ function sanitizeChannelName(name) {
 }
 
 const TICKET_CHANNEL_STATE_PREFIXES = [
+  'attente-preuve',
   'attente-screen',
   'attente-client',
   'a-verifier',
@@ -3957,6 +4318,7 @@ const TICKET_CHANNEL_STATE_PREFIXES = [
   'recharge',
   'support',
   'archive',
+  'relance',
   'termine',
   'valide'
 ];
@@ -3981,8 +4343,34 @@ function ticketChannelBaseName(channel, ticketRequest) {
   return sanitizeChannelName(ticketRequest?.channelBaseName || stripTicketChannelStatePrefix(channel?.name));
 }
 
-function buildTicketChannelName(state, baseName) {
-  return `${state}-${sanitizeChannelName(baseName)}`.slice(0, 100);
+function ticketChannelDateSlug(timestamp = Date.now()) {
+  const date = new Date(Number(timestamp) || Date.now());
+  const parts = new Intl.DateTimeFormat('fr-FR', {
+    timeZone: 'Europe/Paris',
+    weekday: 'long',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric'
+  }).formatToParts(date);
+  const valueForType = type => parts.find(part => part.type === type)?.value || '';
+  const weekday = sanitizeChannelName(valueForType('weekday').normalize('NFD').replace(/[\u0300-\u036f]/g, ''));
+  const day = valueForType('day') || '00';
+  const month = valueForType('month') || '00';
+  const year = valueForType('year') || '0000';
+
+  return `${weekday}-${day}-${month}-${year}`.replace(/^-+/, '');
+}
+
+function buildTicketChannelName(state, baseName, ticketRequest = null) {
+  const stateName = state === 'attente-screen' ? 'attente-preuve' : state;
+  const cleanBaseName = sanitizeChannelName(baseName);
+  const shouldAddDate = ticketRequest?.type === 'recharge'
+    || (ticketRequest?.type === 'commande' && stateName === 'termine');
+  const dateSuffix = shouldAddDate
+    ? `-${ticketChannelDateSlug(ticketRequest.createdAt)}`
+    : '';
+
+  return `${stateName}-${cleanBaseName}${dateSuffix}`.slice(0, 100);
 }
 
 function ticketStateForRequest(ticketRequest) {
@@ -3990,7 +4378,8 @@ function ticketStateForRequest(ticketRequest) {
   if (ticketRequest?.type === 'recharge') {
     if (ticketRequest.paidAt) return 'valide';
     if (ticketRequest.screenshotReceivedAt) return 'a-verifier';
-    return 'attente-screen';
+    if (ticketRequest.noResponseReminderSentAt) return 'relance';
+    return 'attente-preuve';
   }
   if (ticketRequest?.type === 'support') return 'attente-client';
   return 'ticket';
@@ -4000,7 +4389,7 @@ async function renameTicketChannelState(channel, ticketRequest, state) {
   if (!channel || typeof channel.setName !== 'function') return false;
 
   const baseName = ticketChannelBaseName(channel, ticketRequest);
-  const nextName = buildTicketChannelName(state, baseName);
+  const nextName = buildTicketChannelName(state, baseName, ticketRequest);
   if (ticketRequest) ticketRequest.channelBaseName = baseName;
   if (channel.name === nextName) return false;
 
@@ -4116,15 +4505,34 @@ function paymentConfigButtons() {
 
 function paymentInstruction(method) {
   if (method === 'paypal') {
-    return `ENVOIE ICI EN AMI PROCHE & SANS NOTES : ${paymentConfigValue('paypal')} | Puis réponds à ce message en joignant ton screenshot PayPal (capture d'écran du paiement).`;
+    return [
+      '🅿️ **PayPal : paiement ENTRE PROCHES obligatoire.**',
+      '**N’utilise pas “bien/service” ou “achat”.**',
+      `**${NO_NOTE_TEXT}**`,
+      `Lien : ${paymentConfigValue('paypal')}`,
+      '',
+      'Puis réponds à ce message avec ton screenshot PayPal.'
+    ].join('\n');
   }
 
   if (method === 'revolut') {
-    return `ENVOIE ICI SANS NOTES : ${paymentConfigValue('revolut')} | Puis réponds à ce message en joignant ton screenshot Revolut (capture d'écran du paiement).`;
+    return [
+      '💳 **Revolut : paiement sans note obligatoire.**',
+      `**${NO_NOTE_TEXT}**`,
+      `Lien : ${paymentConfigValue('revolut')}`,
+      '',
+      'Puis réponds à ce message avec ton screenshot Revolut.'
+    ].join('\n');
   }
 
   if (method === 'virement') {
-    return `EFFECTUE LE VIREMENT SANS NOTES : IBAN ${paymentConfigValue('virement')} | Puis réponds à ce message en joignant ton screenshot du virement.`;
+    return [
+      '🏦 **Virement bancaire : aucun libellé / aucune note obligatoire.**',
+      `**${NO_NOTE_TEXT}**`,
+      `IBAN : ${paymentConfigValue('virement')}`,
+      '',
+      'Puis réponds à ce message avec ton screenshot du virement.'
+    ].join('\n');
   }
 
   return 'Puis réponds à ce message en joignant ton screenshot du paiement.';
@@ -4145,7 +4553,8 @@ function rechargeInstructionMessage(request) {
       paymentConfigValue('virement'),
       '```',
       '',
-      '⚠️ **Ne mets aucune note / aucun libellé dans le virement.**',
+      `⚠️ **${NO_NOTE_TEXT}**`,
+      '**Ne mets rien dans la note, le commentaire ou le libellé du virement.**',
       '',
       'Puis réponds à ce message en joignant ton screenshot du virement.',
       '⏳ Tu as **24h** pour l\'envoyer.'
@@ -4158,7 +4567,7 @@ function rechargeInstructionMessage(request) {
     `Montant déclaré : **${request.amount}** | Demande n°**${request.id}**`,
     `Date indiquée : **${request.paymentDate || 'Non précisée'}** | Heure : **${request.paymentTime || 'Non précisée'}**`,
     '',
-    `**${paymentInstruction(request.method)}**`,
+    paymentInstruction(request.method),
     '⏳ Tu as **24h** pour l\'envoyer.'
   ].join('\n');
 }
@@ -4459,6 +4868,8 @@ function buildHelpEmbed(guild) {
           ['maintenance on/off/status', 'active, désactive ou consulte la maintenance.'],
           ['autodispo on/off/status', 'active, coupe ou consulte les messages automatiques de 11h et 18h.'],
           ['annonce', 'ouvre un formulaire pour envoyer une annonce dans le salon des disponibilités.'],
+          ['giveawayinvite', 'ouvre le formulaire pour lancer un giveaway spécial invitations.'],
+          ['giveawayinvite stop', 'annule le giveaway invite actif.'],
           ['paiements', 'modifie PayPal, Revolut et IBAN depuis Discord.'],
           ['backup', 'crée une sauvegarde manuelle des données importantes du bot.'],
           ['history @membre', 'affiche l’historique portefeuille.'],
@@ -5496,6 +5907,8 @@ client.on(Events.GuildMemberAdd, async member => {
       return;
     }
 
+    await recordInviteGiveawayJoin(member, referral);
+
     const inviterDmSent = await notifyInviterOfPendingReferral(member, referral);
 
     await Promise.all([
@@ -6007,6 +6420,75 @@ client.on('messageCreate', async message => {
     return;
   }
 
+  if (message.content.trim().split(/\s+/)[0] === '!giveawayinvite') {
+    if (!isOwnerMember(message.member)) {
+      const reply = await message.channel.send('❌ Seul le rôle owner peut créer un giveaway invite.');
+      return deleteLater(reply);
+    }
+
+    const args = message.content.trim().split(/\s+/);
+    const action = (args[1] || 'panel').toLowerCase();
+
+    if (['stop', 'annuler', 'cancel'].includes(action)) {
+      if (!inviteGiveawayState.active) {
+        const reply = await message.channel.send('❌ Aucun giveaway invite actif à annuler.');
+        return deleteLater(reply);
+      }
+
+      const canceledGiveaway = {
+        ...inviteGiveawayState.active,
+        status: 'canceled',
+        canceledAt: Date.now(),
+        canceledBy: message.author.id
+      };
+      inviteGiveawayState.history.unshift(canceledGiveaway);
+      inviteGiveawayState.history = inviteGiveawayState.history.slice(0, 20);
+      inviteGiveawayState.active = null;
+      saveInviteGiveawayState();
+
+      const giveawayChannel = await fetchInviteGiveawayChannel();
+      if (giveawayChannel?.send) {
+        await giveawayChannel.send({
+          embeds: [
+            new EmbedBuilder()
+              .setColor(0xE67E22)
+              .setTitle('🎁 Giveaway invite annulé')
+              .setDescription([
+                `Annulé par : ${message.author}`,
+                `Récompense : **${canceledGiveaway.reward}**`,
+                '',
+                'Le classement temporaire est fermé.',
+                'Le classement parrainage normal reste inchangé.'
+              ].join('\n'))
+              .setTimestamp()
+          ]
+        }).catch(() => {});
+      }
+
+      await sendAdminLog('🎁 Giveaway invite annulé', [
+        `Owner : ${logUser(message.author)}`,
+        `Giveaway : **${canceledGiveaway.id}**`,
+        `Récompense : **${canceledGiveaway.reward}**`
+      ], 0xE67E22);
+
+      return message.channel.send('✅ Giveaway invite annulé.');
+    }
+
+    await sendAdminLog('🎁 Panneau giveaway invite ouvert', [
+      `Owner : ${logUser(message.author)}`,
+      `Salon commande : ${logChannel(message.channel)}`,
+      `Salon giveaway : <#${INVITE_GIVEAWAY_CHANNEL_ID}>`,
+      inviteGiveawayState.active ? `Giveaway actif : **${inviteGiveawayState.active.id}**` : 'Giveaway actif : **non**'
+    ], 0x3498DB);
+
+    const panel = await message.channel.send({
+      embeds: [buildInviteGiveawayPanelEmbed(message.guild)],
+      components: buildInviteGiveawayPanelComponents()
+    });
+    deleteLater(panel, 5 * 60_000);
+    return;
+  }
+
   if (message.content.trim().split(/\s+/)[0] === '!reduc') {
     if (!isOwnerMember(message.member)) {
       const reply = await message.channel.send('❌ Seul le rôle owner peut appliquer une réduction.');
@@ -6097,7 +6579,9 @@ client.on('messageCreate', async message => {
         'Pour recharger, rends-toi dans le salon boutique :',
         `<#${SHOP_CHANNEL_ID}>`,
         '',
-        '**❗❗ Ne mets aucune note lors du paiement. ❗❗**',
+        `**${NO_NOTE_TEXT}**`,
+        '**PayPal : paiement entre proches uniquement.**',
+        '**Revolut / virement : aucun message, aucune note, aucun libellé.**',
         '',
         'Les informations de paiement ne sont pas affichées ici.',
         '',
@@ -6108,17 +6592,17 @@ client.on('messageCreate', async message => {
       .addFields(
         {
           name: 'PayPal 🅿️',
-          value: 'Disponible via **Recharger**.',
+          value: 'Disponible via **Recharger**. Paiement **entre proches** et **sans note**.',
           inline: false
         },
         {
           name: 'Revolut 💳',
-          value: 'Disponible via **Recharger**.',
+          value: 'Disponible via **Recharger**. Paiement **sans note / commentaire**.',
           inline: false
         },
         {
           name: 'Virement bancaire 🏦',
-          value: 'Disponible via **Recharger**.',
+          value: 'Disponible via **Recharger**. Virement **sans libellé / note**.',
           inline: false
         }
       )
@@ -6903,6 +7387,24 @@ client.on(Events.InteractionCreate, async interaction => {
         embeds: [buildGuideFaqEmbed(interaction.guild)],
         ephemeral: true
       });
+    }
+
+    if (interaction.customId === 'open_invite_giveaway_modal') {
+      if (!isOwnerMember(interaction.member)) {
+        return interaction.reply({
+          content: '❌ Seul le rôle owner peut créer un giveaway invite.',
+          ephemeral: true
+        });
+      }
+
+      if (inviteGiveawayState.active) {
+        return interaction.reply({
+          content: '❌ Un giveaway invite est déjà actif. Attends qu’il soit terminé avant d’en créer un nouveau.',
+          ephemeral: true
+        });
+      }
+
+      return interaction.showModal(buildInviteGiveawayModal());
     }
 
     if (interaction.customId.startsWith('open_ban_modal:')) {
@@ -7805,6 +8307,45 @@ client.on(Events.InteractionCreate, async interaction => {
     });
   }
 
+  if (interaction.isModalSubmit() && interaction.customId === 'invite_giveaway_create_modal') {
+    if (!isOwnerMember(interaction.member)) {
+      return interaction.reply({
+        content: '❌ Seul le rôle owner peut créer un giveaway invite.',
+        ephemeral: true
+      });
+    }
+
+    if (inviteGiveawayState.active) {
+      return interaction.reply({
+        content: '❌ Un giveaway invite est déjà actif. Attends qu’il soit terminé avant d’en créer un nouveau.',
+        ephemeral: true
+      });
+    }
+
+    const reward = normalizeInviteGiveawayReward(interaction.fields.getTextInputValue('invite_giveaway_reward'));
+    const requiredInvites = parseInviteGiveawayGoal(interaction.fields.getTextInputValue('invite_giveaway_goal'));
+
+    if (!reward || !Number.isFinite(requiredInvites)) {
+      return interaction.reply({
+        content: '❌ Formulaire invalide. Indique un compte à gagner et un nombre d’invitations entre 1 et 1000.',
+        ephemeral: true
+      });
+    }
+
+    const giveaway = await startInviteGiveaway({
+      guild: interaction.guild,
+      ownerUser: interaction.user,
+      reward,
+      requiredInvites
+    });
+
+    return interaction.reply({
+      embeds: [buildInviteGiveawayPanelEmbed(interaction.guild)],
+      content: `✅ Giveaway lancé dans <#${INVITE_GIVEAWAY_CHANNEL_ID}> avec @everyone.\nObjectif : **${giveaway.requiredInvites}** invitation${giveaway.requiredInvites > 1 ? 's' : ''} • Récompense : **${giveaway.reward}**`,
+      ephemeral: true
+    });
+  }
+
   if (interaction.isModalSubmit() && interaction.customId.startsWith('payment_config_modal:')) {
     if (!isOwnerMember(interaction.member)) {
       return interaction.reply({
@@ -7994,9 +8535,9 @@ client.on(Events.InteractionCreate, async interaction => {
         .setCustomId(`payment_method:${cents}`)
         .setPlaceholder('💳 Choisir un moyen de paiement...')
         .addOptions([
-          { label: 'PayPal', description: `Recharge de ${formatAmount(cents)}`, value: 'paypal', emoji: '🅿️' },
-          { label: 'Revolut', description: `Recharge de ${formatAmount(cents)}`, value: 'revolut', emoji: '💳' },
-          { label: 'Virement bancaire', description: `Recharge de ${formatAmount(cents)}`, value: 'virement', emoji: '🏦' }
+          { label: 'PayPal', description: `Recharge de ${formatAmount(cents)} - entre proches, sans note`, value: 'paypal', emoji: '🅿️' },
+          { label: 'Revolut', description: `Recharge de ${formatAmount(cents)} - sans note`, value: 'revolut', emoji: '💳' },
+          { label: 'Virement bancaire', description: `Recharge de ${formatAmount(cents)} - sans libellé`, value: 'virement', emoji: '🏦' }
         ])
     );
 
@@ -8132,9 +8673,13 @@ client.on(Events.InteractionCreate, async interaction => {
 
       pendingRecharges.delete(pendingRechargeKey(interaction));
       const channelBaseName = sanitizeChannelName(interaction.user.username);
+      const ticketOpenedAt = Date.now();
 
       const ticket = await interaction.guild.channels.create({
-        name: buildTicketChannelName('attente-screen', channelBaseName),
+        name: buildTicketChannelName('attente-preuve', channelBaseName, {
+          type: 'recharge',
+          createdAt: ticketOpenedAt
+        }),
         parent: TICKET_CATEGORY,
         type: ChannelType.GuildText,
         permissionOverwrites: adminTicketPermissionOverwrites(interaction.guild)
@@ -8145,7 +8690,8 @@ client.on(Events.InteractionCreate, async interaction => {
         amount,
         method,
         paymentDate: pendingRecharge.paymentDate,
-        paymentTime: pendingRecharge.paymentTime
+        paymentTime: pendingRecharge.paymentTime,
+        createdAt: ticketOpenedAt
       });
       const methodName = paymentLabel(method);
       let dmSent = false;
