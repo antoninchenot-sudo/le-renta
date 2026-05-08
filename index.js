@@ -72,7 +72,7 @@ const KFCE_EMOJI_NAME = 'kfce';
 const KFCE_EMOJI = `<:${KFCE_EMOJI_NAME}:${KFCE_EMOJI_ID}>`;
 const KFCE_BUTTON_EMOJI = { id: KFCE_EMOJI_ID, name: KFCE_EMOJI_NAME };
 const INFO_IMAGE = process.env.INFO_IMAGE || 'https://i0.wp.com/direct-actu.fr/wp-content/uploads/2024/11/1725353427343-ad6c22b5-478a-412e-9c6f-8e14646acd5e_1.png?ssl=1';
-const KFCE_INFO_IMAGE_URL = process.env.KFCE_INFO_IMAGE || null;
+const KFCE_INFO_IMAGE_URL = process.env.KFCE_INFO_IMAGE || 'https://media.anti-crise.fr/2023/07/aout2023kfc1407202301082023S0C0kfc-1.jpg';
 const KFCE_INFO_IMAGE_FILE = path.join(__dirname, 'assets', 'kfce-fidelite.jpg');
 const PAYPAL_LINK = 'https://www.paypal.me/LaRenta23';
 const REVOLUT_LINK = 'https://revolut.me/arthur23320/pocket/vNrIna0VcG';
@@ -138,7 +138,9 @@ const BOT_CHANGELOG_VERSION = '2026-05-08-kfce-shop';
 // Garder uniquement les changements du lot en cours, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
   'Ajout de la boutique KFCÉ séparée avec !setup 2, commande, fidélité, tarifs, prix et stock dédiés.',
-  'Le portefeuille et la recharge de solde restent communs entre McD0 et KFCÉ.'
+  'Le portefeuille et la recharge de solde restent communs entre McD0 et KFCÉ.',
+  'Tickets commande nommés avec la boutique mcd0/kfce et la date dès l’ouverture.',
+  'Image du programme fidélité KFCÉ configurée avec le nouveau lien.'
 ];
 const AVAILABILITY_TIMEZONE = 'Europe/Paris';
 const AVAILABILITY_CHECK_INTERVAL = 60_000;
@@ -1199,6 +1201,7 @@ function ticketHistoryRecord(ticketRequest, overrides = {}) {
   return {
     id: ticketRequest.id || overrides.id || null,
     type: ticketRequest.type || overrides.type || null,
+    shop: ticketRequest.shop || overrides.shop || null,
     channelId: ticketRequest.channelId || overrides.channelId || null,
     userId: ticketRequest.userId || overrides.userId || null,
     createdAt: ticketRequest.createdAt || overrides.createdAt || Date.now(),
@@ -3420,6 +3423,7 @@ const PRODUCT_SHOPS = {
     name: 'McD0nald\'s',
     nameFancy: 'McD0nald’s',
     shortName: 'McD0',
+    ticketSlug: 'mcd0',
     emoji: MCD0NALDS_EMOJI,
     buttonEmoji: MCD0NALDS_BUTTON_EMOJI,
     defaultProducts: DEFAULT_PRODUCTS,
@@ -3434,6 +3438,7 @@ const PRODUCT_SHOPS = {
     name: 'KFCÉ',
     nameFancy: 'KFCÉ',
     shortName: 'KFCÉ',
+    ticketSlug: 'kfce',
     emoji: KFCE_EMOJI,
     buttonEmoji: KFCE_BUTTON_EMOJI,
     defaultProducts: DEFAULT_KFCE_PRODUCTS,
@@ -4917,12 +4922,17 @@ function ticketChannelDateSlug(timestamp = Date.now()) {
   return `${weekday}-${day}-${month}-${year}`.replace(/^-+/, '');
 }
 
+function ticketCommandShopSlug(ticketRequest) {
+  if (ticketRequest?.type !== 'commande') return '';
+  return productShop(ticketRequest.shop).ticketSlug;
+}
+
 function buildTicketChannelName(state, baseName, ticketRequest = null) {
   const stateName = state === 'attente-screen' ? 'attente-preuve' : state;
   const cleanBaseName = sanitizeChannelName(baseName);
   const shouldAddDate = ticketRequest?.type === 'recharge'
     || (ticketRequest?.type === 'support' && stateName === 'support')
-    || (ticketRequest?.type === 'commande' && stateName === 'termine');
+    || ticketRequest?.type === 'commande';
   const shouldAddArchiveDate = stateName === 'archive-recharge' || stateName === 'archive-support';
   const dateSource = ticketRequest?.type === 'recharge' && stateName === 'attente-preuve' && ticketRequest.noResponseReminderAnsweredAt
     ? ticketRequest.noResponseReminderAnsweredAt
@@ -4931,8 +4941,10 @@ function buildTicketChannelName(state, baseName, ticketRequest = null) {
     || shouldAddArchiveDate
     ? `-${ticketChannelDateSlug(dateSource)}`
     : '';
+  const commandShopSlug = ticketCommandShopSlug(ticketRequest);
+  const shopPrefix = commandShopSlug ? `${commandShopSlug}-` : '';
 
-  return `${stateName}-${cleanBaseName}${dateSuffix}`.slice(0, 100);
+  return `${stateName}-${shopPrefix}${cleanBaseName}${dateSuffix}`.slice(0, 100);
 }
 
 function ticketArchiveStateForRequest(ticketRequest) {
@@ -5448,9 +5460,14 @@ async function handleProductOrder(interaction, productId) {
   wallets[uid].balance -= prix;
   saveWallets();
   const channelBaseName = sanitizeChannelName(interaction.user.username);
+  const createdAt = Date.now();
 
   const ticket = await interaction.guild.channels.create({
-    name: buildTicketChannelName('en-cours', channelBaseName),
+    name: buildTicketChannelName('en-cours', channelBaseName, {
+      type: 'commande',
+      shop: shop.id,
+      createdAt
+    }),
     parent: ORDER_CATEGORY,
     type: ChannelType.GuildText,
     permissionOverwrites: ticketPermissionOverwrites(interaction.guild, interaction.user.id)
@@ -5460,7 +5477,8 @@ async function handleProductOrder(interaction, productId) {
     channelBaseName,
     shop: shop.id,
     product: product.label,
-    price: prix
+    price: prix,
+    createdAt
   });
   recordWalletHistory(uid, {
     type: 'order',
