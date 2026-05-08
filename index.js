@@ -62,10 +62,10 @@ const TICKET_NO_RESPONSE_TTL = 4 * 60 * 60 * 1000;
 const WALLET_CONFIRMATION_TTL = 5 * 60 * 1000;
 
 const SHOP_EMOJI = '🛒';
-const MCDONALDS_EMOJI_ID = '1498440076257136830';
-const MCDONALDS_EMOJI_NAME = '4964mcdonalds';
-const MCDONALDS_EMOJI = `<:${MCDONALDS_EMOJI_NAME}:${MCDONALDS_EMOJI_ID}>`;
-const MCDONALDS_BUTTON_EMOJI = { id: MCDONALDS_EMOJI_ID, name: MCDONALDS_EMOJI_NAME };
+const MCD0NALDS_EMOJI_ID = '1498440076257136830';
+const MCD0NALDS_EMOJI_NAME = '4964mcd0nalds';
+const MCD0NALDS_EMOJI = `<:${MCD0NALDS_EMOJI_NAME}:${MCD0NALDS_EMOJI_ID}>`;
+const MCD0NALDS_BUTTON_EMOJI = { id: MCD0NALDS_EMOJI_ID, name: MCD0NALDS_EMOJI_NAME };
 const INFO_IMAGE = process.env.INFO_IMAGE || 'https://i0.wp.com/direct-actu.fr/wp-content/uploads/2024/11/1725353427343-ad6c22b5-478a-412e-9c6f-8e14646acd5e_1.png?ssl=1';
 const PAYPAL_LINK = 'https://www.paypal.me/LaRenta23';
 const REVOLUT_LINK = 'https://revolut.me/arthur23320/pocket/vNrIna0VcG';
@@ -127,29 +127,10 @@ const DATA_BACKUP_FILES = [
   PRODUCT_STOCK_FILE,
   PAYMENT_CONFIG_FILE
 ];
-const BOT_CHANGELOG_VERSION = '2026-05-07-modifs-groupees';
-// Garder les changements du lot en cours, pas l’historique complet du bot.
+const BOT_CHANGELOG_VERSION = '2026-05-08-brand-spelling';
+// Garder uniquement les changements du lot en cours, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Catalogue produits McDonald’s modifiable depuis Discord, relié à la boutique, au menu Commander et à !tarifs.',
-  'Nouvelle présentation plus claire et lisible de la grille Tarifs McDonald’s.',
-  'Tickets recharge renommés avec statut, pseudo et date du ticket.',
-  'Tickets recharge relancés automatiquement : passage en relance, déplacement en Ticket-Relance et MP au membre.',
-  'Tickets relancés au bout d’1h déplacés automatiquement dans la catégorie Ticket-Relance.',
-  'Relance recharge clarifiée : le membre reçoit le vrai rappel en MP, le ticket sert de suivi staff.',
-  'Tickets commande terminés renommés avec le pseudo et la date de commande.',
-  'Message commande terminée ajusté avec les emojis demandés.',
-  'Consignes de paiement renforcées : PayPal entre proches obligatoire et aucune note sur tous les moyens de paiement.',
-  'Giveaway spécial invitations avec formulaire owner, annonce @everyone et classement temporaire séparé du parrainage normal.',
-  'Formulaire giveaway enrichi avec un message d’annonce personnalisable au lancement.',
-  'Commande !help corrigée avec une aide découpée en blocs plus courts.',
-  'Archives tickets renommées par type : archive-support ou archive-recharge avec pseudo et date.',
-  'Bouton Prendre en charge ouvert au staff sur les tickets support uniquement.',
-  'Sauvegarde dédiée des invites/parrainages sans suppression automatique des anciens backups.',
-  'Produits indisponibles retirés de la boutique publique, de Commander et des tarifs.',
-  'Affichage !tarifs remis en liste continue, reliée au stock et aux prix actuels.',
-  'Message !tarifs rendu automatique : il s’édite tout seul après un changement de prix, stock, produit ou réduction.',
-  'Stock produit en quantité avec affichage 📦 dans !tarifs et Commander.',
-  'Ban automatique uniquement des nouveaux membres qui rejoignent avec le lien d’une personne déjà bannie.'
+  'Écriture boutique normalisée : McD0 avec zéro dans les textes, produits, boutons, tarifs et fidélité.'
 ];
 const AVAILABILITY_TIMEZONE = 'Europe/Paris';
 const AVAILABILITY_CHECK_INTERVAL = 60_000;
@@ -515,6 +496,9 @@ if (!inviteGiveawayState || typeof inviteGiveawayState !== 'object' || Array.isA
 if (!Array.isArray(inviteGiveawayState.history)) inviteGiveawayState.history = [];
 if (inviteGiveawayState.active && typeof inviteGiveawayState.active !== 'object') inviteGiveawayState.active = null;
 if (inviteGiveawayState.active && !Array.isArray(inviteGiveawayState.active.entries)) inviteGiveawayState.active.entries = [];
+if (inviteGiveawayState.active && !Array.isArray(inviteGiveawayState.active.progressMessages)) {
+  inviteGiveawayState.active.progressMessages = [];
+}
 if (!walletHistory.users) walletHistory.users = {};
 if (!ticketHistory.users) ticketHistory.users = {};
 if (typeof maintenanceState.enabled !== 'boolean') maintenanceState.enabled = false;
@@ -819,8 +803,8 @@ function ensureNoMemberResponseCloseAt(ticketRequest) {
 }
 
 function markTicketResponse(ticketRequest, userId) {
-  if (!ticketRequest || ticketRequest.archivedAt || ticketRequest.completedAt) return;
-  if (userId !== ticketRequest.userId) return;
+  if (!ticketRequest || ticketRequest.archivedAt || ticketRequest.completedAt) return null;
+  if (userId !== ticketRequest.userId) return null;
 
   const now = Date.now();
   if (!ticketRequest.firstMemberResponseAt) ticketRequest.firstMemberResponseAt = now;
@@ -834,6 +818,7 @@ function markTicketResponse(ticketRequest, userId) {
   clearTicketNoResponseReminder(ticketRequest.channelId);
   clearTicketCleanup(ticketRequest.channelId);
   saveRequests();
+  return now;
 }
 
 function isActiveTicketRequest(ticketRequest) {
@@ -2766,7 +2751,7 @@ function buildInviteGiveawayModal() {
   const rewardInput = new TextInputBuilder()
     .setCustomId('invite_giveaway_reward')
     .setLabel('Compte à gagner')
-    .setPlaceholder('Exemple : compte McDonald’s 50-74 pts')
+    .setPlaceholder('Exemple : compte McD0nald’s 50-74 pts')
     .setStyle(TextInputStyle.Short)
     .setRequired(true)
     .setMinLength(2)
@@ -2848,11 +2833,88 @@ function buildInviteGiveawayWinnerEmbed(giveaway, winnerId) {
     .setTimestamp();
 }
 
+function buildInviteGiveawayWinnerContent(winnerId) {
+  return `🎉 GG <@${winnerId}>, tu as gagné le Giveaway !`;
+}
+
 function buildInviteGiveawayAnnouncementContent(giveaway) {
   return [
     '@everyone',
     giveaway.announcementMessage || null
   ].filter(Boolean).join('\n\n');
+}
+
+function trackInviteGiveawayProgressMessage(giveaway, inviterId, message) {
+  if (!giveaway || !message?.id || !message.channelId) return;
+  if (!Array.isArray(giveaway.progressMessages)) giveaway.progressMessages = [];
+
+  giveaway.progressMessages.push({
+    messageId: message.id,
+    channelId: message.channelId,
+    inviterId,
+    createdAt: Date.now()
+  });
+
+  giveaway.progressMessages = giveaway.progressMessages.slice(-100);
+}
+
+function inviteGiveawayProgressMessageInviterId(message) {
+  const embed = message?.embeds?.find(item => item?.title === '🎁 Progression giveaway invite');
+  const description = embed?.description || '';
+  return description.match(/<@!?(\d+)>/)?.[1] || null;
+}
+
+function isInviteGiveawayProgressMessage(message) {
+  return Boolean(
+    message?.author?.id === client.user?.id &&
+    message.embeds?.some(embed => embed?.title === '🎁 Progression giveaway invite')
+  );
+}
+
+async function cleanupInviteGiveawayProgressMessages(giveaway, channel, winnerId) {
+  if (!channel?.messages?.fetch || !winnerId) return { deleted: 0, keptWinner: false };
+
+  const trackedMessages = Array.isArray(giveaway?.progressMessages) ? giveaway.progressMessages : [];
+  const sortedWinnerTracked = trackedMessages
+    .filter(reference => reference.inviterId === winnerId && reference.channelId === channel.id)
+    .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+  let keepWinnerMessageId = sortedWinnerTracked[0]?.messageId || null;
+  let deletedCount = 0;
+
+  for (const reference of trackedMessages.filter(reference => reference.channelId === channel.id)) {
+    if (reference.messageId === keepWinnerMessageId) continue;
+
+    const message = await channel.messages.fetch(reference.messageId).catch(() => null);
+    if (!message || !isInviteGiveawayProgressMessage(message)) continue;
+
+    const inviterId = reference.inviterId || inviteGiveawayProgressMessageInviterId(message);
+    if (inviterId === winnerId && !keepWinnerMessageId) {
+      keepWinnerMessageId = message.id;
+      continue;
+    }
+
+    await message.delete().then(() => { deletedCount += 1; }).catch(() => {});
+  }
+
+  const recentMessages = await channel.messages.fetch({ limit: 100 }).catch(() => null);
+  if (recentMessages) {
+    const progressMessages = recentMessages
+      .filter(isInviteGiveawayProgressMessage)
+      .sort((a, b) => Number(b.createdTimestamp || 0) - Number(a.createdTimestamp || 0));
+
+    const winnerProgress = progressMessages.find(message => inviteGiveawayProgressMessageInviterId(message) === winnerId);
+    if (!keepWinnerMessageId && winnerProgress) keepWinnerMessageId = winnerProgress.id;
+
+    for (const message of progressMessages.values()) {
+      if (message.id === keepWinnerMessageId) continue;
+      await message.delete().then(() => { deletedCount += 1; }).catch(() => {});
+    }
+  }
+
+  return {
+    deleted: deletedCount,
+    keptWinner: Boolean(keepWinnerMessageId)
+  };
 }
 
 async function fetchInviteGiveawayChannel() {
@@ -2870,7 +2932,9 @@ async function startInviteGiveaway({ guild, ownerUser, reward, requiredInvites, 
     announcementMessage: announcementMessage || null,
     createdBy: ownerUser.id,
     startedAt: Date.now(),
-    entries: []
+    entries: [],
+    progressMessages: [],
+    announcementMessageId: null
   };
 
   inviteGiveawayState.active = giveaway;
@@ -2878,7 +2942,7 @@ async function startInviteGiveaway({ guild, ownerUser, reward, requiredInvites, 
 
   const giveawayChannel = await fetchInviteGiveawayChannel();
   if (giveawayChannel?.send) {
-    await giveawayChannel.send({
+    const announcement = await giveawayChannel.send({
       content: buildInviteGiveawayAnnouncementContent(giveaway),
       embeds: [buildInviteGiveawayStartEmbed(giveaway, guild)],
       allowedMentions: { parse: ['everyone'] }
@@ -2886,6 +2950,12 @@ async function startInviteGiveaway({ guild, ownerUser, reward, requiredInvites, 
       `Salon : <#${INVITE_GIVEAWAY_CHANNEL_ID}>`,
       `Giveaway : **${giveaway.id}**`
     ]));
+
+    if (announcement?.id) {
+      giveaway.announcementMessageId = announcement.id;
+      inviteGiveawayState.active = giveaway;
+      saveInviteGiveawayState();
+    }
   }
 
   await sendAdminLog('🎁 Giveaway invite lancé', [
@@ -2944,9 +3014,15 @@ async function recordInviteGiveawayJoin(member, referral) {
     inviteGiveawayState.active = null;
     saveInviteGiveawayState();
 
+    const cleanupResult = giveawayChannel
+      ? await cleanupInviteGiveawayProgressMessages(completedGiveaway, giveawayChannel, winnerRow.inviterId)
+      : { deleted: 0, keptWinner: false };
+
     if (giveawayChannel?.send) {
       await giveawayChannel.send({
-        embeds: [buildInviteGiveawayWinnerEmbed(completedGiveaway, winnerRow.inviterId)]
+        content: buildInviteGiveawayWinnerContent(winnerRow.inviterId),
+        embeds: [buildInviteGiveawayWinnerEmbed(completedGiveaway, winnerRow.inviterId)],
+        allowedMentions: { users: [winnerRow.inviterId] }
       }).catch(() => {});
     }
 
@@ -2966,6 +3042,8 @@ async function recordInviteGiveawayJoin(member, referral) {
       `Gagnant : <@${winnerRow.inviterId}>`,
       `Récompense : **${completedGiveaway.reward}**`,
       `Invitations : **${winnerRow.count}/${completedGiveaway.requiredInvites}**`,
+      `Classements supprimés : **${cleanupResult.deleted}**`,
+      cleanupResult.keptWinner ? 'Classement vainqueur : conservé' : 'Classement vainqueur : aucun message précédent à conserver',
       `Salon : <#${INVITE_GIVEAWAY_CHANNEL_ID}>`
     ], 0x2ECC71);
 
@@ -2975,9 +3053,14 @@ async function recordInviteGiveawayJoin(member, referral) {
   saveInviteGiveawayState();
 
   if (giveawayChannel?.send) {
-    await giveawayChannel.send({
+    const progressMessage = await giveawayChannel.send({
       embeds: [buildInviteGiveawayProgressEmbed(giveaway, referral.inviterId, member)]
     }).catch(() => {});
+
+    if (progressMessage?.id) {
+      trackInviteGiveawayProgressMessage(giveaway, referral.inviterId, progressMessage);
+      saveInviteGiveawayState();
+    }
   }
 
   return giveaway;
@@ -3311,7 +3394,7 @@ const DEFAULT_PRODUCTS = [
 ];
 
 function productLabelFromRange(rangeLabel) {
-  return `McDonald's ${rangeLabel} Points`;
+  return `McD0nald's ${rangeLabel} Points`;
 }
 
 function parseProductRangeInput(value) {
@@ -3652,7 +3735,7 @@ function productPointsLabel(product) {
   if (product?.rangeLabel) return `${product.rangeLabel} pts`;
 
   return product.label
-    .replace(/^McDonald'?s\s*/i, '')
+    .replace(/^McD[0\x6f]nald[’']?s\s*/i, '')
     .replace(/\s+Points$/i, ' pts');
 }
 
@@ -3661,7 +3744,7 @@ function productSelectOption(product) {
     label: productPointsLabel(product).slice(0, 100),
     description: `Prix : ${formatProductPrice(product.value, { includeDiscount: false, ignoreAvailability: true })}`.slice(0, 100),
     value: product.value,
-    emoji: MCDONALDS_BUTTON_EMOJI
+    emoji: MCD0NALDS_BUTTON_EMOJI
   };
 }
 
@@ -3708,8 +3791,8 @@ function buildProductCatalogEditorComponents() {
 function buildProductCatalogEditorEmbed(guild) {
   return new EmbedBuilder()
     .setColor(0xD4AF37)
-    .setAuthor({ name: 'Catalogue McDonald\'s', iconURL: guild.iconURL({ dynamic: true }) })
-    .setTitle(`Modifier les produits ${MCDONALDS_EMOJI}`)
+    .setAuthor({ name: 'Catalogue McD0nald\'s', iconURL: guild.iconURL({ dynamic: true }) })
+    .setTitle(`Modifier les produits ${MCD0NALDS_EMOJI}`)
     .setDescription([
       'Ajoute une nouvelle gamme ou modifie une gamme existante.',
       '',
@@ -3768,7 +3851,7 @@ function stockSelectOption(product) {
     label: `${available ? 'Disponible' : 'Indisponible'} - ${productPointsLabel(product)} ${productStockLabel(product.value)}`.slice(0, 100),
     description: 'Clique pour modifier le nombre en stock. 0 = indisponible.',
     value: product.value,
-    emoji: MCDONALDS_BUTTON_EMOJI
+    emoji: MCD0NALDS_BUTTON_EMOJI
   };
 }
 
@@ -3781,8 +3864,8 @@ function buildStockEditorEmbed(guild) {
 
   return new EmbedBuilder()
     .setColor(0xD4AF37)
-    .setAuthor({ name: 'Stock McDonald\'s', iconURL: guild.iconURL({ dynamic: true }) })
-    .setTitle(`Gestion du stock ${MCDONALDS_EMOJI}`)
+    .setAuthor({ name: 'Stock McD0nald\'s', iconURL: guild.iconURL({ dynamic: true }) })
+    .setTitle(`Gestion du stock ${MCD0NALDS_EMOJI}`)
     .setDescription([
       'Sélectionne un produit pour changer son état.',
       '',
@@ -3820,7 +3903,7 @@ function buildProductStockModal(product) {
 }
 
 function productMenuLabel(product) {
-  const label = `McDonald's ${product.rangeLabel || productPointsLabel(product).replace(/\s*pts$/i, '')} pts`;
+  const label = `McD0nald's ${product.rangeLabel || productPointsLabel(product).replace(/\s*pts$/i, '')} pts`;
   return `${label} ${productStockLabel(product.value)}`.slice(0, 100);
 }
 
@@ -3833,12 +3916,12 @@ function productOrderSelectOption(product) {
     label: productMenuLabel(product),
     description: productMenuDescription(product),
     value: product.value,
-    emoji: MCDONALDS_BUTTON_EMOJI
+    emoji: MCD0NALDS_BUTTON_EMOJI
   };
 }
 
 function buildProductOrderRows() {
-  return buildProductSelectRows('produits', 'Choisir un produit McDonald’s...', productOrderSelectOption, availableProducts());
+  return buildProductSelectRows('produits', 'Choisir un produit McD0nald’s...', productOrderSelectOption, availableProducts());
 }
 
 const ticketAllow = [
@@ -4152,6 +4235,62 @@ async function moveRelancedTicketToCategory(channel, reason = 'Ticket relancé a
   }
 
   return moveTicketChannelToCategoryBottom(channel, reason);
+}
+
+async function restoreRelancedRechargeTicketAfterMemberResponse(channel, ticketRequest, respondedAt = Date.now(), memberUser = null) {
+  const wasRelanced = Boolean(
+    ticketRequest?.type === 'recharge' &&
+    !ticketRequest.archivedAt &&
+    !ticketRequest.completedAt &&
+    (ticketRequest.noResponseReminderSentAt || channel?.parentId === TICKET_RELANCE_CATEGORY)
+  );
+
+  if (!wasRelanced || !channel?.guild || typeof channel.setParent !== 'function') return false;
+
+  ticketRequest.noResponseReminderAnsweredAt = respondedAt;
+  delete ticketRequest.noResponseReminderSentAt;
+  delete ticketRequest.noResponseReminderAt;
+  delete ticketRequest.noResponseCloseAt;
+  clearTicketNoResponseReminder(ticketRequest.channelId);
+  clearTicketCleanup(ticketRequest.channelId);
+
+  if (channel.parentId !== TICKET_CATEGORY) {
+    await channel.setParent(TICKET_CATEGORY, { lockPermissions: false })
+      .catch(error => reportCrash('Retour ticket relancé vers Recharge de solde impossible', error, [
+        `Ticket : ${logChannel(channel)}`,
+        `Catégorie demandée : **${TICKET_CATEGORY}**`,
+        ticketRequest ? `Demande : **${ticketRequest.id}**` : null
+      ].filter(Boolean)));
+  }
+
+  await channel.permissionOverwrites.set(restoreTicketPermissionOverwrites(channel.guild, ticketRequest, ticketRequest.userId))
+    .catch(error => reportCrash('Permissions recharge après relance impossibles', error, [
+      `Ticket : ${logChannel(channel)}`,
+      `Demande : **${ticketRequest.id}**`
+    ]));
+
+  await renameTicketChannelState(channel, ticketRequest, 'attente-preuve');
+  upsertTicketHistory(ticketRequest);
+  saveRequests();
+
+  await channel.send([
+    '✅ **Réponse reçue après relance**',
+    '',
+    `👤 Membre : <@${ticketRequest.userId}>`,
+    `🧾 Demande : **${ticketRequest.id}**`,
+    `Réponse reçue : <t:${Math.floor(respondedAt / 1000)}:f>`,
+    '',
+    'Le ticket a été replacé dans **Recharge de solde** en attente de preuve.'
+  ].join('\n')).catch(() => {});
+
+  await sendAdminLog('✅ Ticket recharge sorti de relance', [
+    memberUser ? `Membre : ${logUser(memberUser)}` : `Membre : <@${ticketRequest.userId}>`,
+    `Demande : **${ticketRequest.id}**`,
+    `Ticket : ${logChannel(channel)}`,
+    `Réponse : <t:${Math.floor(respondedAt / 1000)}:f>`
+  ], 0x2ECC71);
+
+  return true;
 }
 
 function rechargeReminderDmMessage(ticketRequest, closeAt) {
@@ -4662,11 +4801,15 @@ function buildTicketChannelName(state, baseName, ticketRequest = null) {
   const stateName = state === 'attente-screen' ? 'attente-preuve' : state;
   const cleanBaseName = sanitizeChannelName(baseName);
   const shouldAddDate = ticketRequest?.type === 'recharge'
+    || (ticketRequest?.type === 'support' && stateName === 'support')
     || (ticketRequest?.type === 'commande' && stateName === 'termine');
   const shouldAddArchiveDate = stateName === 'archive-recharge' || stateName === 'archive-support';
+  const dateSource = ticketRequest?.type === 'recharge' && stateName === 'attente-preuve' && ticketRequest.noResponseReminderAnsweredAt
+    ? ticketRequest.noResponseReminderAnsweredAt
+    : ticketRequest?.createdAt;
   const dateSuffix = shouldAddDate
     || shouldAddArchiveDate
-    ? `-${ticketChannelDateSlug(ticketRequest.createdAt)}`
+    ? `-${ticketChannelDateSlug(dateSource)}`
     : '';
 
   return `${stateName}-${cleanBaseName}${dateSuffix}`.slice(0, 100);
@@ -4686,7 +4829,7 @@ function ticketStateForRequest(ticketRequest) {
     if (ticketRequest.noResponseReminderSentAt) return 'relance';
     return 'attente-preuve';
   }
-  if (ticketRequest?.type === 'support') return 'attente-client';
+  if (ticketRequest?.type === 'support') return 'support';
   return 'ticket';
 }
 
@@ -4945,7 +5088,7 @@ function productListText(options = {}) {
         ? product.label.replace(/\b\d+-\d+\b/g, match => `**${match}**`)
         : product.label;
 
-      return `${MCDONALDS_EMOJI} ${label} → **${formatProductPrice(product.value)}**`;
+      return `${MCD0NALDS_EMOJI} ${label} → **${formatProductPrice(product.value)}**`;
     })
     .join('\n');
 }
@@ -4984,7 +5127,7 @@ function buildTariffEmbed(guild) {
   const embed = new EmbedBuilder()
     .setColor(0xD4AF37)
     .setAuthor({ name: 'La Rent’a', iconURL: guild.iconURL({ dynamic: true }) })
-    .setTitle(`Tarifs McDonald’s ${MCDONALDS_EMOJI}`)
+    .setTitle(`Tarifs McD0nald’s ${MCD0NALDS_EMOJI}`)
     .setDescription([
       'Liste des produits actuellement disponibles.',
       'Les prix affichés suivent automatiquement les changements de tarifs et le stock.',
@@ -4994,7 +5137,7 @@ function buildTariffEmbed(guild) {
         : '💰 Prix débités automatiquement du portefeuille.'
     ].join('\n'))
     .setThumbnail(guild.iconURL({ dynamic: true }))
-    .setFooter({ text: 'McDonald’s • Solde obligatoire avant commande' })
+    .setFooter({ text: 'McD0nald’s • Solde obligatoire avant commande' })
     .setTimestamp();
 
   if (!tariffLines.length) {
@@ -5282,7 +5425,7 @@ function buildHelpEmbed(guild) {
           ['support', 'affiche le panneau support public.'],
           ['guide', 'affiche le guide public pour recharger et commander.'],
           ['regles', 'affiche le règlement public avec le bouton d’acceptation.'],
-          ['tarifs', 'affiche la grille publique des prix McDonald’s.'],
+          ['tarifs', 'affiche la grille publique des prix McD0nald’s.'],
           ['mdp', 'affiche le panneau public des moyens de paiement.'],
           ['parrainage', 'affiche le panneau public parrainage et ses boutons.'],
           ['avis', 'affiche le message public pour laisser un avis.']
@@ -5310,7 +5453,7 @@ function buildHelpEmbed(guild) {
         name: 'Owner - boutique',
         value: helpCommandLines([
           ['prix', 'modifie les tarifs via boutons et formulaire.'],
-          ['produits', 'ajoute ou modifie les gammes McDonald’s et leurs prix.'],
+          ['produits', 'ajoute ou modifie les gammes McD0nald’s et leurs prix.'],
           ['stock', 'affiche les produits en menu pour les rendre disponibles ou indisponibles.'],
           ['reduc nombre', 'applique une réduction globale à la boutique.'],
           ['resetreduc', 'retire la réduction globale.'],
@@ -5354,7 +5497,7 @@ function buildGuideFaqEmbed(guild) {
     .setTitle('Questions fréquentes')
     .setDescription([
       '**Où commander ?**',
-      `Tout se passe dans <#${SHOP_CHANNEL_ID}> avec le bouton **Commander ${MCDONALDS_EMOJI}**.`,
+      `Tout se passe dans <#${SHOP_CHANNEL_ID}> avec le bouton **Commander ${MCD0NALDS_EMOJI}**.`,
       '',
       '**Comment recharger ?**',
       'Clique sur **Recharger le solde**, indique le montant/date/heure, puis choisis PayPal, Revolut ou virement.',
@@ -5548,7 +5691,7 @@ function buildAvailabilityMessage(slot) {
   return [
     '@everyone',
     '',
-    `${MCDONALDS_EMOJI} **${slot.title}**`,
+    `${MCD0NALDS_EMOJI} **${slot.title}**`,
     '',
     ...slot.lines,
     '',
@@ -5670,8 +5813,9 @@ async function announceBotChangelog() {
     embeds: [
       new EmbedBuilder()
         .setColor(0xD4AF37)
-        .setTitle('🛠️ Modifications appliquées au bot')
+        .setTitle('🛠️ Modifications appliquées à ce redémarrage')
         .setDescription(description)
+        .setFooter({ text: `Lot actuel uniquement • ${BOT_CHANGELOG_VERSION}` })
         .setTimestamp()
     ]
   });
@@ -6406,13 +6550,24 @@ client.on('messageCreate', async message => {
 
   if (message.guild) {
     const ticketRequest = getTicketRequest(message.channel.id);
-    if (ticketRequest) markTicketResponse(ticketRequest, message.author.id);
+    if (ticketRequest) {
+      const memberResponseAt = markTicketResponse(ticketRequest, message.author.id);
+      if (memberResponseAt) {
+        await restoreRelancedRechargeTicketAfterMemberResponse(message.channel, ticketRequest, memberResponseAt, message.author);
+      }
+    }
   }
 
   if (!message.guild) {
     const dmRequest = findOpenRechargeRequestByUser(message.author.id);
 
     if (!dmRequest) return;
+
+    const memberResponseAt = markTicketResponse(dmRequest, message.author.id) || Date.now();
+    const adminChannel = await client.channels.fetch(dmRequest.channelId).catch(() => null);
+    if (adminChannel) {
+      await restoreRelancedRechargeTicketAfterMemberResponse(adminChannel, dmRequest, memberResponseAt, message.author);
+    }
 
     if (message.attachments.size === 0) {
       return message.channel.send('📸 Envoie ici le screenshot de ton paiement pour ta recharge en cours.');
@@ -6421,11 +6576,8 @@ client.on('messageCreate', async message => {
     const screenshotUrl = message.attachments.first()?.url || null;
     dmRequest.screenshotReceivedAt = Date.now();
     dmRequest.screenshotUrl = screenshotUrl;
-    markTicketResponse(dmRequest, message.author.id);
     saveRequests();
     upsertTicketHistory(dmRequest);
-
-    const adminChannel = await client.channels.fetch(dmRequest.channelId).catch(() => null);
 
     if (adminChannel) {
       await renameTicketChannelState(adminChannel, dmRequest, 'a-verifier');
@@ -6584,16 +6736,16 @@ client.on('messageCreate', async message => {
     const embed = new EmbedBuilder()
       .setColor(0xD4AF37)
       .setAuthor({ name: 'La Rent’a', iconURL: message.guild.iconURL({ dynamic: true }) })
-      .setTitle(`La Rent'a - Boutique McDonald's ${MCDONALDS_EMOJI}`)
+      .setTitle(`La Rent'a - Boutique McD0nald's ${MCD0NALDS_EMOJI}`)
       .setDescription([
         '**Bienvenue sur la boutique officielle.**',
         '',
-        'Gère ton portefeuille, recharge ton solde, puis choisis ton produit McDonald’s en quelques clics.',
+        'Gère ton portefeuille, recharge ton solde, puis choisis ton produit McD0nald’s en quelques clics.',
         '',
         '👛 **Portefeuille** — consulte ton solde actuel.',
         '💳 **Recharger** — ajoute du solde via PayPal, Revolut ou virement.',
-        `${MCDONALDS_EMOJI} **Commander** — ouvre la sélection des produits disponibles.`,
-        '🎁 **Fidélité Mcdo** — affiche les infos du programme fidélité.',
+        `${MCD0NALDS_EMOJI} **Commander** — ouvre la sélection des produits disponibles.`,
+        '🎁 **Fidélité McD0** — affiche les infos du programme fidélité.',
         '',
         'Clique sur **Commander** pour voir les produits et leurs prix.',
         'Le montant sera retiré automatiquement de ton portefeuille.',
@@ -6606,8 +6758,8 @@ client.on('messageCreate', async message => {
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('wallet').setLabel('Portefeuille').setEmoji('👛').setStyle(ButtonStyle.Danger),
       new ButtonBuilder().setCustomId('recharger').setLabel('Recharger le solde').setEmoji('➕').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId('commande').setLabel('Commander').setEmoji(MCDONALDS_BUTTON_EMOJI).setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId('infos_points').setLabel('Fidélité Mcdo').setEmoji('🎁').setStyle(ButtonStyle.Secondary)
+      new ButtonBuilder().setCustomId('commande').setLabel('Commander').setEmoji(MCD0NALDS_BUTTON_EMOJI).setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('infos_points').setLabel('Fidélité McD0').setEmoji('🎁').setStyle(ButtonStyle.Secondary)
     );
 
     return message.channel.send({ embeds: [embed], components: [row] });
@@ -6666,7 +6818,7 @@ client.on('messageCreate', async message => {
         '',
         'Clique sur le bouton ci-dessous pour ouvrir un ticket.'
       ].join('\n'))
-      .setFooter({ text: 'Support • Boutique McDonald\'s' });
+      .setFooter({ text: 'Support • Boutique McD0nald\'s' });
 
     const supportRow = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
@@ -6711,15 +6863,15 @@ client.on('messageCreate', async message => {
         '',
         '7. Un administrateur vérifie puis crédite ton portefeuille.',
         '',
-        `**Commander ${MCDONALDS_EMOJI}**`,
+        `**Commander ${MCD0NALDS_EMOJI}**`,
         '',
         `1. Va dans <#${SHOP_CHANNEL_ID}>.`,
         '',
         '2. Clique sur **Portefeuille 👛** pour vérifier ton solde.',
         '',
-        `3. Clique sur **Commander ${MCDONALDS_EMOJI}**.`,
+        `3. Clique sur **Commander ${MCD0NALDS_EMOJI}**.`,
         '',
-        '4. Choisis ton McDonald’s dans le menu.',
+        '4. Choisis ton McD0nald’s dans le menu.',
         '',
         '5. Si ton solde est suffisant, un ticket privé est créé pour ta commande.',
         '',
@@ -6823,8 +6975,8 @@ client.on('messageCreate', async message => {
 
     const embed = new EmbedBuilder()
       .setColor(0xD4AF37)
-      .setAuthor({ name: 'Tarifs McDonald\'s', iconURL: message.guild.iconURL({ dynamic: true }) })
-      .setTitle(`Modifier les prix ${MCDONALDS_EMOJI}`)
+      .setAuthor({ name: 'Tarifs McD0nald\'s', iconURL: message.guild.iconURL({ dynamic: true }) })
+      .setTitle(`Modifier les prix ${MCD0NALDS_EMOJI}`)
       .setDescription([
         'Choisis le produit à modifier.',
         '',
@@ -7064,7 +7216,7 @@ client.on('messageCreate', async message => {
   if (message.content === '!mdp') {
     const paymentEmbed = new EmbedBuilder()
       .setColor(0xD4AF37)
-      .setAuthor({ name: 'Boutique McDonald\'s', iconURL: message.guild.iconURL({ dynamic: true }) })
+      .setAuthor({ name: 'Boutique McD0nald\'s', iconURL: message.guild.iconURL({ dynamic: true }) })
       .setTitle('Moyens de paiement 💳')
       .setDescription([
         '**Voici les moyens disponibles pour recharger ton solde.**',
@@ -8467,15 +8619,16 @@ client.on(Events.InteractionCreate, async interaction => {
       if (!ticketConfirmation.confirmed) return;
       const responseInteraction = ticketConfirmation.interaction;
       const channelBaseName = sanitizeChannelName(interaction.user.username);
+      const createdAt = Date.now();
 
       const ticket = await interaction.guild.channels.create({
-        name: buildTicketChannelName('attente-client', channelBaseName),
+        name: buildTicketChannelName('support', channelBaseName, { type: 'support', createdAt }),
         parent: SUPPORT_CATEGORY,
         type: ChannelType.GuildText,
         permissionOverwrites: supportTicketPermissionOverwrites(interaction.guild, interaction.user.id)
       });
 
-      const request = createRequest('support', ticket.id, interaction.user.id, { channelBaseName });
+      const request = createRequest('support', ticket.id, interaction.user.id, { channelBaseName, createdAt });
       await ticket.send({
         content: `🚨 Ticket support
 
@@ -8527,9 +8680,9 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.customId === 'infos_points') {
       const infoEmbed = new EmbedBuilder()
         .setColor(0xD4AF37)
-        .setTitle('Programme de Fidélité Mcdo');
+        .setTitle('Programme de Fidélité McD0');
       if (INFO_IMAGE) infoEmbed.setImage(INFO_IMAGE);
-      sendActionLog(interaction.member, '🎁 Fidélité Mcdo consultée', [
+      sendActionLog(interaction.member, '🎁 Fidélité McD0 consultée', [
         `Membre : ${logUser(interaction.user)}`,
         `Salon : ${logChannel(interaction.channel)}`
       ], 0x3498DB);
@@ -8593,7 +8746,7 @@ client.on(Events.InteractionCreate, async interaction => {
       const orderRows = buildProductOrderRows();
       const orderEmbed = new EmbedBuilder()
         .setColor(0xD4AF37)
-        .setTitle(`Boutique McDonald's ${MCDONALDS_EMOJI}`)
+        .setTitle(`Boutique McD0nald's ${MCD0NALDS_EMOJI}`)
         .setDescription(orderRows.length
           ? [
               'Sélectionne le produit que tu veux commander.',
@@ -8603,7 +8756,7 @@ client.on(Events.InteractionCreate, async interaction => {
               'Le montant sera retiré automatiquement de ton portefeuille après ton choix.'
             ].join('\n')
           : [
-              'Aucun produit McDonald’s n’est disponible pour le moment.',
+              'Aucun produit McD0nald’s n’est disponible pour le moment.',
               '',
               'Reviens plus tard ou ouvre un ticket support si besoin.'
             ].join('\n'))
@@ -8965,7 +9118,7 @@ client.on(Events.InteractionCreate, async interaction => {
     setProductPrice(productId, price, interaction.user);
     const newPrice = getProductBasePrice(productId);
 
-    await sendAdminLog('💰 Prix McDonald’s modifié', [
+    await sendAdminLog('💰 Prix McD0nald’s modifié', [
       `Owner : ${logUser(interaction.user)}`,
       `Produit : **${product.label}**`,
       `Ancien prix : **${formatWalletAmount(oldPrice)}**`,
