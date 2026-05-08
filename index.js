@@ -103,6 +103,7 @@ const SHOP_STATS_FILE = dataPath('shop-stats.json');
 const WARNINGS_FILE = dataPath('warnings.json');
 const BOT_CHANGELOG_FILE = dataPath('bot-changelog-state.json');
 const AVAILABILITY_STATE_FILE = dataPath('availability-message-state.json');
+const TARIFF_MESSAGES_FILE = dataPath('tariff-message-state.json');
 const PRODUCT_PRICES_FILE = dataPath('product-prices.json');
 const PRODUCT_CATALOG_FILE = dataPath('product-catalog.json');
 const DISCOUNT_STATE_FILE = dataPath('discount-state.json');
@@ -119,6 +120,7 @@ const DATA_BACKUP_FILES = [
   SHOP_STATS_FILE,
   WARNINGS_FILE,
   AVAILABILITY_STATE_FILE,
+  TARIFF_MESSAGES_FILE,
   PRODUCT_PRICES_FILE,
   PRODUCT_CATALOG_FILE,
   DISCOUNT_STATE_FILE,
@@ -145,6 +147,8 @@ const BOT_CHANGELOG_ITEMS = [
   'Sauvegarde dédiée des invites/parrainages sans suppression automatique des anciens backups.',
   'Produits indisponibles retirés de la boutique publique, de Commander et des tarifs.',
   'Affichage !tarifs remis en liste continue, reliée au stock et aux prix actuels.',
+  'Message !tarifs rendu automatique : il s’édite tout seul après un changement de prix, stock, produit ou réduction.',
+  'Stock produit en quantité avec affichage 📦 dans !tarifs et Commander.',
   'Ban automatique uniquement des nouveaux membres qui rejoignent avec le lien d’une personne déjà bannie.'
 ];
 const AVAILABILITY_TIMEZONE = 'Europe/Paris';
@@ -473,6 +477,7 @@ let availabilityState = loadJsonFile(AVAILABILITY_STATE_FILE, {
   lastSlot: null,
   sentDates: {}
 });
+let tariffMessagesState = loadJsonFile(TARIFF_MESSAGES_FILE, { messages: [] });
 let productPriceOverrides = loadJsonFile(PRODUCT_PRICES_FILE, {});
 let productCatalogState = loadJsonFile(PRODUCT_CATALOG_FILE, null, { backupDir: PRODUCT_CATALOG_BACKUP_DIR });
 let discountState = loadJsonFile(DISCOUNT_STATE_FILE, { percent: 0, updatedAt: null, updatedBy: null });
@@ -518,6 +523,10 @@ if (!warnings.users) warnings.users = {};
 if (!botChangelogState.announcedVersions) botChangelogState.announcedVersions = {};
 if (typeof availabilityState.enabled !== 'boolean') availabilityState.enabled = true;
 if (!availabilityState.sentDates) availabilityState.sentDates = {};
+if (!tariffMessagesState || typeof tariffMessagesState !== 'object' || Array.isArray(tariffMessagesState)) {
+  tariffMessagesState = { messages: [] };
+}
+if (!Array.isArray(tariffMessagesState.messages)) tariffMessagesState.messages = [];
 if (!productPriceOverrides || typeof productPriceOverrides !== 'object' || Array.isArray(productPriceOverrides)) {
   productPriceOverrides = {};
 }
@@ -531,6 +540,9 @@ if (!productStockState || typeof productStockState !== 'object' || Array.isArray
 }
 if (!productStockState.unavailable || typeof productStockState.unavailable !== 'object' || Array.isArray(productStockState.unavailable)) {
   productStockState.unavailable = {};
+}
+if (!productStockState.quantities || typeof productStockState.quantities !== 'object' || Array.isArray(productStockState.quantities)) {
+  productStockState.quantities = {};
 }
 if (!paymentConfig || typeof paymentConfig !== 'object' || Array.isArray(paymentConfig)) {
   paymentConfig = { ...DEFAULT_PAYMENT_CONFIG };
@@ -550,6 +562,7 @@ const crashReportCooldowns = new Map();
 const ticketCleanupTimers = new Map();
 const ticketNoResponseReminderTimers = new Map();
 let availabilitySchedulerTimer = null;
+let tariffRefreshTimer = null;
 const CRASH_LOG_COOLDOWN = 60_000;
 
 function saveWallets() {
@@ -631,6 +644,10 @@ function saveBotChangelogState() {
 
 function saveAvailabilityState() {
   saveJsonFile(AVAILABILITY_STATE_FILE, availabilityState);
+}
+
+function saveTariffMessagesState() {
+  saveJsonFile(TARIFF_MESSAGES_FILE, tariffMessagesState);
 }
 
 function saveProductPrices() {
@@ -3389,12 +3406,51 @@ function getProduct(productId) {
   return products.find(product => product.value === productId) || null;
 }
 
+function getProductStockQuantity(productId) {
+  const quantity = Number(productStockState.quantities?.[productId]);
+  if (!Number.isFinite(quantity) || quantity < 0) return null;
+  return Math.floor(quantity);
+}
+
 function isProductAvailable(productId) {
-  return productStockState.unavailable?.[productId] !== true;
+  const quantity = getProductStockQuantity(productId);
+  return productStockState.unavailable?.[productId] !== true && quantity !== 0;
 }
 
 function availableProducts() {
   return products.filter(product => isProductAvailable(product.value));
+}
+
+function productStockLabel(productId, options = {}) {
+  const { bold = false } = options;
+  const quantity = getProductStockQuantity(productId);
+  const value = quantity === null ? '?' : String(quantity);
+
+  return bold ? `**${value}** 📦` : `${value} 📦`;
+}
+
+function parseProductStockQuantityInput(value) {
+  const quantity = Number.parseInt(String(value || '').trim(), 10);
+  return Number.isFinite(quantity) && quantity >= 0 && quantity <= 999999 ? quantity : null;
+}
+
+function setProductStockQuantity(productId, quantity, user = null) {
+  const product = getProduct(productId);
+  if (!product || !Number.isInteger(quantity) || quantity < 0) return false;
+
+  productStockState.quantities[productId] = quantity;
+  if (quantity === 0) {
+    productStockState.unavailable[productId] = true;
+  } else {
+    delete productStockState.unavailable[productId];
+  }
+
+  productStockState.updatedAt = Date.now();
+  productStockState.updatedBy = user?.id || null;
+  saveProductStock();
+  scheduleDataBackup('stock_quantity_updated', user);
+  scheduleTariffMessagesRefresh('stock_quantity_updated');
+  return true;
 }
 
 function setProductAvailability(productId, available, user) {
@@ -3403,14 +3459,17 @@ function setProductAvailability(productId, available, user) {
 
   if (available) {
     delete productStockState.unavailable[productId];
+    if (getProductStockQuantity(productId) === 0) productStockState.quantities[productId] = 1;
   } else {
     productStockState.unavailable[productId] = true;
+    productStockState.quantities[productId] = 0;
   }
 
   productStockState.updatedAt = Date.now();
   productStockState.updatedBy = user?.id || null;
   saveProductStock();
   scheduleDataBackup(available ? 'stock_product_available' : 'stock_product_unavailable', user);
+  scheduleTariffMessagesRefresh(available ? 'stock_product_available' : 'stock_product_unavailable');
   return true;
 }
 
@@ -3462,6 +3521,7 @@ function setProductPrice(productId, price, user = null) {
   refreshProductsFromCatalog();
   saveProductCatalog();
   scheduleDataBackup('product_price_changed', user);
+  scheduleTariffMessagesRefresh('product_price_changed');
   return true;
 }
 
@@ -3496,6 +3556,7 @@ function addProductToCatalog(rangeLabel, price, user = null) {
   productCatalogState.updatedBy = user?.id || null;
   refreshProductsFromCatalog();
   saveProductCatalog();
+  scheduleTariffMessagesRefresh('product_added');
   return { ok: true, product: getProduct(parsed.value) };
 }
 
@@ -3528,6 +3589,12 @@ function updateProductInCatalog(productId, rangeLabel, price, user = null) {
       saveProductStock();
     }
 
+    if (productStockState.quantities?.[oldValue] !== undefined) {
+      productStockState.quantities[product.value] = productStockState.quantities[oldValue];
+      delete productStockState.quantities[oldValue];
+      saveProductStock();
+    }
+
     if (productPriceOverrides[oldValue]) {
       delete productPriceOverrides[oldValue];
       saveProductPrices();
@@ -3538,6 +3605,7 @@ function updateProductInCatalog(productId, rangeLabel, price, user = null) {
   productCatalogState.updatedBy = user?.id || null;
   refreshProductsFromCatalog();
   saveProductCatalog();
+  scheduleTariffMessagesRefresh('product_updated');
   return { ok: true, product: getProduct(parsed.value), oldValue };
 }
 
@@ -3547,6 +3615,7 @@ function setGlobalDiscount(percent, user) {
   discountState.updatedBy = user?.id || null;
   saveDiscountState();
   scheduleDataBackup('discount_enabled', user);
+  scheduleTariffMessagesRefresh('discount_enabled');
 }
 
 function resetGlobalDiscount(user) {
@@ -3555,6 +3624,7 @@ function resetGlobalDiscount(user) {
   discountState.updatedBy = user?.id || null;
   saveDiscountState();
   scheduleDataBackup('discount_reset', user);
+  scheduleTariffMessagesRefresh('discount_reset');
 }
 
 function formatPercentValue(percent) {
@@ -3695,8 +3765,8 @@ function stockSelectOption(product) {
   const available = isProductAvailable(product.value);
 
   return {
-    label: `${available ? 'Disponible' : 'Indisponible'} - ${productPointsLabel(product)}`.slice(0, 100),
-    description: available ? 'Clique pour masquer ce produit de la boutique.' : 'Clique pour remettre le produit disponible.',
+    label: `${available ? 'Disponible' : 'Indisponible'} - ${productPointsLabel(product)} ${productStockLabel(product.value)}`.slice(0, 100),
+    description: 'Clique pour modifier le nombre en stock. 0 = indisponible.',
     value: product.value,
     emoji: MCDONALDS_BUTTON_EMOJI
   };
@@ -3718,17 +3788,40 @@ function buildStockEditorEmbed(guild) {
       '',
       '✅ Disponible',
       '❌ Indisponible',
+      '📦 Nombre en stock',
       '',
       `Produits indisponibles : **${unavailableCount}/${products.length}**`,
       '',
+      'Entre **0** pour retirer le produit de la boutique.',
       'Les produits indisponibles disparaissent de la boutique publique, de Commander et de !tarifs.'
     ].join('\n'))
     .setFooter({ text: 'Owner • Gestion du stock' });
 }
 
+function buildProductStockModal(product) {
+  const quantity = getProductStockQuantity(product.value);
+  const modal = new ModalBuilder()
+    .setCustomId(`edit_stock_modal:${product.value}`)
+    .setTitle('Modifier le stock');
+
+  const quantityInput = new TextInputBuilder()
+    .setCustomId('product_stock_quantity')
+    .setLabel('Nombre en stock')
+    .setPlaceholder('Exemple : 12 | 0 = indisponible')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMinLength(1)
+    .setMaxLength(6);
+
+  quantityInput.setValue(String(quantity === null ? (isProductAvailable(product.value) ? 1 : 0) : quantity));
+
+  modal.addComponents(new ActionRowBuilder().addComponents(quantityInput));
+  return modal;
+}
+
 function productMenuLabel(product) {
   const label = `McDonald's ${product.rangeLabel || productPointsLabel(product).replace(/\s*pts$/i, '')} pts`;
-  return label.slice(0, 100);
+  return `${label} ${productStockLabel(product.value)}`.slice(0, 100);
 }
 
 function productMenuDescription(product) {
@@ -4860,7 +4953,8 @@ function productListText(options = {}) {
 function tariffProductLine(product) {
   return [
     `**${productPointsLabel(product)}**`,
-    `**${formatProductPrice(product.value)}**`
+    `**${formatProductPrice(product.value)}**`,
+    productStockLabel(product.value, { bold: true })
   ].join('  •  ');
 }
 
@@ -4921,6 +5015,83 @@ function buildTariffEmbed(guild) {
   });
 
   return embed;
+}
+
+function registerTariffMessage(message) {
+  if (!message?.id || !message.channelId || !message.guildId) return false;
+
+  tariffMessagesState.messages = tariffMessagesState.messages
+    .filter(reference => reference.messageId !== message.id)
+    .filter(reference => reference.channelId !== message.channelId);
+
+  tariffMessagesState.messages.push({
+    guildId: message.guildId,
+    channelId: message.channelId,
+    messageId: message.id,
+    createdAt: Date.now(),
+    lastUpdatedAt: Date.now()
+  });
+
+  tariffMessagesState.messages = tariffMessagesState.messages.slice(-20);
+  saveTariffMessagesState();
+  return true;
+}
+
+async function refreshRegisteredTariffMessages(reason = 'tarifs_updated') {
+  if (!client.isReady?.() || !tariffMessagesState.messages.length) return;
+
+  const nextMessages = [];
+  const updatedAt = Date.now();
+
+  for (const reference of tariffMessagesState.messages) {
+    const channel = client.channels.cache.get(reference.channelId)
+      || await client.channels.fetch(reference.channelId).catch(() => null);
+
+    if (!channel?.guild || typeof channel.messages?.fetch !== 'function') continue;
+
+    const tariffMessage = await channel.messages.fetch(reference.messageId).catch(() => null);
+    if (!tariffMessage) continue;
+
+    const edited = await tariffMessage.edit({
+      embeds: [buildTariffEmbed(channel.guild)]
+    }).then(() => true).catch(error => {
+      reportCrash('Actualisation du message tarifs impossible', error, [
+        `Salon : ${logChannel(channel)}`,
+        `Message : **${reference.messageId}**`,
+        `Raison : \`${reason}\``
+      ]);
+      return false;
+    });
+
+    if (edited) {
+      nextMessages.push({ ...reference, lastUpdatedAt: updatedAt });
+    } else {
+      nextMessages.push(reference);
+    }
+  }
+
+  if (nextMessages.length !== tariffMessagesState.messages.length) {
+    tariffMessagesState.messages = nextMessages;
+    saveTariffMessagesState();
+    return;
+  }
+
+  tariffMessagesState.messages = nextMessages;
+  saveTariffMessagesState();
+}
+
+function scheduleTariffMessagesRefresh(reason = 'tarifs_updated') {
+  if (!tariffMessagesState.messages.length || tariffRefreshTimer) return;
+
+  tariffRefreshTimer = setTimeout(() => {
+    tariffRefreshTimer = null;
+    refreshRegisteredTariffMessages(reason)
+      .catch(error => reportCrash('Actualisation automatique des tarifs impossible', error, [
+        `Raison : \`${reason}\``
+      ]));
+  }, 1_000);
+
+  tariffRefreshTimer.unref?.();
 }
 
 async function handleProductOrder(interaction, productId) {
@@ -6637,8 +6808,9 @@ client.on('messageCreate', async message => {
   }
 
   if (message.content === '!tarifs') {
-    await message.channel.send({ embeds: [buildTariffEmbed(message.guild)] });
-    const confirm = await message.channel.send('✅ Tarifs envoyés.');
+    const tariffMessage = await message.channel.send({ embeds: [buildTariffEmbed(message.guild)] });
+    registerTariffMessage(tariffMessage);
+    const confirm = await message.channel.send('✅ Tarifs envoyés. Ce message se mettra à jour automatiquement.');
     setTimeout(() => confirm.delete().catch(() => {}), 2000);
     return;
   }
@@ -7892,26 +8064,7 @@ client.on(Events.InteractionCreate, async interaction => {
         });
       }
 
-      const available = toggleProductAvailability(productId, interaction.user);
-
-      await sendAdminLog(available ? '📦 Produit remis en stock' : '📦 Produit mis indisponible', [
-        `Owner : ${logUser(interaction.user)}`,
-        `Produit : **${product.label}**`,
-        `Nouvel état : **${available ? 'Disponible' : 'Indisponible'}**`,
-        `Salon : ${logChannel(interaction.channel)}`
-      ], available ? 0x2ECC71 : 0xE67E22);
-
-      await interaction.update({
-        embeds: [buildStockEditorEmbed(interaction.guild)],
-        components: buildStockEditorRows()
-      });
-
-      return interaction.followUp({
-        content: available
-          ? `✅ **${product.label}** est maintenant disponible dans la boutique.`
-          : `❌ **${product.label}** est maintenant retiré de la boutique, de Commander et de !tarifs.`,
-        ephemeral: true
-      });
+      return interaction.showModal(buildProductStockModal(product));
     }
 
     if (interaction.customId.startsWith('edit_price:')) {
@@ -8830,6 +8983,47 @@ client.on(Events.InteractionCreate, async interaction => {
     });
   }
 
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('edit_stock_modal:')) {
+    if (!isOwnerMember(interaction.member)) {
+      return interaction.reply({
+        content: '❌ Seul le rôle owner peut gérer le stock.',
+        ephemeral: true
+      });
+    }
+
+    const productId = interaction.customId.split(':')[1];
+    const product = getProduct(productId);
+    const quantity = parseProductStockQuantityInput(interaction.fields.getTextInputValue('product_stock_quantity'));
+
+    if (!product || quantity === null) {
+      return interaction.reply({
+        content: '❌ Stock invalide. Entre un nombre entier entre 0 et 999999.',
+        ephemeral: true
+      });
+    }
+
+    const oldQuantity = getProductStockQuantity(productId);
+    setProductStockQuantity(productId, quantity, interaction.user);
+
+    await sendAdminLog(quantity > 0 ? '📦 Stock produit modifié' : '📦 Produit mis indisponible', [
+      `Owner : ${logUser(interaction.user)}`,
+      `Produit : **${product.label}**`,
+      `Ancien stock : **${oldQuantity === null ? '?' : oldQuantity}**`,
+      `Nouveau stock : **${quantity}**`,
+      `État boutique : **${quantity > 0 ? 'Disponible' : 'Retiré de la boutique'}**`,
+      `Salon : ${logChannel(interaction.channel)}`
+    ], quantity > 0 ? 0x2ECC71 : 0xE67E22);
+
+    return interaction.reply({
+      embeds: [buildStockEditorEmbed(interaction.guild)],
+      components: buildStockEditorRows(),
+      content: quantity > 0
+        ? `✅ **${product.label}** est maintenant disponible avec **${quantity}** en stock 📦.`
+        : `❌ **${product.label}** est maintenant retiré de la boutique, de Commander et de !tarifs. Stock : **0** 📦.`,
+      ephemeral: true
+    });
+  }
+
   if (interaction.isModalSubmit() && interaction.customId === 'recharge_amount') {
     if (isMaintenanceEnabledFor(interaction.member)) {
       return replyMaintenance(interaction);
@@ -8907,26 +9101,7 @@ client.on(Events.InteractionCreate, async interaction => {
         });
       }
 
-      const available = toggleProductAvailability(productId, interaction.user);
-
-      await sendAdminLog(available ? '📦 Produit remis en stock' : '📦 Produit mis indisponible', [
-        `Owner : ${logUser(interaction.user)}`,
-        `Produit : **${product.label}**`,
-        `Nouvel état : **${available ? 'Disponible' : 'Indisponible'}**`,
-        `Salon : ${logChannel(interaction.channel)}`
-      ], available ? 0x2ECC71 : 0xE67E22);
-
-      await interaction.update({
-        embeds: [buildStockEditorEmbed(interaction.guild)],
-        components: buildStockEditorRows()
-      });
-
-      return interaction.followUp({
-        content: available
-          ? `✅ **${product.label}** est maintenant disponible dans la boutique.`
-          : `❌ **${product.label}** est maintenant retiré de la boutique, de Commander et de !tarifs.`,
-        ephemeral: true
-      });
+      return interaction.showModal(buildProductStockModal(product));
     }
 
     if (interaction.customId.startsWith('edit_price_select:')) {
