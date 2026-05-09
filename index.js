@@ -4,7 +4,6 @@ const {
   Client,
   GatewayIntentBits,
   ActionRowBuilder,
-  AttachmentBuilder,
   ButtonBuilder,
   ButtonStyle,
   EmbedBuilder,
@@ -61,19 +60,14 @@ const ARCHIVED_TICKET_TTL = 24 * 60 * 60 * 1000;
 const TICKET_NO_RESPONSE_REMINDER_DELAY = 60 * 60 * 1000;
 const TICKET_NO_RESPONSE_TTL = 4 * 60 * 60 * 1000;
 const WALLET_CONFIRMATION_TTL = 5 * 60 * 1000;
+const CLIENT_DM_BROADCAST_DELAY = 250;
 
 const SHOP_EMOJI = '🛒';
 const MCD0NALDS_EMOJI_ID = '1498440076257136830';
 const MCD0NALDS_EMOJI_NAME = '4964mcd0nalds';
 const MCD0NALDS_EMOJI = `<:${MCD0NALDS_EMOJI_NAME}:${MCD0NALDS_EMOJI_ID}>`;
 const MCD0NALDS_BUTTON_EMOJI = { id: MCD0NALDS_EMOJI_ID, name: MCD0NALDS_EMOJI_NAME };
-const KFCE_EMOJI_ID = '1502262230329331732';
-const KFCE_EMOJI_NAME = 'kfce';
-const KFCE_EMOJI = `<:${KFCE_EMOJI_NAME}:${KFCE_EMOJI_ID}>`;
-const KFCE_BUTTON_EMOJI = { id: KFCE_EMOJI_ID, name: KFCE_EMOJI_NAME };
 const INFO_IMAGE = process.env.INFO_IMAGE || 'https://i0.wp.com/direct-actu.fr/wp-content/uploads/2024/11/1725353427343-ad6c22b5-478a-412e-9c6f-8e14646acd5e_1.png?ssl=1';
-const KFCE_INFO_IMAGE_URL = process.env.KFCE_INFO_IMAGE || 'https://media.anti-crise.fr/2023/07/aout2023kfc1407202301082023S0C0kfc-1.jpg';
-const KFCE_INFO_IMAGE_FILE = path.join(__dirname, 'assets', 'kfce-fidelite.jpg');
 const PAYPAL_LINK = 'https://www.paypal.me/LaRenta23';
 const REVOLUT_LINK = 'https://revolut.me/arthur23320/pocket/vNrIna0VcG';
 const IBAN = 'FR76 2823 3000 0165 8385 8232 516';
@@ -134,13 +128,14 @@ const DATA_BACKUP_FILES = [
   PRODUCT_STOCK_FILE,
   PAYMENT_CONFIG_FILE
 ];
-const BOT_CHANGELOG_VERSION = '2026-05-08-kfce-shop';
+const BOT_CHANGELOG_VERSION = '2026-05-09-remove-second-shop-client-dm-recharge-help';
 // Garder uniquement les changements du lot en cours, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Ajout de la boutique KFCÉ séparée avec !setup 2, commande, fidélité, tarifs, prix et stock dédiés.',
-  'Le portefeuille et la recharge de solde restent communs entre McD0 et KFCÉ.',
-  'Tickets commande nommés avec la boutique mcd0/kfce et la date dès l’ouverture.',
-  'Image du programme fidélité KFCÉ configurée avec le nouveau lien.'
+  'Suppression de la boutique secondaire et retour à la boutique McD0 uniquement.',
+  'Nettoyage des boutons, commandes, tarifs, stock et fidélité liés à la boutique secondaire.',
+  'Ajout de la commande owner !dmclients pour envoyer un MP aux clients ayant déjà commandé.',
+  'Clarification du parcours recharge avec rappels visibles pour consulter les messages privés du bot.',
+  'Ajout d’un bouton Comment recharger ? sur la boutique.'
 ];
 const AVAILABILITY_TIMEZONE = 'Europe/Paris';
 const AVAILABILITY_CHECK_INTERVAL = 60_000;
@@ -555,6 +550,7 @@ const guildInviteUses = new Map();
 const crashReportCooldowns = new Map();
 const ticketCleanupTimers = new Map();
 const ticketNoResponseReminderTimers = new Map();
+const clientDmBroadcastLocks = new Set();
 let availabilitySchedulerTimer = null;
 let tariffRefreshTimer = null;
 const CRASH_LOG_COOLDOWN = 60_000;
@@ -1201,7 +1197,6 @@ function ticketHistoryRecord(ticketRequest, overrides = {}) {
   return {
     id: ticketRequest.id || overrides.id || null,
     type: ticketRequest.type || overrides.type || null,
-    shop: ticketRequest.shop || overrides.shop || null,
     channelId: ticketRequest.channelId || overrides.channelId || null,
     userId: ticketRequest.userId || overrides.userId || null,
     createdAt: ticketRequest.createdAt || overrides.createdAt || Date.now(),
@@ -3404,72 +3399,8 @@ const DEFAULT_PRODUCTS = [
   { rangeLabel: '1100-1199', value: '1100_1199', price: 67 }
 ];
 
-const DEFAULT_KFCE_PRODUCTS = [
-  { rangeLabel: '800-999', value: '800_999', price: 7 },
-  { rangeLabel: '1000-1299', value: '1000_1299', price: 8 },
-  { rangeLabel: '1300-1599', value: '1300_1599', price: 10 },
-  { rangeLabel: '1600-1799', value: '1600_1799', price: 12 },
-  { rangeLabel: '1800-1999', value: '1800_1999', price: 14 },
-  { rangeLabel: '2000-2399', value: '2000_2399', price: 16 },
-  { rangeLabel: '2450-2500', value: '2450_2500', price: 19 }
-];
-
-const PRODUCT_SHOP_MCD0 = 'mcdo';
-const PRODUCT_SHOP_KFCE = 'kfce';
-const PRODUCT_SHOPS = {
-  [PRODUCT_SHOP_MCD0]: {
-    id: PRODUCT_SHOP_MCD0,
-    setupNumber: '1',
-    name: 'McD0nald\'s',
-    nameFancy: 'McD0nald’s',
-    shortName: 'McD0',
-    ticketSlug: 'mcd0',
-    emoji: MCD0NALDS_EMOJI,
-    buttonEmoji: MCD0NALDS_BUTTON_EMOJI,
-    defaultProducts: DEFAULT_PRODUCTS,
-    orderButtonId: 'commande',
-    loyaltyButtonId: 'infos_points',
-    productSelectPrefix: 'produits',
-    color: 0xD4AF37
-  },
-  [PRODUCT_SHOP_KFCE]: {
-    id: PRODUCT_SHOP_KFCE,
-    setupNumber: '2',
-    name: 'KFCÉ',
-    nameFancy: 'KFCÉ',
-    shortName: 'KFCÉ',
-    ticketSlug: 'kfce',
-    emoji: KFCE_EMOJI,
-    buttonEmoji: KFCE_BUTTON_EMOJI,
-    defaultProducts: DEFAULT_KFCE_PRODUCTS,
-    orderButtonId: 'commande_kfce',
-    loyaltyButtonId: 'infos_points_kfce',
-    productSelectPrefix: 'produits_kfce',
-    color: 0xE4002B
-  }
-};
-
-function normalizeProductShopId(shopId) {
-  const normalized = String(shopId || '').trim().toLowerCase();
-  return PRODUCT_SHOPS[normalized] ? normalized : PRODUCT_SHOP_MCD0;
-}
-
-function productShop(shopId = PRODUCT_SHOP_MCD0) {
-  return PRODUCT_SHOPS[normalizeProductShopId(shopId)];
-}
-
-function productShopIdFromArgs(args = []) {
-  return String(args[1] || '').trim() === '2' ? PRODUCT_SHOP_KFCE : PRODUCT_SHOP_MCD0;
-}
-
-function productValueForShop(shopId, baseValue) {
-  const normalizedShopId = normalizeProductShopId(shopId);
-  const normalizedValue = String(baseValue || '').replace(/^kfce_/, '');
-  return normalizedShopId === PRODUCT_SHOP_KFCE ? `kfce_${normalizedValue}` : normalizedValue;
-}
-
-function productLabelFromRange(rangeLabel, shopId = PRODUCT_SHOP_MCD0) {
-  return `${productShop(shopId).name} ${rangeLabel} Points`;
+function productLabelFromRange(rangeLabel) {
+  return `McD0nald's ${rangeLabel} Points`;
 }
 
 function parseProductRangeInput(value) {
@@ -3494,17 +3425,15 @@ function productRangeFromLabel(label) {
   return `${Number.parseInt(match[1], 10)}-${Number.parseInt(match[2], 10)}`;
 }
 
-function normalizeProduct(product, index = 0, useLegacyPriceOverride = false, fallbackShopId = PRODUCT_SHOP_MCD0) {
-  const shopId = normalizeProductShopId(product.shop || fallbackShopId);
+function normalizeProduct(product, index = 0, useLegacyPriceOverride = false) {
   const rangeLabel = product.rangeLabel || productRangeFromLabel(product.label);
   const parsedRange = parseProductRangeInput(rangeLabel || '');
   if (!parsedRange) return null;
 
   const price = Number(product.price);
-  const baseValue = String(product.value || parsedRange.value).replace(/^kfce_/, '');
-  const value = productValueForShop(shopId, baseValue);
-  const legacyOverride = useLegacyPriceOverride && shopId === PRODUCT_SHOP_MCD0
-    ? Number(productPriceOverrides[product.value || parsedRange.value])
+  const value = parsedRange.value;
+  const legacyOverride = useLegacyPriceOverride
+    ? Number(productPriceOverrides[value])
     : NaN;
   const resolvedPrice = Number.isFinite(legacyOverride) && legacyOverride > 0
     ? legacyOverride
@@ -3513,10 +3442,9 @@ function normalizeProduct(product, index = 0, useLegacyPriceOverride = false, fa
   if (!Number.isFinite(resolvedPrice) || resolvedPrice <= 0) return null;
 
   return {
-    shop: shopId,
     value,
     rangeLabel: parsedRange.rangeLabel,
-    label: productLabelFromRange(parsedRange.rangeLabel, shopId),
+    label: productLabelFromRange(parsedRange.rangeLabel),
     description: `${formatWalletAmount(resolvedPrice)}`,
     price: Math.round(resolvedPrice * 100) / 100,
     createdAt: product.createdAt || Date.now() + index,
@@ -3532,11 +3460,12 @@ function productSortValue(product) {
 
 function normalizeProductCatalogProducts(sourceProducts) {
   const useLegacyPriceOverride = !Array.isArray(sourceProducts) || sourceProducts.length === 0;
-  const source = useLegacyPriceOverride ? DEFAULT_PRODUCTS : sourceProducts;
+  const source = (useLegacyPriceOverride ? DEFAULT_PRODUCTS : sourceProducts)
+    .filter(product => !product.shop || product.shop === 'mcdo');
   const seen = new Set();
 
   const normalizedProducts = source
-    .map((product, index) => normalizeProduct(product, index, useLegacyPriceOverride, PRODUCT_SHOP_MCD0))
+    .map((product, index) => normalizeProduct(product, index, useLegacyPriceOverride))
     .filter(Boolean)
     .filter(product => {
       if (seen.has(product.value)) return false;
@@ -3544,21 +3473,7 @@ function normalizeProductCatalogProducts(sourceProducts) {
       return true;
     });
 
-  for (const shop of Object.values(PRODUCT_SHOPS)) {
-    if (normalizedProducts.some(product => product.shop === shop.id)) continue;
-
-    for (const [index, product] of shop.defaultProducts.entries()) {
-      const normalizedProduct = normalizeProduct(product, index, false, shop.id);
-      if (!normalizedProduct || seen.has(normalizedProduct.value)) continue;
-      seen.add(normalizedProduct.value);
-      normalizedProducts.push(normalizedProduct);
-    }
-  }
-
-  return normalizedProducts.sort((a, b) => (
-    String(a.shop || '').localeCompare(String(b.shop || '')) ||
-    productSortValue(a) - productSortValue(b)
-  ));
+  return normalizedProducts.sort((a, b) => productSortValue(a) - productSortValue(b));
 }
 
 function refreshProductsFromCatalog() {
@@ -3577,24 +3492,54 @@ const shouldSeedProductCatalog = !fs.existsSync(PRODUCT_CATALOG_FILE)
   || !productCatalogState
   || !Array.isArray(productCatalogState.products)
   || productCatalogState.products.length === 0;
-const productCatalogHadKfce = Array.isArray(productCatalogState?.products)
-  && productCatalogState.products.some(product => normalizeProductShopId(product?.shop) === PRODUCT_SHOP_KFCE);
+const productCatalogHadRemovedShop = Array.isArray(productCatalogState?.products)
+  && productCatalogState.products.some(product => product?.shop && product.shop !== 'mcdo');
 let products = [];
 refreshProductsFromCatalog();
-if (shouldSeedProductCatalog || !productCatalogHadKfce) saveProductCatalog();
+if (shouldSeedProductCatalog || productCatalogHadRemovedShop) saveProductCatalog();
 
 function getProduct(productId) {
   return products.find(product => product.value === productId) || null;
 }
 
-function productsForShop(shopId = PRODUCT_SHOP_MCD0, options = {}) {
-  const normalizedShopId = normalizeProductShopId(shopId);
-  const { includeUnavailable = true } = options;
-  return products.filter(product => (
-    product.shop === normalizedShopId &&
-    (includeUnavailable || isProductAvailable(product.value))
-  ));
+function pruneProductStockState() {
+  const validProductIds = new Set(products.map(product => product.value));
+  let changed = false;
+
+  for (const productId of Object.keys(productStockState.unavailable || {})) {
+    if (validProductIds.has(productId)) continue;
+    delete productStockState.unavailable[productId];
+    changed = true;
+  }
+
+  for (const productId of Object.keys(productStockState.quantities || {})) {
+    if (validProductIds.has(productId)) continue;
+    delete productStockState.quantities[productId];
+    changed = true;
+  }
+
+  if (changed) {
+    productStockState.updatedAt = Date.now();
+    productStockState.updatedBy = null;
+    saveProductStock();
+  }
 }
+
+function pruneProductPriceOverrides() {
+  const validProductIds = new Set(products.map(product => product.value));
+  let changed = false;
+
+  for (const productId of Object.keys(productPriceOverrides || {})) {
+    if (validProductIds.has(productId)) continue;
+    delete productPriceOverrides[productId];
+    changed = true;
+  }
+
+  if (changed) saveProductPrices();
+}
+
+pruneProductStockState();
+pruneProductPriceOverrides();
 
 function getProductStockQuantity(productId) {
   const quantity = Number(productStockState.quantities?.[productId]);
@@ -3607,8 +3552,8 @@ function isProductAvailable(productId) {
   return productStockState.unavailable?.[productId] !== true && quantity !== 0;
 }
 
-function availableProducts(shopId = PRODUCT_SHOP_MCD0) {
-  return productsForShop(shopId, { includeUnavailable: false });
+function availableProducts() {
+  return products.filter(product => isProductAvailable(product.value));
 }
 
 function productStockLabel(productId, options = {}) {
@@ -3715,31 +3660,27 @@ function setProductPrice(productId, price, user = null) {
   return true;
 }
 
-function productExistsWithRange(rangeLabel, exceptProductId = null, shopId = PRODUCT_SHOP_MCD0) {
+function productExistsWithRange(rangeLabel, exceptProductId = null) {
   const parsed = parseProductRangeInput(rangeLabel);
   if (!parsed) return false;
-  const normalizedShopId = normalizeProductShopId(shopId);
-  const value = productValueForShop(normalizedShopId, parsed.value);
-  return products.some(product => product.shop === normalizedShopId && product.value === value && product.value !== exceptProductId);
+  return products.some(product => product.value === parsed.value && product.value !== exceptProductId);
 }
 
-function addProductToCatalog(rangeLabel, price, user = null, shopId = PRODUCT_SHOP_MCD0) {
-  const normalizedShopId = normalizeProductShopId(shopId);
+function addProductToCatalog(rangeLabel, price, user = null) {
   const parsed = parseProductRangeInput(rangeLabel);
   if (!parsed || !Number.isFinite(price) || price <= 0 || price > 500) {
     return { ok: false, error: 'Gamme ou prix invalide.' };
   }
 
-  if (productExistsWithRange(parsed.rangeLabel, null, normalizedShopId)) {
+  if (productExistsWithRange(parsed.rangeLabel)) {
     return { ok: false, error: 'Cette gamme existe déjà dans la boutique.' };
   }
 
   const now = Date.now();
   productCatalogState.products.push({
-    shop: normalizedShopId,
-    value: productValueForShop(normalizedShopId, parsed.value),
+    value: parsed.value,
     rangeLabel: parsed.rangeLabel,
-    label: productLabelFromRange(parsed.rangeLabel, normalizedShopId),
+    label: productLabelFromRange(parsed.rangeLabel),
     description: formatWalletAmount(price),
     price: Math.round(price * 100) / 100,
     createdAt: now,
@@ -3751,7 +3692,7 @@ function addProductToCatalog(rangeLabel, price, user = null, shopId = PRODUCT_SH
   refreshProductsFromCatalog();
   saveProductCatalog();
   scheduleTariffMessagesRefresh('product_added');
-  return { ok: true, product: getProduct(productValueForShop(normalizedShopId, parsed.value)) };
+  return { ok: true, product: getProduct(parsed.value) };
 }
 
 function updateProductInCatalog(productId, rangeLabel, price, user = null) {
@@ -3762,15 +3703,15 @@ function updateProductInCatalog(productId, rangeLabel, price, user = null) {
     return { ok: false, error: 'Produit, gamme ou prix invalide.' };
   }
 
-  if (productExistsWithRange(parsed.rangeLabel, productId, product.shop)) {
+  if (productExistsWithRange(parsed.rangeLabel, productId)) {
     return { ok: false, error: 'Cette gamme existe déjà dans la boutique.' };
   }
 
   const oldValue = product.value;
   const now = Date.now();
-  product.value = productValueForShop(product.shop, parsed.value);
+  product.value = parsed.value;
   product.rangeLabel = parsed.rangeLabel;
-  product.label = productLabelFromRange(parsed.rangeLabel, product.shop);
+  product.label = productLabelFromRange(parsed.rangeLabel);
   product.price = Math.round(price * 100) / 100;
   product.description = formatWalletAmount(product.price);
   product.updatedAt = now;
@@ -3800,7 +3741,7 @@ function updateProductInCatalog(productId, rangeLabel, price, user = null) {
   refreshProductsFromCatalog();
   saveProductCatalog();
   scheduleTariffMessagesRefresh('product_updated');
-  return { ok: true, product: getProduct(productValueForShop(product.shop, parsed.value)), oldValue };
+  return { ok: true, product: getProduct(parsed.value), oldValue };
 }
 
 function setGlobalDiscount(percent, user) {
@@ -3847,7 +3788,6 @@ function productPointsLabel(product) {
 
   return product.label
     .replace(/^McD[0\x6f]nald[’']?s\s*/i, '')
-    .replace(/^KFCÉ\s*/i, '')
     .replace(/\s+Points$/i, ' pts');
 }
 
@@ -3856,7 +3796,7 @@ function productSelectOption(product) {
     label: productPointsLabel(product).slice(0, 100),
     description: `Prix : ${formatProductPrice(product.value, { includeDiscount: false, ignoreAvailability: true })}`.slice(0, 100),
     value: product.value,
-    emoji: productShop(product.shop).buttonEmoji
+    emoji: MCD0NALDS_BUTTON_EMOJI
   };
 }
 
@@ -3881,16 +3821,14 @@ function buildProductSelectRows(customIdPrefix, placeholder, optionBuilder = pro
   return rows;
 }
 
-function buildPriceEditorRows(shopId = PRODUCT_SHOP_MCD0) {
-  const shop = productShop(shopId);
-  return buildProductSelectRows('edit_price_select', `Choisir un produit ${shop.shortName} à modifier...`, productSelectOption, productsForShop(shop.id));
+function buildPriceEditorRows() {
+  return buildProductSelectRows('edit_price_select', 'Choisir un produit McD0 à modifier...', productSelectOption, products);
 }
 
-function buildProductCatalogEditorComponents(shopId = PRODUCT_SHOP_MCD0) {
-  const shop = productShop(shopId);
+function buildProductCatalogEditorComponents() {
   const addRow = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId(`open_add_product_modal:${shop.id}`)
+      .setCustomId('open_add_product_modal')
       .setLabel('Ajouter une gamme')
       .setEmoji('➕')
       .setStyle(ButtonStyle.Success)
@@ -3898,22 +3836,20 @@ function buildProductCatalogEditorComponents(shopId = PRODUCT_SHOP_MCD0) {
 
   return [
     addRow,
-    ...buildProductSelectRows('edit_product_catalog_select', `Modifier une gamme ${shop.shortName}...`, productSelectOption, productsForShop(shop.id))
+    ...buildProductSelectRows('edit_product_catalog_select', 'Modifier une gamme McD0...', productSelectOption, products)
   ].slice(0, 5);
 }
 
-function buildProductCatalogEditorEmbed(guild, shopId = PRODUCT_SHOP_MCD0) {
-  const shop = productShop(shopId);
-  const shopProducts = productsForShop(shop.id);
+function buildProductCatalogEditorEmbed(guild) {
   return new EmbedBuilder()
-    .setColor(shop.color)
-    .setAuthor({ name: `Catalogue ${shop.name}`, iconURL: guild.iconURL({ dynamic: true }) })
-    .setTitle(`Modifier les produits ${shop.emoji}`)
+    .setColor(0xD4AF37)
+    .setAuthor({ name: 'Catalogue McD0nald’s', iconURL: guild.iconURL({ dynamic: true }) })
+    .setTitle(`Modifier les produits ${MCD0NALDS_EMOJI}`)
     .setDescription([
       'Ajoute une nouvelle gamme ou modifie une gamme existante.',
       '',
-      `Boutique : **${shop.nameFancy}**`,
-      `Produits actuels : **${shopProducts.length}**`,
+      'Boutique : **McD0nald’s**',
+      `Produits actuels : **${products.length}**`,
       '',
       'Les changements sont appliqués automatiquement à :',
       '• la boutique',
@@ -3924,11 +3860,10 @@ function buildProductCatalogEditorEmbed(guild, shopId = PRODUCT_SHOP_MCD0) {
     .setFooter({ text: 'Owner • Catalogue boutique' });
 }
 
-function buildProductCatalogModal(product = null, shopId = PRODUCT_SHOP_MCD0) {
+function buildProductCatalogModal(product = null) {
   const isEdit = Boolean(product);
-  const shop = productShop(product?.shop || shopId);
   const modal = new ModalBuilder()
-    .setCustomId(isEdit ? `edit_product_catalog_modal:${product.value}` : `add_product_catalog_modal:${shop.id}`)
+    .setCustomId(isEdit ? `edit_product_catalog_modal:${product.value}` : 'add_product_catalog_modal')
     .setTitle(isEdit ? 'Modifier une gamme' : 'Ajouter une gamme');
 
   const rangeInput = new TextInputBuilder()
@@ -3969,34 +3904,31 @@ function stockSelectOption(product) {
     label: `${available ? 'Disponible' : 'Indisponible'} - ${productPointsLabel(product)} ${productStockLabel(product.value)}`.slice(0, 100),
     description: 'Clique pour modifier le nombre en stock. 0 = indisponible.',
     value: product.value,
-    emoji: productShop(product.shop).buttonEmoji
+    emoji: MCD0NALDS_BUTTON_EMOJI
   };
 }
 
-function buildStockEditorRows(shopId = PRODUCT_SHOP_MCD0) {
-  const shop = productShop(shopId);
-  return buildProductSelectRows('toggle_stock_select', `Changer le stock ${shop.shortName}...`, stockSelectOption, productsForShop(shop.id));
+function buildStockEditorRows() {
+  return buildProductSelectRows('toggle_stock_select', 'Changer le stock McD0...', stockSelectOption, products);
 }
 
-function buildStockEditorEmbed(guild, shopId = PRODUCT_SHOP_MCD0) {
-  const shop = productShop(shopId);
-  const shopProducts = productsForShop(shop.id);
-  const unavailableCount = shopProducts.filter(product => !isProductAvailable(product.value)).length;
+function buildStockEditorEmbed(guild) {
+  const unavailableCount = products.filter(product => !isProductAvailable(product.value)).length;
 
   return new EmbedBuilder()
-    .setColor(shop.color)
-    .setAuthor({ name: `Stock ${shop.name}`, iconURL: guild.iconURL({ dynamic: true }) })
-    .setTitle(`Gestion du stock ${shop.emoji}`)
+    .setColor(0xD4AF37)
+    .setAuthor({ name: 'Stock McD0nald’s', iconURL: guild.iconURL({ dynamic: true }) })
+    .setTitle(`Gestion du stock ${MCD0NALDS_EMOJI}`)
     .setDescription([
       'Sélectionne un produit pour changer son état.',
       '',
-      `Boutique : **${shop.nameFancy}**`,
+      'Boutique : **McD0nald’s**',
       '',
       '✅ Disponible',
       '❌ Indisponible',
       '📦 Nombre en stock',
       '',
-      `Produits indisponibles : **${unavailableCount}/${shopProducts.length}**`,
+      `Produits indisponibles : **${unavailableCount}/${products.length}**`,
       '',
       'Entre **0** pour retirer le produit de la boutique.',
       'Les produits indisponibles disparaissent de la boutique publique, de Commander et de !tarifs.'
@@ -4026,8 +3958,7 @@ function buildProductStockModal(product) {
 }
 
 function productMenuLabel(product) {
-  const shop = productShop(product.shop);
-  const label = `${shop.name} ${product.rangeLabel || productPointsLabel(product).replace(/\s*pts$/i, '')} pts`;
+  const label = `McD0nald's ${product.rangeLabel || productPointsLabel(product).replace(/\s*pts$/i, '')} pts`;
   return `${label} ${productStockLabel(product.value)}`.slice(0, 100);
 }
 
@@ -4040,13 +3971,12 @@ function productOrderSelectOption(product) {
     label: productMenuLabel(product),
     description: productMenuDescription(product),
     value: product.value,
-    emoji: productShop(product.shop).buttonEmoji
+    emoji: MCD0NALDS_BUTTON_EMOJI
   };
 }
 
-function buildProductOrderRows(shopId = PRODUCT_SHOP_MCD0) {
-  const shop = productShop(shopId);
-  return buildProductSelectRows(shop.productSelectPrefix, `Choisir un produit ${shop.nameFancy}...`, productOrderSelectOption, availableProducts(shop.id));
+function buildProductOrderRows() {
+  return buildProductSelectRows('produits', 'Choisir un produit McD0nald’s...', productOrderSelectOption, availableProducts());
 }
 
 const ticketAllow = [
@@ -4922,11 +4852,6 @@ function ticketChannelDateSlug(timestamp = Date.now()) {
   return `${weekday}-${day}-${month}-${year}`.replace(/^-+/, '');
 }
 
-function ticketCommandShopSlug(ticketRequest) {
-  if (ticketRequest?.type !== 'commande') return '';
-  return productShop(ticketRequest.shop).ticketSlug;
-}
-
 function buildTicketChannelName(state, baseName, ticketRequest = null) {
   const stateName = state === 'attente-screen' ? 'attente-preuve' : state;
   const cleanBaseName = sanitizeChannelName(baseName);
@@ -4941,10 +4866,7 @@ function buildTicketChannelName(state, baseName, ticketRequest = null) {
     || shouldAddArchiveDate
     ? `-${ticketChannelDateSlug(dateSource)}`
     : '';
-  const commandShopSlug = ticketCommandShopSlug(ticketRequest);
-  const shopPrefix = commandShopSlug ? `${commandShopSlug}-` : '';
-
-  return `${stateName}-${shopPrefix}${cleanBaseName}${dateSuffix}`.slice(0, 100);
+  return `${stateName}-${cleanBaseName}${dateSuffix}`.slice(0, 100);
 }
 
 function ticketArchiveStateForRequest(ticketRequest) {
@@ -5124,6 +5046,7 @@ function rechargeInstructionMessage(request) {
   if (request.method === 'virement') {
     return [
       `🧭 **Recharge ${methodName} — Étape 2/2**`,
+      '📩 **Tu es bien dans le message privé du bot. Suis les instructions ici et réponds à ce MP avec ton screenshot.**',
       '',
       `Montant déclaré : **${request.amount}** | Demande n°**${request.id}**`,
       `Date indiquée : **${request.paymentDate || 'Non précisée'}** | Heure : **${request.paymentTime || 'Non précisée'}**`,
@@ -5143,6 +5066,7 @@ function rechargeInstructionMessage(request) {
 
   return [
     `🧭 **Recharge ${methodName} — Étape 2/2**`,
+    '📩 **Tu es bien dans le message privé du bot. Suis les instructions ici et réponds à ce MP avec ton screenshot.**',
     '',
     `Montant déclaré : **${request.amount}** | Demande n°**${request.id}**`,
     `Date indiquée : **${request.paymentDate || 'Non précisée'}** | Heure : **${request.paymentTime || 'Non précisée'}**`,
@@ -5211,9 +5135,8 @@ async function replyTemp(interaction, options, delay = DELETE_DELAY) {
 }
 
 function productListText(options = {}) {
-  const { boldRanges = false, includeUnavailable = false, shopId = PRODUCT_SHOP_MCD0 } = options;
-  const shop = productShop(shopId);
-  const listedProducts = productsForShop(shop.id, { includeUnavailable });
+  const { boldRanges = false, includeUnavailable = false } = options;
+  const listedProducts = includeUnavailable ? products : availableProducts();
 
   return listedProducts
     .map(product => {
@@ -5221,7 +5144,7 @@ function productListText(options = {}) {
         ? product.label.replace(/\b\d+-\d+\b/g, match => `**${match}**`)
         : product.label;
 
-      return `${shop.emoji} ${label} → **${formatProductPrice(product.value)}**`;
+      return `${MCD0NALDS_EMOJI} ${label} → **${formatProductPrice(product.value)}**`;
     })
     .join('\n');
 }
@@ -5253,15 +5176,14 @@ function tariffLineChunks(lines, maxLength = 950) {
   return chunks;
 }
 
-function buildTariffEmbed(guild, shopId = PRODUCT_SHOP_MCD0) {
-  const shop = productShop(shopId);
-  const sortedProducts = availableProducts(shop.id).sort((a, b) => productSortValue(a) - productSortValue(b));
+function buildTariffEmbed(guild) {
+  const sortedProducts = availableProducts().sort((a, b) => productSortValue(a) - productSortValue(b));
   const tariffLines = sortedProducts.map(tariffProductLine);
 
   const embed = new EmbedBuilder()
-    .setColor(shop.color)
+    .setColor(0xD4AF37)
     .setAuthor({ name: 'La Rent’a', iconURL: guild.iconURL({ dynamic: true }) })
-    .setTitle(`Tarifs ${shop.nameFancy} ${shop.emoji}`)
+    .setTitle(`Tarifs McD0nald’s ${MCD0NALDS_EMOJI}`)
     .setDescription([
       'Liste des produits actuellement disponibles.',
       'Les prix affichés suivent automatiquement les changements de tarifs et le stock.',
@@ -5271,7 +5193,7 @@ function buildTariffEmbed(guild, shopId = PRODUCT_SHOP_MCD0) {
         : '💰 Prix débités automatiquement du portefeuille.'
     ].join('\n'))
     .setThumbnail(guild.iconURL({ dynamic: true }))
-    .setFooter({ text: `${shop.nameFancy} • Solde obligatoire avant commande` })
+    .setFooter({ text: 'McD0nald’s • Solde obligatoire avant commande' })
     .setTimestamp();
 
   if (!tariffLines.length) {
@@ -5294,9 +5216,8 @@ function buildTariffEmbed(guild, shopId = PRODUCT_SHOP_MCD0) {
   return embed;
 }
 
-function registerTariffMessage(message, shopId = PRODUCT_SHOP_MCD0) {
+function registerTariffMessage(message) {
   if (!message?.id || !message.channelId || !message.guildId) return false;
-  const shop = productShop(shopId);
 
   tariffMessagesState.messages = tariffMessagesState.messages
     .filter(reference => reference.messageId !== message.id)
@@ -5306,7 +5227,6 @@ function registerTariffMessage(message, shopId = PRODUCT_SHOP_MCD0) {
     guildId: message.guildId,
     channelId: message.channelId,
     messageId: message.id,
-    shopId: shop.id,
     createdAt: Date.now(),
     lastUpdatedAt: Date.now()
   });
@@ -5332,7 +5252,7 @@ async function refreshRegisteredTariffMessages(reason = 'tarifs_updated') {
     if (!tariffMessage) continue;
 
     const edited = await tariffMessage.edit({
-      embeds: [buildTariffEmbed(channel.guild, reference.shopId)]
+      embeds: [buildTariffEmbed(channel.guild)]
     }).then(() => true).catch(error => {
       reportCrash('Actualisation du message tarifs impossible', error, [
         `Salon : ${logChannel(channel)}`,
@@ -5383,7 +5303,6 @@ async function handleProductOrder(interaction, productId) {
 
   const product = getProduct(productId);
   const prix = getProductPrice(productId);
-  const shop = productShop(product?.shop);
 
   if (!product || prix === undefined) {
     return replyTemp(interaction, { content: '❌ Produit introuvable.', ephemeral: true });
@@ -5465,7 +5384,6 @@ async function handleProductOrder(interaction, productId) {
   const ticket = await interaction.guild.channels.create({
     name: buildTicketChannelName('en-cours', channelBaseName, {
       type: 'commande',
-      shop: shop.id,
       createdAt
     }),
     parent: ORDER_CATEGORY,
@@ -5475,7 +5393,6 @@ async function handleProductOrder(interaction, productId) {
 
   const request = createRequest('commande', ticket.id, interaction.user.id, {
     channelBaseName,
-    shop: shop.id,
     product: product.label,
     price: prix,
     createdAt
@@ -5498,7 +5415,6 @@ async function handleProductOrder(interaction, productId) {
 
 🧾 Demande : #${request.id}
 👤 Client : <@${interaction.user.id}>
-🏬 Boutique : ${shop.nameFancy}
 📦 Produit : ${product.label}
 💰 Payé : ${prix}€
 
@@ -5521,7 +5437,6 @@ Le staff vous répondra dès que possible.`,
   sendAdminLog('🎫 Commande créée', [
     `Client : ${logUser(interaction.user)}`,
     `Demande : **${request.id}**`,
-    `Boutique : **${shop.nameFancy}**`,
     `Produit : **${product.label}**`,
     `Prix payé : **${prix}€**`,
     `Nouveau solde : **${wallets[uid].balance.toFixed(2)}€**`,
@@ -5549,25 +5464,25 @@ function buildAvisEmbed() {
     .setFooter({ text: 'Boutique' });
 }
 
-function buildShopSetupEmbed(guild, shopId = PRODUCT_SHOP_MCD0) {
-  const shop = productShop(shopId);
-
+function buildShopSetupEmbed(guild) {
   return new EmbedBuilder()
-    .setColor(shop.color)
+    .setColor(0xD4AF37)
     .setAuthor({ name: 'La Rent’a', iconURL: guild.iconURL({ dynamic: true }) })
-    .setTitle(`La Rent'a - Boutique ${shop.name} ${shop.emoji}`)
+    .setTitle(`La Rent'a - Boutique McD0nald's ${MCD0NALDS_EMOJI}`)
     .setDescription([
       '**Bienvenue sur la boutique officielle.**',
       '',
-      `Gère ton portefeuille, recharge ton solde, puis choisis ton produit ${shop.nameFancy} en quelques clics.`,
+      'Gère ton portefeuille, recharge ton solde, puis choisis ton produit McD0nald’s en quelques clics.',
       '',
       '👛 **Portefeuille** — consulte ton solde actuel.',
-      '💳 **Recharger** — ajoute du solde via PayPal, Revolut ou virement.',
-      `${shop.emoji} **Commander ${shop.shortName}** — ouvre la sélection des produits disponibles.`,
-      `🎁 **Fidélité ${shop.shortName}** — affiche les infos du programme fidélité.`,
+      '💳 **Recharger** — ajoute du solde via PayPal, Revolut ou virement. Les instructions arrivent en **message privé**.',
+      `${MCD0NALDS_EMOJI} **Commander McD0** — ouvre la sélection des produits disponibles.`,
+      '🎁 **Fidélité McD0** — affiche les infos du programme fidélité.',
       '',
       'Clique sur **Commander** pour voir les produits et leurs prix.',
       'Le montant sera retiré automatiquement de ton portefeuille.',
+      '',
+      'Pour une recharge, regarde tes **MP Discord** après avoir choisi le moyen de paiement.',
       '',
       '👇 Sélectionne une action ci-dessous.'
     ].join('\n'))
@@ -5575,23 +5490,39 @@ function buildShopSetupEmbed(guild, shopId = PRODUCT_SHOP_MCD0) {
     .setFooter({ text: 'La Rent’a • Portefeuille • Recharge • Commande' });
 }
 
-function buildShopSetupRow(shopId = PRODUCT_SHOP_MCD0) {
-  const shop = productShop(shopId);
-
+function buildShopSetupRow() {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('wallet').setLabel('Portefeuille').setEmoji('👛').setStyle(ButtonStyle.Danger),
     new ButtonBuilder().setCustomId('recharger').setLabel('Recharger le solde').setEmoji('➕').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId(shop.orderButtonId).setLabel(`Commander ${shop.shortName}`).setEmoji(shop.buttonEmoji).setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId(shop.loyaltyButtonId).setLabel(`Fidélité ${shop.shortName}`).setEmoji('🎁').setStyle(ButtonStyle.Secondary)
+    new ButtonBuilder().setCustomId('how_to_recharge').setLabel('Comment recharger ?').setEmoji('❓').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('commande').setLabel('Commander McD0').setEmoji(MCD0NALDS_BUTTON_EMOJI).setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('infos_points').setLabel('Fidélité McD0').setEmoji('🎁').setStyle(ButtonStyle.Secondary)
   );
 }
 
-function buildShopOrderEmbed(guild, shopId = PRODUCT_SHOP_MCD0, hasProducts = true) {
-  const shop = productShop(shopId);
-
+function buildHowToRechargeEmbed(guild) {
   return new EmbedBuilder()
-    .setColor(shop.color)
-    .setTitle(`Boutique ${shop.name} ${shop.emoji}`)
+    .setColor(0x3498DB)
+    .setAuthor({ name: 'Recharge de solde', iconURL: guild.iconURL({ dynamic: true }) })
+    .setTitle('Comment recharger le solde ?')
+    .setDescription([
+      '1. Clique sur **Recharger le solde**.',
+      '2. Indique le montant, la date du paiement et l’heure si possible.',
+      '3. Choisis ton moyen de paiement : PayPal, Revolut ou virement.',
+      '4. Le bot t’envoie les instructions en **message privé**.',
+      '5. Fais le paiement en respectant bien les consignes.',
+      '6. Réponds directement au MP du bot avec ton screenshot.',
+      '',
+      '📩 Si tu ne vois pas le MP, regarde tes **demandes de messages** Discord.',
+      `Si besoin, ouvre un ticket support ici : <#${SUPPORT_CHANNEL_ID}>.`
+    ].join('\n'))
+    .setFooter({ text: 'La Rent’a • Recharge en message privé' });
+}
+
+function buildShopOrderEmbed(guild, hasProducts = true) {
+  return new EmbedBuilder()
+    .setColor(0xD4AF37)
+    .setTitle(`Boutique McD0nald's ${MCD0NALDS_EMOJI}`)
     .setDescription(hasProducts
       ? [
           'Sélectionne le produit que tu veux commander.',
@@ -5601,7 +5532,7 @@ function buildShopOrderEmbed(guild, shopId = PRODUCT_SHOP_MCD0, hasProducts = tr
           'Le montant sera retiré automatiquement de ton portefeuille après ton choix.'
         ].join('\n')
       : [
-          `Aucun produit ${shop.nameFancy} n’est disponible pour le moment.`,
+          'Aucun produit McD0nald’s n’est disponible pour le moment.',
           '',
           'Reviens plus tard ou ouvre un ticket support si besoin.'
         ].join('\n'))
@@ -5609,38 +5540,10 @@ function buildShopOrderEmbed(guild, shopId = PRODUCT_SHOP_MCD0, hasProducts = tr
     .setFooter({ text: 'La Rent’a • Sélection produit' });
 }
 
-function buildLoyaltyInfoPayload(shopId = PRODUCT_SHOP_MCD0) {
-  const shop = productShop(shopId);
+function buildLoyaltyInfoPayload() {
   const infoEmbed = new EmbedBuilder()
-    .setColor(shop.color)
-    .setTitle(`Programme de Fidélité ${shop.shortName}`);
-
-  if (shop.id === PRODUCT_SHOP_KFCE) {
-    if (KFCE_INFO_IMAGE_URL) {
-      infoEmbed.setImage(KFCE_INFO_IMAGE_URL);
-      return { embeds: [infoEmbed], ephemeral: true };
-    }
-
-    if (fs.existsSync(KFCE_INFO_IMAGE_FILE)) {
-      infoEmbed.setImage('attachment://kfce-fidelite.jpg');
-      return {
-        embeds: [infoEmbed],
-        files: [new AttachmentBuilder(KFCE_INFO_IMAGE_FILE, { name: 'kfce-fidelite.jpg' })],
-        ephemeral: true
-      };
-    }
-
-    infoEmbed.setDescription([
-      '**Récompenses du programme KFCÉ**',
-      '',
-      '🎟️ **150 pts** — Bons plans',
-      '🍗 **300 pts** — Petits creux',
-      '🍪 **600 pts** — Gourmandises',
-      '🍟 **800 pts** — Menus crispy',
-      '🏆 **1000 pts** — Méga deals'
-    ].join('\n'));
-    return { embeds: [infoEmbed], ephemeral: true };
-  }
+    .setColor(0xD4AF37)
+    .setTitle('Programme de Fidélité McD0');
 
   if (INFO_IMAGE) infoEmbed.setImage(INFO_IMAGE);
   return { embeds: [infoEmbed], ephemeral: true };
@@ -5669,7 +5572,6 @@ function buildHelpEmbed(guild) {
           ['guide', 'affiche le guide public pour recharger et commander.'],
           ['regles', 'affiche le règlement public avec le bouton d’acceptation.'],
           ['tarifs', 'affiche la grille publique des prix McD0nald’s.'],
-          ['tarifs 2', 'affiche la grille publique des prix KFCÉ.'],
           ['mdp', 'affiche le panneau public des moyens de paiement.'],
           ['parrainage', 'affiche le panneau public parrainage et ses boutons.'],
           ['avis', 'affiche le message public pour laisser un avis.']
@@ -5681,7 +5583,6 @@ function buildHelpEmbed(guild) {
         value: helpCommandLines([
           ['help', 'affiche cette liste de commandes.'],
           ['setup', 'envoie le message principal de la boutique McD0.'],
-          ['setup 2', 'envoie le message principal de la boutique KFCÉ.'],
           ['clear', 'nettoie le salon où la commande est utilisée.'],
           ['warnings @membre', 'affiche les warns d’un membre.'],
           ['warn @membre raison', 'ajoute un warn manuel.'],
@@ -5698,11 +5599,8 @@ function buildHelpEmbed(guild) {
         name: 'Owner - boutique',
         value: helpCommandLines([
           ['prix', 'modifie les tarifs via boutons et formulaire.'],
-          ['prix 2', 'modifie les tarifs KFCÉ via boutons et formulaire.'],
           ['produits', 'ajoute ou modifie les gammes McD0nald’s et leurs prix.'],
-          ['produits 2', 'ajoute ou modifie les gammes KFCÉ et leurs prix.'],
           ['stock', 'affiche les produits en menu pour les rendre disponibles ou indisponibles.'],
-          ['stock 2', 'gère le stock KFCÉ.'],
           ['reduc nombre', 'applique une réduction globale à la boutique.'],
           ['resetreduc', 'retire la réduction globale.'],
           ['paiements', 'modifie PayPal, Revolut et IBAN depuis Discord.']
@@ -5716,6 +5614,7 @@ function buildHelpEmbed(guild) {
           ['maintenance on/off/status', 'active, désactive ou consulte la maintenance.'],
           ['autodispo on/off/status', 'active, coupe ou consulte les messages automatiques de 11h et 18h.'],
           ['annonce', 'ouvre un formulaire pour envoyer une annonce dans le salon des disponibilités.'],
+          ['dmclients', 'ouvre un formulaire pour envoyer un MP aux clients qui ont déjà commandé.'],
           ['giveawayinvite', 'ouvre le formulaire pour lancer un giveaway spécial invitations.'],
           ['giveawayinvite stop', 'annule le giveaway invite actif.'],
           ['backup', 'crée une sauvegarde manuelle des données importantes du bot.'],
@@ -5745,7 +5644,7 @@ function buildGuideFaqEmbed(guild) {
     .setTitle('Questions fréquentes')
     .setDescription([
       '**Où commander ?**',
-      `Tout se passe dans <#${SHOP_CHANNEL_ID}> avec le bouton **Commander ${MCD0NALDS_EMOJI}** ou **Commander KFCÉ ${KFCE_EMOJI}** selon la boutique.`,
+      `Tout se passe dans <#${SHOP_CHANNEL_ID}> avec le bouton **Commander ${MCD0NALDS_EMOJI}**.`,
       '',
       '**Comment recharger ?**',
       'Clique sur **Recharger le solde**, indique le montant/date/heure, puis choisis PayPal, Revolut ou virement.',
@@ -5791,6 +5690,150 @@ function buildAnnouncementEmbed(title, body, type) {
     .setDescription(body.slice(0, 4096))
     .setFooter({ text: `La Rent’a • Annonce ${config.label}` })
     .setTimestamp();
+}
+
+function wait(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function buildDmClientsModal(launcherId) {
+  const modal = new ModalBuilder()
+    .setCustomId(`dm_clients_modal:${launcherId}`)
+    .setTitle('MP aux clients');
+
+  const titleInput = new TextInputBuilder()
+    .setCustomId('dm_clients_title')
+    .setLabel('Titre du message')
+    .setPlaceholder('Exemple : Info boutique')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMinLength(2)
+    .setMaxLength(100);
+
+  const bodyInput = new TextInputBuilder()
+    .setCustomId('dm_clients_body')
+    .setLabel('Message à envoyer')
+    .setPlaceholder('Écris ici le message qui sera envoyé aux clients.')
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(true)
+    .setMinLength(2)
+    .setMaxLength(1800);
+
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(titleInput),
+    new ActionRowBuilder().addComponents(bodyInput)
+  );
+
+  return modal;
+}
+
+function buildClientDmEmbed(guild, title, body, senderUser) {
+  return new EmbedBuilder()
+    .setColor(0xD4AF37)
+    .setAuthor({ name: 'La Rent’a', iconURL: guild.iconURL({ dynamic: true }) })
+    .setTitle(title.slice(0, 256))
+    .setDescription(body.slice(0, 4096))
+    .setFooter({ text: `Message boutique • ${senderUser.username}` })
+    .setTimestamp();
+}
+
+function buildDmClientsPanelEmbed(guild) {
+  return new EmbedBuilder()
+    .setColor(0xD4AF37)
+    .setAuthor({ name: 'MP clients', iconURL: guild.iconURL({ dynamic: true }) })
+    .setTitle('Envoyer un MP aux clients')
+    .setDescription([
+      `Le message sera envoyé uniquement aux membres avec le rôle <@&${CUSTOMER_ROLE_ID}>.`,
+      '',
+      'Cela correspond aux membres qui ont déjà eu une commande marquée comme terminée.',
+      '',
+      'Clique sur le bouton ci-dessous pour écrire le message.'
+    ].join('\n'))
+    .setFooter({ text: 'Owner • Envoi ciblé clients' });
+}
+
+function dmClientsPanelRow(ownerId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`open_dm_clients_modal:${ownerId}`)
+      .setLabel('Écrire le MP')
+      .setEmoji('📩')
+      .setStyle(ButtonStyle.Primary)
+  );
+}
+
+async function sendDmToClientMembers(interaction, title, body) {
+  const lockKey = interaction.guildId;
+
+  if (clientDmBroadcastLocks.has(lockKey)) {
+    return interaction.editReply('❌ Un envoi MP clients est déjà en cours. Attends qu’il soit terminé.');
+  }
+
+  clientDmBroadcastLocks.add(lockKey);
+
+  try {
+    const members = await interaction.guild.members.fetch();
+    const recipients = members
+      .filter(member => !member.user.bot && member.roles.cache.has(CUSTOMER_ROLE_ID))
+      .map(member => member);
+
+    if (!recipients.length) {
+      await sendAdminLog('📩 MP clients annulé', [
+        `Owner : ${logUser(interaction.user)}`,
+        `Raison : aucun membre avec le rôle <@&${CUSTOMER_ROLE_ID}>`
+      ], 0xF1C40F);
+
+      return interaction.editReply('❌ Aucun client trouvé avec le rôle client.');
+    }
+
+    const embed = buildClientDmEmbed(interaction.guild, title, body, interaction.user);
+    let sentCount = 0;
+    let failedCount = 0;
+    const failedSamples = [];
+
+    for (const member of recipients) {
+      const sent = await member.send({ embeds: [embed] })
+        .then(() => true)
+        .catch(error => {
+          failedCount += 1;
+          if (failedSamples.length < 10) failedSamples.push(`${member.user.tag || member.user.username} (${member.id})`);
+          return false;
+        });
+
+      if (sent) sentCount += 1;
+      if (CLIENT_DM_BROADCAST_DELAY > 0) await wait(CLIENT_DM_BROADCAST_DELAY);
+    }
+
+    await sendAdminLog('📩 MP clients envoyé', [
+      `Owner : ${logUser(interaction.user)}`,
+      `Rôle ciblé : <@&${CUSTOMER_ROLE_ID}>`,
+      `Clients trouvés : **${recipients.length}**`,
+      `MP envoyés : **${sentCount}**`,
+      `MP impossibles : **${failedCount}**`,
+      failedSamples.length ? `Exemples MP fermés : ${failedSamples.join(', ')}` : null,
+      `Titre : **${title.slice(0, 200)}**`
+    ], failedCount ? 0xF1C40F : 0x2ECC71);
+
+    return interaction.editReply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(failedCount ? 0xF1C40F : 0x2ECC71)
+          .setTitle('📩 Envoi MP clients terminé')
+          .setDescription([
+            `Clients ciblés : **${recipients.length}**`,
+            `MP envoyés : **${sentCount}**`,
+            `MP impossibles : **${failedCount}**`,
+            '',
+            failedCount
+              ? 'Certains membres ont sûrement les MP fermés ou les demandes de message filtrées.'
+              : 'Tous les clients ciblés ont reçu le message.'
+          ].join('\n'))
+          .setTimestamp()
+      ]
+    });
+  } finally {
+    clientDmBroadcastLocks.delete(lockKey);
+  }
 }
 
 function buildCompletedOrderTicketEmbed(ticketRequest, dmSent) {
@@ -6980,13 +7023,10 @@ client.on('messageCreate', async message => {
     });
   }
 
-  if (message.content.trim().split(/\s+/)[0] === '!setup') {
-    const args = message.content.trim().split(/\s+/);
-    const shop = productShop(productShopIdFromArgs(args));
-
+  if (message.content === '!setup') {
     return message.channel.send({
-      embeds: [buildShopSetupEmbed(message.guild, shop.id)],
-      components: [buildShopSetupRow(shop.id)]
+      embeds: [buildShopSetupEmbed(message.guild)],
+      components: [buildShopSetupRow()]
     });
   }
 
@@ -7100,8 +7140,6 @@ client.on('messageCreate', async message => {
         '',
         '5. Si ton solde est suffisant, un ticket privé est créé pour ta commande.',
         '',
-        `Pour KFCÉ, c’est le même principe avec le bouton **Commander KFCÉ ${KFCE_EMOJI}** dans la boutique KFCÉ.`,
-        '',
         '**Accès au Général 🔒**',
         '',
         'Le salon Général est réservé aux membres ayant déjà terminé une commande.',
@@ -7186,32 +7224,28 @@ client.on('messageCreate', async message => {
     return message.channel.send({ embeds: [rulesEmbed], components: [rulesRow] });
   }
 
-  if (message.content.trim().split(/\s+/)[0] === '!tarifs') {
-    const args = message.content.trim().split(/\s+/);
-    const shop = productShop(productShopIdFromArgs(args));
-    const tariffMessage = await message.channel.send({ embeds: [buildTariffEmbed(message.guild, shop.id)] });
-    registerTariffMessage(tariffMessage, shop.id);
+  if (message.content === '!tarifs') {
+    const tariffMessage = await message.channel.send({ embeds: [buildTariffEmbed(message.guild)] });
+    registerTariffMessage(tariffMessage);
     const confirm = await message.channel.send('✅ Tarifs envoyés. Ce message se mettra à jour automatiquement.');
     setTimeout(() => confirm.delete().catch(() => {}), 2000);
     return;
   }
 
-  if (message.content.trim().split(/\s+/)[0] === '!prix') {
+  if (message.content === '!prix') {
     if (!isOwnerMember(message.member)) {
       const reply = await message.channel.send('❌ Seul le rôle owner peut modifier les prix.');
       return deleteLater(reply);
     }
 
-    const args = message.content.trim().split(/\s+/);
-    const shop = productShop(productShopIdFromArgs(args));
     const embed = new EmbedBuilder()
-      .setColor(shop.color)
-      .setAuthor({ name: `Tarifs ${shop.name}`, iconURL: message.guild.iconURL({ dynamic: true }) })
-      .setTitle(`Modifier les prix ${shop.emoji}`)
+      .setColor(0xD4AF37)
+      .setAuthor({ name: 'Tarifs McD0nald’s', iconURL: message.guild.iconURL({ dynamic: true }) })
+      .setTitle(`Modifier les prix ${MCD0NALDS_EMOJI}`)
       .setDescription([
         'Choisis le produit à modifier.',
         '',
-        `Boutique : **${shop.nameFancy}**`,
+        'Boutique : **McD0nald’s**',
         '',
         'Un formulaire va s’ouvrir pour entrer le nouveau prix.',
         '',
@@ -7221,52 +7255,43 @@ client.on('messageCreate', async message => {
 
     await sendAdminLog('💰 Panneau prix ouvert', [
       `Owner : ${logUser(message.author)}`,
-      `Boutique : **${shop.nameFancy}**`,
       `Salon : ${logChannel(message.channel)}`
     ], 0x3498DB);
 
-    return message.channel.send({ embeds: [embed], components: buildPriceEditorRows(shop.id) });
+    return message.channel.send({ embeds: [embed], components: buildPriceEditorRows() });
   }
 
-  if (message.content.trim().split(/\s+/)[0] === '!produits') {
+  if (message.content === '!produits') {
     if (!isOwnerMember(message.member)) {
       const reply = await message.channel.send('❌ Seul le rôle owner peut modifier les produits.');
       return deleteLater(reply);
     }
 
-    const args = message.content.trim().split(/\s+/);
-    const shop = productShop(productShopIdFromArgs(args));
-    const shopProducts = productsForShop(shop.id);
     await sendAdminLog('🍟 Panneau produits ouvert', [
       `Owner : ${logUser(message.author)}`,
       `Salon : ${logChannel(message.channel)}`,
-      `Boutique : **${shop.nameFancy}**`,
-      `Produits : **${shopProducts.length}**`
+      `Produits : **${products.length}**`
     ], 0x3498DB);
 
     return message.channel.send({
-      embeds: [buildProductCatalogEditorEmbed(message.guild, shop.id)],
-      components: buildProductCatalogEditorComponents(shop.id)
+      embeds: [buildProductCatalogEditorEmbed(message.guild)],
+      components: buildProductCatalogEditorComponents()
     });
   }
 
-  if (message.content.trim().split(/\s+/)[0] === '!stock') {
+  if (message.content === '!stock') {
     if (!isOwnerMember(message.member)) {
       const reply = await message.channel.send('❌ Seul le rôle owner peut gérer le stock.');
       return deleteLater(reply);
     }
 
-    const args = message.content.trim().split(/\s+/);
-    const shop = productShop(productShopIdFromArgs(args));
-    const shopProducts = productsForShop(shop.id);
     await sendAdminLog('📦 Panneau stock ouvert', [
       `Owner : ${logUser(message.author)}`,
       `Salon : ${logChannel(message.channel)}`,
-      `Boutique : **${shop.nameFancy}**`,
-      `Indisponibles : **${shopProducts.filter(product => !isProductAvailable(product.value)).length}/${shopProducts.length}**`
+      `Indisponibles : **${products.filter(product => !isProductAvailable(product.value)).length}/${products.length}**`
     ], 0x3498DB);
 
-    return message.channel.send({ embeds: [buildStockEditorEmbed(message.guild, shop.id)], components: buildStockEditorRows(shop.id) });
+    return message.channel.send({ embeds: [buildStockEditorEmbed(message.guild)], components: buildStockEditorRows() });
   }
 
   if (message.content === '!annonce') {
@@ -7303,6 +7328,27 @@ client.on('messageCreate', async message => {
     ], 0x3498DB);
 
     const panel = await message.channel.send({ embeds: [embed], components: [row] });
+    deleteLater(panel, 5 * 60_000);
+    return;
+  }
+
+  if (message.content === '!dmclients') {
+    if (!isOwnerMember(message.member)) {
+      const reply = await message.channel.send('❌ Seul le rôle owner peut envoyer un MP aux clients.');
+      return deleteLater(reply);
+    }
+
+    await sendAdminLog('📩 Panneau MP clients ouvert', [
+      `Owner : ${logUser(message.author)}`,
+      `Salon : ${logChannel(message.channel)}`,
+      `Rôle ciblé : <@&${CUSTOMER_ROLE_ID}>`
+    ], 0x3498DB);
+
+    const panel = await message.channel.send({
+      embeds: [buildDmClientsPanelEmbed(message.guild)],
+      components: [dmClientsPanelRow(message.author.id)]
+    });
+
     deleteLater(panel, 5 * 60_000);
     return;
   }
@@ -8429,7 +8475,26 @@ client.on(Events.InteractionCreate, async interaction => {
       return interaction.showModal(modal);
     }
 
-    if (interaction.customId.startsWith('open_add_product_modal')) {
+    if (interaction.customId.startsWith('open_dm_clients_modal:')) {
+      if (!isOwnerMember(interaction.member)) {
+        return interaction.reply({
+          content: '❌ Seul le rôle owner peut envoyer un MP aux clients.',
+          ephemeral: true
+        });
+      }
+
+      const launcherId = interaction.customId.split(':')[1];
+      if (interaction.user.id !== launcherId) {
+        return interaction.reply({
+          content: '❌ Seul l’owner qui a ouvert ce panneau peut utiliser ce bouton.',
+          ephemeral: true
+        });
+      }
+
+      return interaction.showModal(buildDmClientsModal(launcherId));
+    }
+
+    if (interaction.customId === 'open_add_product_modal') {
       if (!isOwnerMember(interaction.member)) {
         return interaction.reply({
           content: '❌ Seul le rôle owner peut ajouter un produit.',
@@ -8437,8 +8502,7 @@ client.on(Events.InteractionCreate, async interaction => {
         });
       }
 
-      const shopId = normalizeProductShopId(interaction.customId.split(':')[1]);
-      return interaction.showModal(buildProductCatalogModal(null, shopId));
+      return interaction.showModal(buildProductCatalogModal());
     }
 
     if (interaction.customId.startsWith('toggle_stock:')) {
@@ -8920,14 +8984,25 @@ client.on(Events.InteractionCreate, async interaction => {
       });
     }
 
-    if (interaction.customId === 'infos_points' || interaction.customId === 'infos_points_kfce') {
-      const shop = productShop(interaction.customId === 'infos_points_kfce' ? PRODUCT_SHOP_KFCE : PRODUCT_SHOP_MCD0);
-      sendActionLog(interaction.member, `🎁 Fidélité ${shop.shortName} consultée`, [
+    if (interaction.customId === 'how_to_recharge') {
+      sendActionLog(interaction.member, '❓ Aide recharge consultée', [
         `Membre : ${logUser(interaction.user)}`,
         `Salon : ${logChannel(interaction.channel)}`
       ], 0x3498DB);
 
-      return replyTemp(interaction, buildLoyaltyInfoPayload(shop.id), 30_000);
+      return replyTemp(interaction, {
+        embeds: [buildHowToRechargeEmbed(interaction.guild)],
+        ephemeral: true
+      }, 120_000);
+    }
+
+    if (interaction.customId === 'infos_points') {
+      sendActionLog(interaction.member, '🎁 Fidélité McD0 consultée', [
+        `Membre : ${logUser(interaction.user)}`,
+        `Salon : ${logChannel(interaction.channel)}`
+      ], 0x3498DB);
+
+      return replyTemp(interaction, buildLoyaltyInfoPayload(), 30_000);
     }
 
     if (interaction.customId === 'recharger') {
@@ -8940,7 +9015,9 @@ client.on(Events.InteractionCreate, async interaction => {
         `Salon : ${logChannel(interaction.channel)}`
       ], 0x3498DB);
 
-      const modal = new ModalBuilder().setCustomId('recharge_amount').setTitle('Recharge de solde');
+      const modal = new ModalBuilder()
+        .setCustomId('recharge_amount')
+        .setTitle('Recharge - instructions en MP');
       const amountInput = new TextInputBuilder()
         .setCustomId('amount')
         .setLabel('Montant entre 1€ et 200€')
@@ -8973,20 +9050,18 @@ client.on(Events.InteractionCreate, async interaction => {
       return interaction.showModal(modal);
     }
 
-    if (interaction.customId === 'commande' || interaction.customId === 'commande_kfce') {
+    if (interaction.customId === 'commande') {
       if (isMaintenanceEnabledFor(interaction.member)) {
         return replyMaintenance(interaction);
       }
 
-      const shop = productShop(interaction.customId === 'commande_kfce' ? PRODUCT_SHOP_KFCE : PRODUCT_SHOP_MCD0);
       sendActionLog(interaction.member, '🎫 Fenêtre commande ouverte', [
         `Membre : ${logUser(interaction.user)}`,
-        `Boutique : **${shop.nameFancy}**`,
         `Salon : ${logChannel(interaction.channel)}`
       ], 0x3498DB);
 
-      const orderRows = buildProductOrderRows(shop.id);
-      const orderEmbed = buildShopOrderEmbed(interaction.guild, shop.id, orderRows.length > 0);
+      const orderRows = buildProductOrderRows();
+      const orderEmbed = buildShopOrderEmbed(interaction.guild, orderRows.length > 0);
 
       return replyTemp(interaction, {
         embeds: [orderEmbed],
@@ -8994,6 +9069,36 @@ client.on(Events.InteractionCreate, async interaction => {
         ephemeral: true
       }, 120_000);
     }
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('dm_clients_modal:')) {
+    if (!isOwnerMember(interaction.member)) {
+      return interaction.reply({
+        content: '❌ Seul le rôle owner peut envoyer un MP aux clients.',
+        ephemeral: true
+      });
+    }
+
+    const launcherId = interaction.customId.split(':')[1];
+    if (interaction.user.id !== launcherId) {
+      return interaction.reply({
+        content: '❌ Seul l’owner qui a ouvert ce formulaire peut valider cet envoi.',
+        ephemeral: true
+      });
+    }
+
+    const title = interaction.fields.getTextInputValue('dm_clients_title').trim();
+    const body = interaction.fields.getTextInputValue('dm_clients_body').trim();
+
+    if (title.length < 2 || body.length < 2) {
+      return interaction.reply({
+        content: '❌ Titre ou message invalide.',
+        ephemeral: true
+      });
+    }
+
+    await interaction.deferReply({ ephemeral: true });
+    return sendDmToClientMembers(interaction, title, body);
   }
 
   if (interaction.isModalSubmit() && interaction.customId.startsWith('announcement_modal:')) {
@@ -9247,7 +9352,7 @@ client.on(Events.InteractionCreate, async interaction => {
     });
   }
 
-  if (interaction.isModalSubmit() && interaction.customId.startsWith('add_product_catalog_modal')) {
+  if (interaction.isModalSubmit() && interaction.customId === 'add_product_catalog_modal') {
     if (!isOwnerMember(interaction.member)) {
       return interaction.reply({
         content: '❌ Seul le rôle owner peut ajouter un produit.',
@@ -9255,10 +9360,9 @@ client.on(Events.InteractionCreate, async interaction => {
       });
     }
 
-    const shop = productShop(interaction.customId.split(':')[1]);
     const range = interaction.fields.getTextInputValue('product_range').trim();
     const price = parseProductPriceInput(interaction.fields.getTextInputValue('product_price'));
-    const result = addProductToCatalog(range, price, interaction.user, shop.id);
+    const result = addProductToCatalog(range, price, interaction.user);
 
     if (!result.ok) {
       return interaction.reply({
@@ -9269,15 +9373,14 @@ client.on(Events.InteractionCreate, async interaction => {
 
     await sendAdminLog('🍟 Produit ajouté', [
       `Owner : ${logUser(interaction.user)}`,
-      `Boutique : **${shop.nameFancy}**`,
       `Produit : **${result.product.label}**`,
       `Prix : **${formatWalletAmount(result.product.price)}**`,
       `Salon : ${logChannel(interaction.channel)}`
     ], 0x2ECC71);
 
     return interaction.reply({
-      embeds: [buildProductCatalogEditorEmbed(interaction.guild, shop.id)],
-      components: buildProductCatalogEditorComponents(shop.id),
+      embeds: [buildProductCatalogEditorEmbed(interaction.guild)],
+      components: buildProductCatalogEditorComponents(),
       content: `✅ Produit ajouté : **${result.product.label}** à **${formatWalletAmount(result.product.price)}**.`,
       ephemeral: true
     });
@@ -9293,7 +9396,6 @@ client.on(Events.InteractionCreate, async interaction => {
 
     const productId = interaction.customId.split(':')[1];
     const product = getProduct(productId);
-    const shop = productShop(product?.shop);
     const range = interaction.fields.getTextInputValue('product_range').trim();
     const price = parseProductPriceInput(interaction.fields.getTextInputValue('product_price'));
     const oldLabel = product?.label || 'Produit inconnu';
@@ -9309,7 +9411,6 @@ client.on(Events.InteractionCreate, async interaction => {
 
     await sendAdminLog('🍟 Produit modifié', [
       `Owner : ${logUser(interaction.user)}`,
-      `Boutique : **${shop.nameFancy}**`,
       `Ancien produit : **${oldLabel}**`,
       `Nouveau produit : **${result.product.label}**`,
       oldPrice ? `Ancien prix : **${formatWalletAmount(oldPrice)}**` : null,
@@ -9318,8 +9419,8 @@ client.on(Events.InteractionCreate, async interaction => {
     ], 0x2ECC71);
 
     return interaction.reply({
-      embeds: [buildProductCatalogEditorEmbed(interaction.guild, shop.id)],
-      components: buildProductCatalogEditorComponents(shop.id),
+      embeds: [buildProductCatalogEditorEmbed(interaction.guild)],
+      components: buildProductCatalogEditorComponents(),
       content: `✅ Produit modifié : **${result.product.label}** à **${formatWalletAmount(result.product.price)}**.`,
       ephemeral: true
     });
@@ -9335,7 +9436,6 @@ client.on(Events.InteractionCreate, async interaction => {
 
     const productId = interaction.customId.split(':')[1];
     const product = getProduct(productId);
-    const shop = productShop(product?.shop);
     const price = parseProductPriceInput(interaction.fields.getTextInputValue('price'));
 
     if (!product || !Number.isFinite(price) || price <= 0 || price > 500) {
@@ -9349,9 +9449,8 @@ client.on(Events.InteractionCreate, async interaction => {
     setProductPrice(productId, price, interaction.user);
     const newPrice = getProductBasePrice(productId);
 
-    await sendAdminLog(`💰 Prix ${shop.nameFancy} modifié`, [
+    await sendAdminLog('💰 Prix McD0nald’s modifié', [
       `Owner : ${logUser(interaction.user)}`,
-      `Boutique : **${shop.nameFancy}**`,
       `Produit : **${product.label}**`,
       `Ancien prix : **${formatWalletAmount(oldPrice)}**`,
       `Nouveau prix : **${formatWalletAmount(newPrice)}**`,
@@ -9378,7 +9477,6 @@ client.on(Events.InteractionCreate, async interaction => {
 
     const productId = interaction.customId.split(':')[1];
     const product = getProduct(productId);
-    const shop = productShop(product?.shop);
     const quantity = parseProductStockQuantityInput(interaction.fields.getTextInputValue('product_stock_quantity'));
 
     if (!product || quantity === null) {
@@ -9393,7 +9491,6 @@ client.on(Events.InteractionCreate, async interaction => {
 
     await sendAdminLog(quantity > 0 ? '📦 Stock produit modifié' : '📦 Produit mis indisponible', [
       `Owner : ${logUser(interaction.user)}`,
-      `Boutique : **${shop.nameFancy}**`,
       `Produit : **${product.label}**`,
       `Ancien stock : **${oldQuantity === null ? '?' : oldQuantity}**`,
       `Nouveau stock : **${quantity}**`,
@@ -9402,8 +9499,8 @@ client.on(Events.InteractionCreate, async interaction => {
     ], quantity > 0 ? 0x2ECC71 : 0xE67E22);
 
     return interaction.reply({
-      embeds: [buildStockEditorEmbed(interaction.guild, shop.id)],
-      components: buildStockEditorRows(shop.id),
+      embeds: [buildStockEditorEmbed(interaction.guild)],
+      components: buildStockEditorRows(),
       content: quantity > 0
         ? `✅ **${product.label}** est maintenant disponible avec **${quantity}** en stock 📦.`
         : `❌ **${product.label}** est maintenant retiré de la boutique, de Commander et de !tarifs. Stock : **0** 📦.`,
@@ -9448,7 +9545,7 @@ client.on(Events.InteractionCreate, async interaction => {
     const paymentMenu = new ActionRowBuilder().addComponents(
       new StringSelectMenuBuilder()
         .setCustomId(`payment_method:${cents}`)
-        .setPlaceholder('💳 Choisir un moyen de paiement...')
+        .setPlaceholder('💳 Choisir puis regarder tes MP...')
         .addOptions([
           { label: 'PayPal', description: `Recharge de ${formatAmount(cents)} - entre proches, sans note`, value: 'paypal', emoji: '🅿️' },
           { label: 'Revolut', description: `Recharge de ${formatAmount(cents)} - sans note`, value: 'revolut', emoji: '💳' },
@@ -9461,6 +9558,9 @@ client.on(Events.InteractionCreate, async interaction => {
         `💰 Montant choisi : ${formatAmount(cents)}`,
         `📅 Date indiquée : ${paymentDate}`,
         `🕒 Heure indiquée : ${paymentTime}`,
+        '',
+        '📩 **Important : après ton choix, le bot t’envoie les instructions en message privé.**',
+        'Va dans tes MP Discord et réponds au bot avec le screenshot du paiement.',
         '',
         'Choisissez un moyen de paiement :'
       ].join('\n'),
@@ -9543,7 +9643,7 @@ client.on(Events.InteractionCreate, async interaction => {
         });
       }
 
-      return interaction.showModal(buildProductCatalogModal(product, product.shop));
+      return interaction.showModal(buildProductCatalogModal(product));
     }
 
     if (interaction.customId.startsWith('payment_method:')) {
@@ -9629,8 +9729,8 @@ ${dmSent ? '📩 Instructions envoyées au client en MP.' : '⚠️ Impossible d
 
       return replyTemp(responseInteraction, {
         content: dmSent
-          ? `✅ Demande de recharge créée pour ${amount}.\n📩 Va dans tes messages privés : le bot t’a envoyé un MP.\n➡️ Suis les instructions dans ce message privé.\n🧾 Demande : #${request.id}`
-          : `⚠️ Demande créée, mais impossible de t’envoyer un MP. Contacte le staff.\n🧾 Demande : #${request.id}`,
+          ? `✅ Demande de recharge créée pour ${amount}.\n📩 **Va dans tes messages privés Discord maintenant : le bot t’a envoyé les instructions.**\n➡️ Réponds directement au MP du bot avec le screenshot du paiement.\n🔎 Si tu ne vois pas le MP, regarde tes demandes de messages.\n🧾 Demande : #${request.id}`
+          : `⚠️ Demande créée, mais impossible de t’envoyer un MP. Vérifie que tes messages privés Discord sont ouverts puis contacte le staff.\n🧾 Demande : #${request.id}`,
         ephemeral: true
       });
     }
