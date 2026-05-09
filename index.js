@@ -50,7 +50,7 @@ const AVIS_CHANNEL_ID = '1497652398259306516';
 const INVITE_ANNOUNCE_CHANNEL_ID = '1310355769824383059';
 const INVITE_ADMIN_CHANNEL_ID = '1499523428112142568';
 const INVITE_GIVEAWAY_CHANNEL_ID = '1498450310832717825';
-const TIKTOK_INVITE_CODE = '3EnBr2xJQS';
+const TIKTOK_INVITE_CODE = 'NuyXstpakN';
 const TIKTOK_SOURCE_EMOJI = '<:tiktok:1501320448477106186>';
 const TIKTOK_SOURCE_LABEL = `Arrivé de TikTok ${TIKTOK_SOURCE_EMOJI}`;
 const RULES_ROLE_ID = '1310359454377840650';
@@ -5494,9 +5494,9 @@ function buildShopSetupRow() {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('wallet').setLabel('Portefeuille').setEmoji('👛').setStyle(ButtonStyle.Danger),
     new ButtonBuilder().setCustomId('recharger').setLabel('Recharger le solde').setEmoji('➕').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('how_to_recharge').setLabel('Comment recharger ?').setEmoji('❓').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('commande').setLabel('Commander McD0').setEmoji(MCD0NALDS_BUTTON_EMOJI).setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId('infos_points').setLabel('Fidélité McD0').setEmoji('🎁').setStyle(ButtonStyle.Secondary)
+    new ButtonBuilder().setCustomId('infos_points').setLabel('Fidélité McD0').setEmoji('🎁').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('how_to_recharge').setLabel('Comment recharger ?').setEmoji('❓').setStyle(ButtonStyle.Secondary)
   );
 }
 
@@ -5514,7 +5514,8 @@ function buildHowToRechargeEmbed(guild) {
       '6. Réponds directement au MP du bot avec ton screenshot.',
       '',
       '📩 Si tu ne vois pas le MP, regarde tes **demandes de messages** Discord.',
-      `Si besoin, ouvre un ticket support ici : <#${SUPPORT_CHANNEL_ID}>.`
+      '',
+      `🚨 **Si tu es bloqué, va dans <#${SUPPORT_CHANNEL_ID}> et ouvre un ticket support.**`
     ].join('\n'))
     .setFooter({ text: 'La Rent’a • Recharge en message privé' });
 }
