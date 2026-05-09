@@ -46,6 +46,7 @@ const LOG_CHANNEL_ID = '1310354201704136747';
 const ADMIN_COMMAND_LOG_CHANNEL_ID = '1499758004797702225';
 const ADMIN_CHANGELOG_CHANNEL_ID = '1500475167313231983';
 const AVAILABILITY_CHANNEL_ID = '1310355422993186896';
+const DAILY_RECAP_CHANNEL_ID = '1502779855152877578';
 const AVIS_CHANNEL_ID = '1497652398259306516';
 const INVITE_ANNOUNCE_CHANNEL_ID = '1310355769824383059';
 const INVITE_ADMIN_CHANNEL_ID = '1499523428112142568';
@@ -128,16 +129,19 @@ const DATA_BACKUP_FILES = [
   PRODUCT_STOCK_FILE,
   PAYMENT_CONFIG_FILE
 ];
-const BOT_CHANGELOG_VERSION = '2026-05-09-remove-second-shop-client-dm-recharge-help';
+const BOT_CHANGELOG_VERSION = '2026-05-09-order-queue-daily-recap';
 // Garder uniquement les changements du lot en cours, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Suppression de la boutique secondaire et retour à la boutique McD0 uniquement.',
-  'Nettoyage des boutons, commandes, tarifs, stock et fidélité liés à la boutique secondaire.',
-  'Ajout de la commande owner !dmclients pour envoyer un MP aux clients ayant déjà commandé.',
-  'Clarification du parcours recharge avec rappels visibles pour consulter les messages privés du bot.',
-  'Ajout d’un bouton Comment recharger ? sur la boutique.'
+  'Ajout d’une file d’attente en temps réel dans les tickets commande.',
+  'Mise à jour automatique des positions quand une commande est créée, terminée, remboursée ou archivée.',
+  'Ajout d’un récap quotidien envoyé à 23h59 dans le salon stats.',
+  'Le récap compte les recharges validées, le montant validé, les commandes terminées, les nouveaux clients et le top produits.'
 ];
 const AVAILABILITY_TIMEZONE = 'Europe/Paris';
+const DAILY_RECAP_TIMEZONE = 'Europe/Paris';
+const DAILY_RECAP_HOUR = 23;
+const DAILY_RECAP_MINUTE = 59;
+const DAILY_RECAP_CHECK_INTERVAL = 60_000;
 const AVAILABILITY_CHECK_INTERVAL = 60_000;
 const AUTO_MOD_NOTICE_DELAY = 7_000;
 const WARNING_SANCTIONS = [
@@ -453,7 +457,9 @@ let shopStats = loadJsonFile(SHOP_STATS_FILE, {
   rechargeValidatedCount: 0,
   ordersCreated: 0,
   ordersCompleted: 0,
-  products: {}
+  products: {},
+  daily: {},
+  dailyRecapSentDates: {}
 });
 let warnings = loadJsonFile(WARNINGS_FILE, { users: {} });
 let botChangelogState = loadJsonFile(BOT_CHANGELOG_FILE, { announcedVersions: {} });
@@ -508,6 +514,10 @@ if (!walletHistory.users) walletHistory.users = {};
 if (!ticketHistory.users) ticketHistory.users = {};
 if (typeof maintenanceState.enabled !== 'boolean') maintenanceState.enabled = false;
 if (!shopStats.products) shopStats.products = {};
+if (!shopStats.daily || typeof shopStats.daily !== 'object' || Array.isArray(shopStats.daily)) shopStats.daily = {};
+if (!shopStats.dailyRecapSentDates || typeof shopStats.dailyRecapSentDates !== 'object' || Array.isArray(shopStats.dailyRecapSentDates)) {
+  shopStats.dailyRecapSentDates = {};
+}
 if (!warnings.users) warnings.users = {};
 if (!botChangelogState.announcedVersions) botChangelogState.announcedVersions = {};
 if (typeof availabilityState.enabled !== 'boolean') availabilityState.enabled = true;
@@ -552,6 +562,7 @@ const ticketCleanupTimers = new Map();
 const ticketNoResponseReminderTimers = new Map();
 const clientDmBroadcastLocks = new Set();
 let availabilitySchedulerTimer = null;
+let dailyRecapSchedulerTimer = null;
 let tariffRefreshTimer = null;
 const CRASH_LOG_COOLDOWN = 60_000;
 
@@ -1325,10 +1336,84 @@ function buildTicketHistoryEmbed(user) {
     .setTimestamp();
 }
 
+function getDailyRecapDateParts(timestamp = Date.now()) {
+  const parts = new Intl.DateTimeFormat('fr-FR', {
+    timeZone: DAILY_RECAP_TIMEZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23'
+  }).formatToParts(new Date(timestamp));
+  const value = type => parts.find(part => part.type === type)?.value || '';
+  const year = value('year');
+  const month = value('month');
+  const day = value('day');
+
+  return {
+    year,
+    month,
+    day,
+    hour: Number(value('hour')) || 0,
+    minute: Number(value('minute')) || 0,
+    dateKey: `${year}-${month}-${day}`,
+    label: `${day}/${month}/${year}`
+  };
+}
+
+function dailyDateLabel(dateKey) {
+  const [year, month, day] = String(dateKey || '').split('-');
+  if (!year || !month || !day) return getDailyRecapDateParts().label;
+  return `${day}/${month}/${year}`;
+}
+
+function ensureDailyShopStats(dateKey = getDailyRecapDateParts().dateKey) {
+  if (!shopStats.daily || typeof shopStats.daily !== 'object' || Array.isArray(shopStats.daily)) {
+    shopStats.daily = {};
+  }
+
+  const daily = shopStats.daily[dateKey] || {};
+  daily.rechargeValidatedCount = Number(daily.rechargeValidatedCount) || 0;
+  daily.rechargeValidatedCents = Number(daily.rechargeValidatedCents) || 0;
+  daily.ordersCompleted = Number(daily.ordersCompleted) || 0;
+  daily.newClients = Number(daily.newClients) || 0;
+  if (!daily.products || typeof daily.products !== 'object' || Array.isArray(daily.products)) {
+    daily.products = {};
+  }
+
+  shopStats.daily[dateKey] = daily;
+  return daily;
+}
+
+function recordDailyRechargeValidation(amount, timestamp = Date.now()) {
+  const daily = ensureDailyShopStats(getDailyRecapDateParts(timestamp).dateKey);
+  daily.rechargeValidatedCount += 1;
+  daily.rechargeValidatedCents += eurosToCents(amount);
+}
+
+function recordDailyOrderCompleted(ticketRequest, timestamp = Date.now()) {
+  const daily = ensureDailyShopStats(getDailyRecapDateParts(timestamp).dateKey);
+  const productKey = ticketRequest?.product || 'Produit inconnu';
+  const productStats = daily.products[productKey] || { count: 0, revenueCents: 0 };
+
+  daily.ordersCompleted += 1;
+  productStats.count = (Number(productStats.count) || 0) + 1;
+  productStats.revenueCents = (Number(productStats.revenueCents) || 0) + eurosToCents(ticketRequest?.price || 0);
+  daily.products[productKey] = productStats;
+}
+
+function recordDailyNewClient(timestamp = Date.now()) {
+  const daily = ensureDailyShopStats(getDailyRecapDateParts(timestamp).dateKey);
+  daily.newClients += 1;
+  saveShopStats();
+}
+
 function recordShopRecharge(amount, isRechargeValidation = false) {
   shopStats.totalRechargedCents = (Number(shopStats.totalRechargedCents) || 0) + eurosToCents(amount);
   if (isRechargeValidation) {
     shopStats.rechargeValidatedCount = (Number(shopStats.rechargeValidatedCount) || 0) + 1;
+    recordDailyRechargeValidation(amount);
   }
   saveShopStats();
 }
@@ -1353,8 +1438,10 @@ function recordShopOrderCreated(productLabel, price) {
 function recordShopOrderCompleted(ticketRequest) {
   if (!ticketRequest || ticketRequest.statsOrderCompletedAt) return false;
 
+  const completedAt = Date.now();
   shopStats.ordersCompleted = (Number(shopStats.ordersCompleted) || 0) + 1;
-  ticketRequest.statsOrderCompletedAt = Date.now();
+  ticketRequest.statsOrderCompletedAt = completedAt;
+  recordDailyOrderCompleted(ticketRequest, completedAt);
   saveShopStats();
   return true;
 }
@@ -1458,6 +1545,95 @@ function buildShopStatsEmbed() {
       { name: 'Top produits commandés', value: topProducts, inline: false }
     )
     .setTimestamp();
+}
+
+function buildDailyRecapEmbed(dateKey = getDailyRecapDateParts().dateKey) {
+  const daily = ensureDailyShopStats(dateKey);
+  const topProducts = Object.entries(daily.products || {})
+    .map(([label, stats]) => ({
+      label,
+      count: Number(stats?.count) || 0,
+      revenueCents: Number(stats?.revenueCents) || 0
+    }))
+    .filter(row => row.count > 0)
+    .sort((a, b) => b.count - a.count || b.revenueCents - a.revenueCents)
+    .slice(0, 5);
+  const topProductsText = topProducts.length
+    ? topProducts.map((row, index) => `**${index + 1}.** ${row.label}\nCommandes terminées : **${row.count}** • Total : **${formatCents(row.revenueCents)}**`).join('\n\n')
+    : 'Aucun produit terminé aujourd’hui.';
+
+  return new EmbedBuilder()
+    .setColor(0xD4AF37)
+    .setTitle('📊 Récap quotidien La Rent’a')
+    .setDescription(`Bilan du **${dailyDateLabel(dateKey)}**.`)
+    .addFields(
+      {
+        name: 'Recharges validées',
+        value: [
+          `Nombre : **${daily.rechargeValidatedCount}**`,
+          `Montant total : **${formatCents(daily.rechargeValidatedCents)}**`
+        ].join('\n'),
+        inline: true
+      },
+      {
+        name: 'Commandes terminées',
+        value: `Total : **${daily.ordersCompleted}**`,
+        inline: true
+      },
+      {
+        name: 'Nouveaux clients',
+        value: `Total : **${daily.newClients}**`,
+        inline: true
+      },
+      {
+        name: 'Top produits terminés',
+        value: topProductsText,
+        inline: false
+      }
+    )
+    .setFooter({ text: 'Envoyé automatiquement à 23h59' })
+    .setTimestamp();
+}
+
+async function sendDailyRecap(dateKey = getDailyRecapDateParts().dateKey) {
+  if (shopStats.dailyRecapSentDates?.[dateKey]) return false;
+
+  const channel = client.channels.cache.get(DAILY_RECAP_CHANNEL_ID)
+    || await client.channels.fetch(DAILY_RECAP_CHANNEL_ID).catch(() => null);
+
+  if (!channel || typeof channel.send !== 'function') {
+    await sendBotLog('⚠️ Récap quotidien impossible', `Salon introuvable : \`${DAILY_RECAP_CHANNEL_ID}\``, 0xE67E22);
+    return false;
+  }
+
+  await channel.send({ embeds: [buildDailyRecapEmbed(dateKey)] });
+  if (!shopStats.dailyRecapSentDates || typeof shopStats.dailyRecapSentDates !== 'object') {
+    shopStats.dailyRecapSentDates = {};
+  }
+  shopStats.dailyRecapSentDates[dateKey] = Date.now();
+  saveShopStats();
+  return true;
+}
+
+async function checkDailyRecapSchedule() {
+  const now = getDailyRecapDateParts();
+  if (now.hour !== DAILY_RECAP_HOUR || now.minute !== DAILY_RECAP_MINUTE) return;
+  await sendDailyRecap(now.dateKey);
+}
+
+function startDailyRecapScheduler() {
+  if (dailyRecapSchedulerTimer) clearInterval(dailyRecapSchedulerTimer);
+
+  dailyRecapSchedulerTimer = setInterval(() => {
+    checkDailyRecapSchedule().catch(error => {
+      reportCrash('Récap quotidien impossible', error);
+    });
+  }, DAILY_RECAP_CHECK_INTERVAL);
+
+  dailyRecapSchedulerTimer.unref?.();
+  checkDailyRecapSchedule().catch(error => {
+    reportCrash('Récap quotidien impossible', error);
+  });
 }
 
 function createWalletActionId() {
@@ -1986,6 +2162,12 @@ async function refundOrderTicket(message, ticketRequest) {
         ].join('\n'))
         .setTimestamp()
     ]
+  });
+
+  const queueMessageRemoved = await clearOrderQueueMessage(message.channel, ticketRequest).catch(() => false);
+  if (queueMessageRemoved) saveRequests();
+  await refreshOrderQueueMessages('order_refunded').catch(error => {
+    reportCrash('Actualisation file commande impossible après remboursement', error);
   });
 
   return true;
@@ -4637,6 +4819,100 @@ async function syncActiveTicketPermissions() {
   }
 }
 
+function getOpenOrderQueueRequests() {
+  return Object.values(requests.tickets || {})
+    .filter(ticketRequest => (
+      ticketRequest?.type === 'commande' &&
+      ticketRequest.channelId &&
+      isActiveTicketRequest(ticketRequest) &&
+      !ticketRequest.refundedAt
+    ))
+    .sort((a, b) => (Number(a.createdAt) || 0) - (Number(b.createdAt) || 0));
+}
+
+function orderQueueEstimate(position) {
+  const safePosition = Math.max(Number(position) || 1, 1);
+  return `${safePosition * 5} à ${safePosition * 15} minutes`;
+}
+
+function buildOrderQueueEmbed(ticketRequest, position, total) {
+  const beforeCount = Math.max(position - 1, 0);
+
+  return new EmbedBuilder()
+    .setColor(0x5865F2)
+    .setTitle('📍 File d’attente commande')
+    .setDescription([
+      `🧾 Demande : **#${ticketRequest.id || 'inconnue'}**`,
+      `📦 Produit : **${ticketRequest.product || 'Non précisé'}**`,
+      '',
+      `Ta position actuelle : **${position}/${total}**`,
+      `Commandes avant toi : **${beforeCount}**`,
+      `⏱️ Temps estimé : **${orderQueueEstimate(position)}**`,
+      '',
+      'Ce message se met à jour automatiquement quand une commande avant toi est terminée.'
+    ].join('\n'))
+    .setFooter({ text: 'La Rent’a • File d’attente en temps réel' })
+    .setTimestamp();
+}
+
+async function upsertOrderQueueMessage(ticketRequest, position, total) {
+  const channel = client.channels.cache.get(ticketRequest.channelId)
+    || await client.channels.fetch(ticketRequest.channelId).catch(() => null);
+
+  if (!channel || typeof channel.send !== 'function') return false;
+
+  const payload = { embeds: [buildOrderQueueEmbed(ticketRequest, position, total)] };
+  let changed = false;
+
+  if (ticketRequest.orderQueueMessageId) {
+    const message = await channel.messages.fetch(ticketRequest.orderQueueMessageId).catch(() => null);
+    if (message) {
+      await message.edit(payload).catch(error => {
+        reportCrash('Mise à jour file commande impossible', error, [
+          `Ticket : <#${ticketRequest.channelId}>`,
+          `Demande : **${ticketRequest.id || 'inconnue'}**`
+        ]);
+      });
+      return false;
+    }
+  }
+
+  const sent = await channel.send(payload);
+  ticketRequest.orderQueueMessageId = sent.id;
+  changed = true;
+  return changed;
+}
+
+async function clearOrderQueueMessage(channel, ticketRequest) {
+  if (!ticketRequest?.orderQueueMessageId) return false;
+
+  const message = await channel.messages.fetch(ticketRequest.orderQueueMessageId).catch(() => null);
+  if (message) await message.delete().catch(() => {});
+  delete ticketRequest.orderQueueMessageId;
+  return true;
+}
+
+async function refreshOrderQueueMessages(reason = 'queue_updated') {
+  const orderTickets = getOpenOrderQueueRequests();
+  let changed = false;
+
+  for (const [index, ticketRequest] of orderTickets.entries()) {
+    const messageChanged = await upsertOrderQueueMessage(ticketRequest, index + 1, orderTickets.length)
+      .catch(error => {
+        reportCrash('Actualisation file commande impossible', error, [
+          `Raison : **${reason}**`,
+          `Demande : **${ticketRequest?.id || 'inconnue'}**`,
+          ticketRequest?.channelId ? `Ticket : <#${ticketRequest.channelId}>` : null
+        ].filter(Boolean));
+        return false;
+      });
+
+    if (messageChanged) changed = true;
+  }
+
+  if (changed) saveRequests();
+}
+
 async function archiveTicketChannel(channel, ticketRequest, user, ownerId = ticketRequest?.userId) {
   const archiveCategory = channel.guild.channels.cache.get(TICKET_ARCHIVE_CATEGORY)
     || await channel.guild.channels.fetch(TICKET_ARCHIVE_CATEGORY).catch(() => null);
@@ -4660,6 +4936,14 @@ async function archiveTicketChannel(channel, ticketRequest, user, ownerId = tick
   await channel.setParent(TICKET_ARCHIVE_CATEGORY, { lockPermissions: false });
   await channel.permissionOverwrites.set(archivedTicketPermissionOverwrites(channel.guild, ticketRequest));
   await renameTicketChannelState(channel, ticketRequest, ticketArchiveStateForRequest(ticketRequest));
+
+  if (ticketRequest?.type === 'commande') {
+    const queueMessageRemoved = await clearOrderQueueMessage(channel, ticketRequest).catch(() => false);
+    if (queueMessageRemoved) saveRequests();
+    await refreshOrderQueueMessages('order_archived').catch(error => {
+      reportCrash('Actualisation file commande impossible après archive', error);
+    });
+  }
 
   await channel.send({
     embeds: [
@@ -4749,6 +5033,7 @@ async function completeOrderTicketChannel(channel, ticketRequest, user, ownerId 
     delete ticketRequest.noResponseCloseAt;
     delete ticketRequest.noResponseReminderAt;
     recordShopOrderCompleted(ticketRequest);
+    await clearOrderQueueMessage(channel, ticketRequest).catch(() => false);
     upsertTicketHistory(ticketRequest);
     saveRequests();
     scheduleDataBackup('order_completed', user);
@@ -4768,6 +5053,9 @@ async function completeOrderTicketChannel(channel, ticketRequest, user, ownerId 
   }
 
   await channel.send({ embeds: [buildCompletedOrderTicketEmbed(ticketRequest, dmSent)] });
+  await refreshOrderQueueMessages('order_completed').catch(error => {
+    reportCrash('Actualisation file commande impossible après commande terminée', error);
+  });
 
   return { dmSent };
 }
@@ -4785,6 +5073,7 @@ async function addCustomerRoleAfterCompletedOrder(guild, ticketRequest) {
       throw new Error(`Rôle Le Rent’a impossible à ajouter : ${error.message}`);
     });
 
+  recordDailyNewClient();
   return true;
 }
 
@@ -5432,6 +5721,12 @@ Un owner a été informé et va prendre en charge votre commande.
 Merci de rester disponible dans ce ticket.
 Le staff vous répondra dès que possible.`,
     components: [orderTicketButtons(interaction.user.id, request)]
+  });
+  await refreshOrderQueueMessages('order_created').catch(error => {
+    reportCrash('Actualisation file commande impossible après création', error, [
+      `Demande : **${request.id}**`,
+      `Ticket : <#${ticket.id}>`
+    ]);
   });
 
   sendAdminLog('🎫 Commande créée', [
@@ -6727,6 +7022,8 @@ client.once('ready', async () => {
     await syncActiveTicketPermissions();
     scheduleTicketCleanups();
     startAvailabilityScheduler();
+    startDailyRecapScheduler();
+    await refreshOrderQueueMessages('startup');
     await announceBotChangelog();
     await announcePersistentStorageStatus();
     sendBotLog('🟢 Bot connecté', `Connecté en tant que **${client.user.tag}**`, 0x2ECC71);
