@@ -136,12 +136,13 @@ const DATA_BACKUP_FILES = [
   PRODUCT_STOCK_FILE,
   PAYMENT_CONFIG_FILE
 ];
-const BOT_CHANGELOG_VERSION = '2026-05-10-discount-client-dm';
+const BOT_CHANGELOG_VERSION = '2026-05-10-flash-discount-announcement';
 // Garder uniquement les changements du lot en cours, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Quand un owner utilise !reduc, les clients ayant déjà commandé reçoivent un MP promo.',
-  'L’envoi est ciblé uniquement sur le rôle client donné après une commande terminée.',
-  'Les envois impossibles sont comptés et loggés côté admin.'
+  'La commande !reduc demande maintenant une durée, exemple !reduc 20 2h.',
+  'Une annonce @everyone est envoyée dans le salon annonce avec un compte à rebours en temps réel.',
+  'La réduction se retire automatiquement à la fin de la durée choisie.',
+  'Les clients ayant déjà commandé reçoivent aussi un MP promo avec la fin de l’offre.'
 ];
 const REVIEW_REQUIRED_COUNT = 3;
 const REVIEW_REWARD_CENTS = 100;
@@ -558,6 +559,11 @@ if (!discountState || typeof discountState !== 'object' || Array.isArray(discoun
 }
 discountState.percent = Number(discountState.percent) || 0;
 if (discountState.percent < 0) discountState.percent = 0;
+discountState.endsAt = Number(discountState.endsAt) || null;
+if (discountState.endsAt && discountState.endsAt <= Date.now()) {
+  discountState.percent = 0;
+  discountState.endsAt = null;
+}
 if (!productStockState || typeof productStockState !== 'object' || Array.isArray(productStockState)) {
   productStockState = { unavailable: {}, updatedAt: null, updatedBy: null };
 }
@@ -587,6 +593,7 @@ const ticketNoResponseReminderTimers = new Map();
 const clientDmBroadcastLocks = new Set();
 let availabilitySchedulerTimer = null;
 let dailyRecapSchedulerTimer = null;
+let discountSchedulerTimer = null;
 let tariffRefreshTimer = null;
 const CRASH_LOG_COOLDOWN = 60_000;
 
@@ -1104,6 +1111,26 @@ function parseDiscountPercent(value) {
     .replace(/^\+/, '');
   if (!/^-?\d+(?:\.\d{1,2})?$/.test(normalized)) return NaN;
   return Math.abs(Number.parseFloat(normalized));
+}
+
+function parseDurationInput(value) {
+  const normalized = String(value || '').trim().toLowerCase().replace(',', '.');
+  const match = normalized.match(/^(\d+(?:\.\d+)?)(m|min|mins|minute|minutes|h|heure|heures|j|jour|jours|d)$/);
+  if (!match) return NaN;
+
+  const amount = Number.parseFloat(match[1]);
+  if (!Number.isFinite(amount) || amount <= 0) return NaN;
+
+  const unit = match[2];
+  const multiplier = unit.startsWith('m')
+    ? 60_000
+    : unit.startsWith('h')
+      ? 60 * 60_000
+      : 24 * 60 * 60_000;
+
+  const duration = Math.round(amount * multiplier);
+  if (duration < 60_000 || duration > 30 * 24 * 60 * 60_000) return NaN;
+  return duration;
 }
 
 function formatWalletAmount(amount) {
@@ -4410,6 +4437,7 @@ function toggleProductAvailability(productId, user) {
 function getDiscountPercent() {
   const percent = Number(discountState.percent);
   if (!Number.isFinite(percent) || percent <= 0) return 0;
+  if (discountState.endsAt && Number(discountState.endsAt) <= Date.now()) return 0;
   return Math.min(percent, 100);
 }
 
@@ -4537,22 +4565,77 @@ function updateProductInCatalog(productId, rangeLabel, price, user = null) {
   return { ok: true, product: getProduct(parsed.value), oldValue };
 }
 
-function setGlobalDiscount(percent, user) {
+function setGlobalDiscount(percent, user, endsAt = null) {
   discountState.percent = Math.round(percent * 100) / 100;
   discountState.updatedAt = Date.now();
   discountState.updatedBy = user?.id || null;
+  discountState.endsAt = Number(endsAt) || null;
   saveDiscountState();
   scheduleDataBackup('discount_enabled', user);
   scheduleTariffMessagesRefresh('discount_enabled');
+  scheduleDiscountExpiration();
 }
 
 function resetGlobalDiscount(user) {
   discountState.percent = 0;
   discountState.updatedAt = Date.now();
   discountState.updatedBy = user?.id || null;
+  discountState.endsAt = null;
   saveDiscountState();
   scheduleDataBackup('discount_reset', user);
   scheduleTariffMessagesRefresh('discount_reset');
+  scheduleDiscountExpiration();
+}
+
+async function expireGlobalDiscount() {
+  const percent = Number(discountState.percent);
+  if (!Number.isFinite(percent) || percent <= 0) return false;
+
+  const endsAt = Number(discountState.endsAt) || 0;
+  if (!endsAt || endsAt > Date.now()) {
+    scheduleDiscountExpiration();
+    return false;
+  }
+
+  const previousDiscount = formatPercentValue(Math.min(percent, 100));
+  discountState.percent = 0;
+  discountState.updatedAt = Date.now();
+  discountState.updatedBy = client.user?.id || null;
+  discountState.endsAt = null;
+  saveDiscountState();
+  scheduleDataBackup('discount_expired', client.user);
+  scheduleTariffMessagesRefresh('discount_expired');
+  scheduleDiscountExpiration();
+
+  await sendAdminLog('🏷️ Réduction expirée automatiquement', [
+    `Ancienne réduction : **-${previousDiscount}%**`,
+    'Raison : durée de l’offre flash terminée.'
+  ], 0xE67E22);
+
+  return true;
+}
+
+function scheduleDiscountExpiration() {
+  if (discountSchedulerTimer) {
+    clearTimeout(discountSchedulerTimer);
+    discountSchedulerTimer = null;
+  }
+
+  if (!isDiscountActive() || !discountState.endsAt) return;
+
+  const delay = Math.max(Number(discountState.endsAt) - Date.now(), 0);
+  const maxDelay = 2_147_483_647;
+
+  discountSchedulerTimer = setTimeout(() => {
+    if (delay > maxDelay) {
+      scheduleDiscountExpiration();
+      return;
+    }
+
+    expireGlobalDiscount().catch(error => reportCrash('Expiration réduction impossible', error));
+  }, Math.min(delay, maxDelay));
+
+  discountSchedulerTimer.unref?.();
 }
 
 function formatPercentValue(percent) {
@@ -6511,7 +6594,7 @@ function buildHelpEmbed(guild) {
           ['prix', 'modifie les tarifs via boutons et formulaire.'],
           ['produits', 'ajoute ou modifie les gammes McD0nald’s et leurs prix.'],
           ['stock', 'affiche les produits en menu pour les rendre disponibles ou indisponibles.'],
-          ['reduc nombre', 'applique une réduction globale à la boutique.'],
+          ['reduc nombre durée', 'applique une offre flash et annonce la réduction avec compte à rebours.'],
           ['resetreduc', 'retire la réduction globale.'],
           ['paiements', 'modifie PayPal, Revolut et IBAN depuis Discord.']
         ]),
@@ -6747,7 +6830,62 @@ async function sendDmToClientMembers(interaction, title, body) {
   }
 }
 
-async function sendDiscountDmToClientMembers(message, percent) {
+function discountCountdownLine(endsAt) {
+  const endUnix = Math.floor(Number(endsAt) / 1000);
+  return `⏳ Fin de l’offre : <t:${endUnix}:R> — <t:${endUnix}:f>`;
+}
+
+async function sendDiscountAnnouncement(message, percent, endsAt) {
+  const channel = client.channels.cache.get(AVAILABILITY_CHANNEL_ID)
+    || await client.channels.fetch(AVAILABILITY_CHANNEL_ID).catch(() => null);
+
+  if (!channel || typeof channel.send !== 'function') {
+    await sendAdminLog('⚠️ Annonce réduction impossible', [
+      `Salon introuvable : <#${AVAILABILITY_CHANNEL_ID}>`,
+      `Réduction : **-${formatPercentValue(percent)}%**`
+    ], 0xF1C40F);
+    return null;
+  }
+
+  const percentText = formatPercentValue(percent);
+  const embed = new EmbedBuilder()
+    .setColor(0xD4AF37)
+    .setTitle(`🏷️ Offre flash -${percentText}%`)
+    .setDescription([
+      `Une réduction de **-${percentText}%** est active sur toute la boutique.`,
+      '',
+      discountCountdownLine(endsAt),
+      '',
+      `📍 Pour commander : <#${SHOP_CHANNEL_ID}>`
+    ].join('\n'))
+    .setFooter({ text: 'La Rent’a • Offre flash' })
+    .setTimestamp();
+
+  const sent = await channel.send({
+    content: '@everyone',
+    embeds: [embed],
+    allowedMentions: { parse: ['everyone'] }
+  }).catch(async error => {
+    await reportCrash('Annonce réduction impossible', error, [
+      `Owner : ${logUser(message.author)}`,
+      `Salon : ${logChannel(channel)}`
+    ]);
+    return null;
+  });
+
+  if (sent) {
+    await sendAdminLog('🏷️ Annonce réduction envoyée', [
+      `Owner : ${logUser(message.author)}`,
+      `Salon annonce : ${logChannel(channel)}`,
+      `Réduction : **-${percentText}%**`,
+      discountCountdownLine(endsAt)
+    ], 0x2ECC71);
+  }
+
+  return sent;
+}
+
+async function sendDiscountDmToClientMembers(message, percent, endsAt) {
   const lockKey = message.guild.id;
 
   if (clientDmBroadcastLocks.has(lockKey)) {
@@ -6780,6 +6918,8 @@ async function sendDiscountDmToClientMembers(message, percent) {
       `🏷️ Réduction boutique -${percentText}%`,
       [
         `Une réduction de **-${percentText}%** vient d’être activée sur la boutique.`,
+        '',
+        discountCountdownLine(endsAt),
         '',
         'Elle s’applique automatiquement sur les produits disponibles tant qu’elle est active.',
         '',
@@ -7730,6 +7870,7 @@ client.once('ready', async () => {
     scheduleTicketCleanups();
     startAvailabilityScheduler();
     startDailyRecapScheduler();
+    scheduleDiscountExpiration();
     await refreshOrderQueueMessages('startup');
     await announceBotChangelog();
     await announcePersistentStorageStatus();
@@ -8458,17 +8599,19 @@ client.on('messageCreate', async message => {
 
     const args = message.content.trim().split(/\s+/);
     const percent = parseDiscountPercent(args[1]);
+    const duration = parseDurationInput(args[2]);
 
-    if (!Number.isFinite(percent) || percent <= 0 || percent > 100) {
+    if (!Number.isFinite(percent) || percent <= 0 || percent > 100 || !Number.isFinite(duration)) {
       const reply = await message.channel.send({
         embeds: [
           new EmbedBuilder()
             .setColor(0xE74C3C)
             .setTitle('❌ Réduction invalide')
             .setDescription([
-              'Utilisation : `!reduc 20` ou `!reduc -20%`',
+              'Utilisation : `!reduc 20 2h` ou `!reduc -20% 30m`',
               '',
-              'Tu peux mettre n’importe quel nombre entre **0.01** et **100**.'
+              'Réduction : n’importe quel nombre entre **0.01** et **100**.',
+              'Durée : `30m`, `2h`, `1j` jusqu’à 30 jours maximum.'
             ].join('\n'))
         ]
       });
@@ -8476,15 +8619,19 @@ client.on('messageCreate', async message => {
       return deleteLater(reply);
     }
 
-    setGlobalDiscount(percent, message.author);
+    const endsAt = Date.now() + duration;
+    setGlobalDiscount(percent, message.author, endsAt);
+    const announcementMessage = await sendDiscountAnnouncement(message, percent, endsAt);
 
     await sendAdminLog('🏷️ Réduction boutique appliquée', [
       `Owner : ${logUser(message.author)}`,
       `Réduction : **-${formatDiscountPercent()}%**`,
+      discountCountdownLine(endsAt),
+      announcementMessage ? `Annonce : ${announcementMessage.url}` : 'Annonce : non envoyée',
       `Salon : ${logChannel(message.channel)}`
     ], 0x2ECC71);
 
-    const dmStats = await sendDiscountDmToClientMembers(message, percent);
+    const dmStats = await sendDiscountDmToClientMembers(message, percent, endsAt);
 
     return message.channel.send({
       embeds: [
@@ -8493,9 +8640,14 @@ client.on('messageCreate', async message => {
           .setTitle('🏷️ Réduction appliquée')
           .setDescription([
             `Réduction active : **-${formatDiscountPercent()}%**`,
+            discountCountdownLine(endsAt),
             '',
             'Elle s’applique à toute la boutique, sur les prix actuels.',
             'Utilise `!resetreduc` pour retirer la réduction.',
+            '',
+            announcementMessage
+              ? `📣 Annonce envoyée : ${announcementMessage.url}`
+              : `⚠️ Annonce non envoyée dans <#${AVAILABILITY_CHANNEL_ID}>.`,
             '',
             dmStats.skipped
               ? '📩 MP clients : non envoyé car un envoi est déjà en cours.'
