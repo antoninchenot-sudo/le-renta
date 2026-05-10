@@ -107,6 +107,7 @@ const REFERRALS_FILE = dataPath('referrals.json');
 const REVIEWS_FILE = dataPath('reviews.json');
 const INVITE_GIVEAWAY_FILE = dataPath('invite-giveaway.json');
 const MAINTENANCE_FILE = dataPath('maintenance-state.json');
+const ORDER_PAUSE_STATE_FILE = dataPath('order-pause-state.json');
 const SHOP_STATS_FILE = dataPath('shop-stats.json');
 const WARNINGS_FILE = dataPath('warnings.json');
 const BOT_CHANGELOG_FILE = dataPath('bot-changelog-state.json');
@@ -126,6 +127,7 @@ const DATA_BACKUP_FILES = [
   REVIEWS_FILE,
   INVITE_GIVEAWAY_FILE,
   MAINTENANCE_FILE,
+  ORDER_PAUSE_STATE_FILE,
   SHOP_STATS_FILE,
   WARNINGS_FILE,
   AVAILABILITY_STATE_FILE,
@@ -136,13 +138,13 @@ const DATA_BACKUP_FILES = [
   PRODUCT_STOCK_FILE,
   PAYMENT_CONFIG_FILE
 ];
-const BOT_CHANGELOG_VERSION = '2026-05-10-flash-discount-announcement';
+const BOT_CHANGELOG_VERSION = '2026-05-10-order-pause-mode';
 // Garder uniquement les changements du lot en cours, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'La commande !reduc demande maintenant une durée, exemple !reduc 20 2h.',
-  'Une annonce @everyone est envoyée dans le salon annonce avec un compte à rebours en temps réel.',
-  'La réduction se retire automatiquement à la fin de la durée choisie.',
-  'Les clients ayant déjà commandé reçoivent aussi un MP promo avec la fin de l’offre.'
+  'Ajout de la commande !pausecommande pour bloquer uniquement les nouvelles commandes pendant une durée choisie.',
+  'Envoi d’une annonce @everyone dans le salon annonce avec un compte à rebours en temps réel.',
+  'Les recharges, le portefeuille et le support restent accessibles pendant la pause commande.',
+  'La pause commande se retire automatiquement à la fin de la durée prévue, même après redémarrage du bot.'
 ];
 const REVIEW_REQUIRED_COUNT = 3;
 const REVIEW_REWARD_CENTS = 100;
@@ -461,6 +463,7 @@ let referrals = loadJsonFile(REFERRALS_FILE, { invitedBy: {}, stats: {}, inviteL
 let reviews = loadJsonFile(REVIEWS_FILE, { counter: 0, users: {}, photos: {}, entries: {} }, { backupDir: REVIEW_BACKUP_DIR });
 let inviteGiveawayState = loadJsonFile(INVITE_GIVEAWAY_FILE, { active: null, history: [] });
 let maintenanceState = loadJsonFile(MAINTENANCE_FILE, { enabled: false, updatedAt: null, updatedBy: null });
+let orderPauseState = loadJsonFile(ORDER_PAUSE_STATE_FILE, { enabled: false, endsAt: null, updatedAt: null, updatedBy: null, reason: null });
 let shopStats = loadJsonFile(SHOP_STATS_FILE, {
   totalRechargedCents: 0,
   totalRemovedCents: 0,
@@ -538,6 +541,19 @@ if (inviteGiveawayState.active && !Array.isArray(inviteGiveawayState.active.prog
 if (!walletHistory.users) walletHistory.users = {};
 if (!ticketHistory.users) ticketHistory.users = {};
 if (typeof maintenanceState.enabled !== 'boolean') maintenanceState.enabled = false;
+if (!orderPauseState || typeof orderPauseState !== 'object' || Array.isArray(orderPauseState)) {
+  orderPauseState = { enabled: false, endsAt: null, updatedAt: null, updatedBy: null, reason: null };
+}
+orderPauseState.enabled = Boolean(orderPauseState.enabled);
+orderPauseState.endsAt = Number(orderPauseState.endsAt) || null;
+orderPauseState.updatedAt = orderPauseState.updatedAt || null;
+orderPauseState.updatedBy = orderPauseState.updatedBy || null;
+orderPauseState.reason = orderPauseState.reason || null;
+if (orderPauseState.enabled && orderPauseState.endsAt && orderPauseState.endsAt <= Date.now()) {
+  orderPauseState.enabled = false;
+  orderPauseState.endsAt = null;
+  orderPauseState.reason = null;
+}
 if (!shopStats.products) shopStats.products = {};
 if (!shopStats.daily || typeof shopStats.daily !== 'object' || Array.isArray(shopStats.daily)) shopStats.daily = {};
 if (!shopStats.dailyRecapSentDates || typeof shopStats.dailyRecapSentDates !== 'object' || Array.isArray(shopStats.dailyRecapSentDates)) {
@@ -594,6 +610,7 @@ const clientDmBroadcastLocks = new Set();
 let availabilitySchedulerTimer = null;
 let dailyRecapSchedulerTimer = null;
 let discountSchedulerTimer = null;
+let orderPauseSchedulerTimer = null;
 let tariffRefreshTimer = null;
 const CRASH_LOG_COOLDOWN = 60_000;
 
@@ -674,6 +691,10 @@ function saveShopStats() {
 
 function saveMaintenanceState() {
   saveJsonFile(MAINTENANCE_FILE, maintenanceState);
+}
+
+function saveOrderPauseState() {
+  saveJsonFile(ORDER_PAUSE_STATE_FILE, orderPauseState);
 }
 
 function saveWarnings() {
@@ -1176,6 +1197,180 @@ async function replyMaintenance(interaction) {
     content: maintenanceNotice(),
     ephemeral: true
   });
+}
+
+function isOrderPauseActive() {
+  return Boolean(orderPauseState.enabled && orderPauseState.endsAt && Number(orderPauseState.endsAt) > Date.now());
+}
+
+function isOrderPauseEnabledFor(member) {
+  return Boolean(isOrderPauseActive() && !isOwnerMember(member));
+}
+
+function orderPauseCountdownLine(endsAt) {
+  const endUnix = Math.floor(Number(endsAt) / 1000);
+  return `⏳ Reprise des commandes : <t:${endUnix}:R> — <t:${endUnix}:f>`;
+}
+
+function orderPauseNotice() {
+  const updatedBy = orderPauseState.updatedBy ? `<@${orderPauseState.updatedBy}>` : 'un owner';
+  const enabledAt = orderPauseState.updatedAt ? `<t:${Math.floor(orderPauseState.updatedAt / 1000)}:R>` : 'récemment';
+
+  return [
+    '⏸️ **Commandes temporairement en pause**',
+    '',
+    `Les commandes ont été mises en pause par ${updatedBy} ${enabledAt}.`,
+    orderPauseState.reason ? `Raison : **${orderPauseState.reason}**` : null,
+    orderPauseState.endsAt ? orderPauseCountdownLine(orderPauseState.endsAt) : null,
+    '',
+    'Tu peux toujours consulter ton portefeuille, recharger ton solde ou ouvrir un ticket support.'
+  ].filter(Boolean).join('\n');
+}
+
+function setOrderPauseState(enabled, user, options = {}) {
+  orderPauseState.enabled = Boolean(enabled);
+  orderPauseState.endsAt = enabled ? Number(options.endsAt) || null : null;
+  orderPauseState.updatedAt = Date.now();
+  orderPauseState.updatedBy = user?.id || null;
+  orderPauseState.reason = enabled ? String(options.reason || '').trim() || null : null;
+  saveOrderPauseState();
+  scheduleDataBackup(enabled ? 'order_pause_enabled' : 'order_pause_disabled', user);
+  scheduleOrderPauseExpiration();
+}
+
+async function replyOrderPause(interaction) {
+  return replyTemp(interaction, {
+    content: orderPauseNotice(),
+    ephemeral: true
+  }, 60_000);
+}
+
+async function orderPauseAnnouncementChannel() {
+  return client.channels.cache.get(AVAILABILITY_CHANNEL_ID)
+    || await client.channels.fetch(AVAILABILITY_CHANNEL_ID).catch(() => null);
+}
+
+async function sendOrderPauseAnnouncement(source, endsAt, reason = '') {
+  const channel = await orderPauseAnnouncementChannel();
+  const owner = source?.author || source?.user || null;
+
+  if (!channel || typeof channel.send !== 'function') {
+    await sendAdminLog('⚠️ Annonce pause commande impossible', [
+      `Salon introuvable : <#${AVAILABILITY_CHANNEL_ID}>`,
+      owner ? `Owner : ${logUser(owner)}` : null
+    ], 0xF1C40F);
+    return null;
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor(0xE67E22)
+    .setTitle('⏸️ Commandes temporairement en pause')
+    .setDescription([
+      'Les commandes McD0 sont mises en pause temporairement.',
+      '',
+      orderPauseCountdownLine(endsAt),
+      reason ? `Raison : **${reason}**` : null,
+      '',
+      'Les recharges, le portefeuille et le support restent disponibles.'
+    ].filter(Boolean).join('\n'))
+    .setFooter({ text: 'La Rent’a • Pause commandes' })
+    .setTimestamp();
+
+  return channel.send({
+    content: '@everyone',
+    embeds: [embed],
+    allowedMentions: { parse: ['everyone'] }
+  }).catch(async error => {
+    await reportCrash('Annonce pause commande impossible', error, [
+      owner ? `Owner : ${logUser(owner)}` : null,
+      `Salon : ${logChannel(channel)}`
+    ].filter(Boolean));
+    return null;
+  });
+}
+
+async function sendOrderPauseEndedAnnouncement(user = client.user) {
+  const channel = await orderPauseAnnouncementChannel();
+
+  if (!channel || typeof channel.send !== 'function') {
+    await sendAdminLog('⚠️ Annonce reprise commande impossible', [
+      `Salon introuvable : <#${AVAILABILITY_CHANNEL_ID}>`
+    ], 0xF1C40F);
+    return null;
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor(0x2ECC71)
+    .setTitle('✅ Commandes rouvertes')
+    .setDescription([
+      'La pause commande est terminée.',
+      '',
+      `Tu peux maintenant retourner commander dans <#${SHOP_CHANNEL_ID}>.`
+    ].join('\n'))
+    .setFooter({ text: 'La Rent’a • Commandes disponibles' })
+    .setTimestamp();
+
+  return channel.send({
+    content: '@everyone',
+    embeds: [embed],
+    allowedMentions: { parse: ['everyone'] }
+  }).catch(async error => {
+    await reportCrash('Annonce reprise commande impossible', error, [
+      user ? `Déclenché par : ${logUser(user)}` : null,
+      `Salon : ${logChannel(channel)}`
+    ].filter(Boolean));
+    return null;
+  });
+}
+
+async function expireOrderPause() {
+  if (!orderPauseState.enabled) return false;
+
+  const endsAt = Number(orderPauseState.endsAt) || 0;
+  if (!endsAt || endsAt > Date.now()) {
+    scheduleOrderPauseExpiration();
+    return false;
+  }
+
+  orderPauseState.enabled = false;
+  orderPauseState.endsAt = null;
+  orderPauseState.updatedAt = Date.now();
+  orderPauseState.updatedBy = client.user?.id || null;
+  orderPauseState.reason = null;
+  saveOrderPauseState();
+  scheduleDataBackup('order_pause_expired', client.user);
+  scheduleOrderPauseExpiration();
+
+  const announcement = await sendOrderPauseEndedAnnouncement(client.user);
+  await sendAdminLog('✅ Pause commande terminée automatiquement', [
+    announcement ? `Annonce : ${announcement.url}` : 'Annonce : non envoyée'
+  ], 0x2ECC71);
+
+  return true;
+}
+
+function scheduleOrderPauseExpiration() {
+  if (orderPauseSchedulerTimer) {
+    clearTimeout(orderPauseSchedulerTimer);
+    orderPauseSchedulerTimer = null;
+  }
+
+  if (!orderPauseState.enabled || !orderPauseState.endsAt) return;
+
+  const maxDelay = 2_147_483_647;
+  const delay = Math.max(Number(orderPauseState.endsAt) - Date.now(), 0);
+
+  orderPauseSchedulerTimer = setTimeout(() => {
+    const remaining = Math.max(Number(orderPauseState.endsAt) - Date.now(), 0);
+    if (remaining > 0) {
+      scheduleOrderPauseExpiration();
+      return;
+    }
+
+    expireOrderPause().catch(error => reportCrash('Expiration pause commande impossible', error));
+  }, Math.min(delay, maxDelay));
+
+  orderPauseSchedulerTimer.unref?.();
 }
 
 function ensureWalletHistory(userId) {
@@ -6283,6 +6478,10 @@ async function handleProductOrder(interaction, productId) {
     return replyMaintenance(interaction);
   }
 
+  if (isOrderPauseEnabledFor(interaction.member)) {
+    return replyOrderPause(interaction);
+  }
+
   const uid = interaction.user.id;
   if (!wallets[uid]) wallets[uid] = { balance: 0 };
 
@@ -6357,9 +6556,17 @@ async function handleProductOrder(interaction, productId) {
   const codeConfirmation = await confirmOrderCodeRetrieval(interaction, product, prix);
   if (!codeConfirmation.confirmed) return;
 
+  if (isOrderPauseEnabledFor(interaction.member)) {
+    return replyOrderPause(codeConfirmation.interaction);
+  }
+
   const ticketConfirmation = await confirmOpeningAnotherTicket(codeConfirmation.interaction, 'commande');
   if (!ticketConfirmation.confirmed) return;
   const responseInteraction = ticketConfirmation.interaction;
+
+  if (isOrderPauseEnabledFor(interaction.member)) {
+    return replyOrderPause(responseInteraction);
+  }
 
   wallets[uid].balance -= prix;
   saveWallets();
@@ -6596,6 +6803,7 @@ function buildHelpEmbed(guild) {
           ['stock', 'affiche les produits en menu pour les rendre disponibles ou indisponibles.'],
           ['reduc nombre durée', 'applique une offre flash et annonce la réduction avec compte à rebours.'],
           ['resetreduc', 'retire la réduction globale.'],
+          ['pausecommande durée/off/status', 'met les nouvelles commandes en pause avec annonce et compte à rebours.'],
           ['paiements', 'modifie PayPal, Revolut et IBAN depuis Discord.']
         ]),
         inline: false
@@ -7871,6 +8079,7 @@ client.once('ready', async () => {
     startAvailabilityScheduler();
     startDailyRecapScheduler();
     scheduleDiscountExpiration();
+    scheduleOrderPauseExpiration();
     await refreshOrderQueueMessages('startup');
     await announceBotChangelog();
     await announcePersistentStorageStatus();
@@ -9331,6 +9540,116 @@ client.on('messageCreate', async message => {
     });
   }
 
+  if (message.content.trim().split(/\s+/)[0] === '!pausecommande') {
+    if (!isOwnerMember(message.member)) {
+      const reply = await message.channel.send('❌ Seul le rôle owner peut gérer la pause commande.');
+      return deleteLater(reply);
+    }
+
+    const args = message.content.trim().split(/\s+/);
+    const action = (args[1] || 'status').toLowerCase();
+
+    if (['status', 'statut'].includes(action)) {
+      const active = isOrderPauseActive();
+
+      return message.channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(active ? 0xE67E22 : 0x2ECC71)
+            .setTitle(active ? '⏸️ Pause commande active' : '✅ Commandes ouvertes')
+            .setDescription(active
+              ? [
+                  orderPauseCountdownLine(orderPauseState.endsAt),
+                  orderPauseState.updatedBy ? `Activée par : <@${orderPauseState.updatedBy}>` : null,
+                  orderPauseState.updatedAt ? `Depuis : <t:${Math.floor(orderPauseState.updatedAt / 1000)}:f>` : null,
+                  orderPauseState.reason ? `Raison : **${orderPauseState.reason}**` : null
+                ].filter(Boolean).join('\n')
+              : 'Les membres peuvent commander normalement.')
+        ]
+      });
+    }
+
+    if (['off', 'stop', 'reset', 'reprise', 'open'].includes(action)) {
+      const wasActive = isOrderPauseActive();
+      setOrderPauseState(false, message.author);
+      const announcement = wasActive ? await sendOrderPauseEndedAnnouncement(message.author) : null;
+
+      await sendAdminLog('✅ Pause commande désactivée', [
+        `Owner : ${logUser(message.author)}`,
+        `Salon commande : ${logChannel(message.channel)}`,
+        wasActive ? (announcement ? `Annonce : ${announcement.url}` : 'Annonce : non envoyée') : 'Statut : déjà désactivée'
+      ], 0x2ECC71);
+
+      return message.channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0x2ECC71)
+            .setTitle(wasActive ? '✅ Commandes rouvertes' : '✅ Commandes déjà ouvertes')
+            .setDescription(wasActive
+              ? [
+                  'Les membres peuvent de nouveau commander.',
+                  announcement ? `Annonce envoyée : ${announcement.url}` : `⚠️ Annonce non envoyée dans <#${AVAILABILITY_CHANNEL_ID}>.`
+                ].join('\n')
+              : 'Aucune pause commande active.')
+        ]
+      });
+    }
+
+    const durationInput = action === 'on' ? args[2] : args[1];
+    const reason = args.slice(action === 'on' ? 3 : 2).join(' ').trim();
+    const duration = parseDurationInput(durationInput);
+
+    if (!Number.isFinite(duration)) {
+      const reply = await message.channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0xE74C3C)
+            .setTitle('❌ Durée invalide')
+            .setDescription([
+              'Utilisation : `!pausecommande 30m`, `!pausecommande 2h` ou `!pausecommande 1j`',
+              '',
+              'Tu peux ajouter une raison après la durée :',
+              '`!pausecommande 1h réassort stock`',
+              '',
+              'Commandes utiles : `!pausecommande status` et `!pausecommande off`.'
+            ].join('\n'))
+        ]
+      });
+
+      return deleteLater(reply, 20_000);
+    }
+
+    const endsAt = Date.now() + duration;
+    setOrderPauseState(true, message.author, { endsAt, reason });
+    const announcement = await sendOrderPauseAnnouncement(message, endsAt, reason);
+
+    await sendAdminLog('⏸️ Pause commande activée', [
+      `Owner : ${logUser(message.author)}`,
+      `Salon commande : ${logChannel(message.channel)}`,
+      orderPauseCountdownLine(endsAt),
+      reason ? `Raison : **${reason}**` : null,
+      announcement ? `Annonce : ${announcement.url}` : 'Annonce : non envoyée'
+    ].filter(Boolean), 0xE67E22);
+
+    return message.channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0xE67E22)
+          .setTitle('⏸️ Commandes mises en pause')
+          .setDescription([
+            orderPauseCountdownLine(endsAt),
+            reason ? `Raison : **${reason}**` : null,
+            '',
+            'Les membres ne peuvent plus lancer de nouvelle commande pendant la pause.',
+            'Les owners peuvent encore tester si besoin.',
+            'Les recharges, le portefeuille et le support restent accessibles.',
+            '',
+            announcement ? `📣 Annonce envoyée : ${announcement.url}` : `⚠️ Annonce non envoyée dans <#${AVAILABILITY_CHANNEL_ID}>.`
+          ].filter(Boolean).join('\n'))
+      ]
+    });
+  }
+
   if (message.content.trim().split(/\s+/)[0] === '!history') {
     if (!isOwnerMember(message.member)) {
       const reply = await message.channel.send('❌ Seul le rôle owner peut consulter l’historique portefeuille.');
@@ -10337,6 +10656,10 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.customId === 'commande') {
       if (isMaintenanceEnabledFor(interaction.member)) {
         return replyMaintenance(interaction);
+      }
+
+      if (isOrderPauseEnabledFor(interaction.member)) {
+        return replyOrderPause(interaction);
       }
 
       sendActionLog(interaction.member, '🎫 Fenêtre commande ouverte', [
