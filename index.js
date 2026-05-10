@@ -136,12 +136,12 @@ const DATA_BACKUP_FILES = [
   PRODUCT_STOCK_FILE,
   PAYMENT_CONFIG_FILE
 ];
-const BOT_CHANGELOG_VERSION = '2026-05-10-client-history-panel';
+const BOT_CHANGELOG_VERSION = '2026-05-10-discount-client-dm';
 // Garder uniquement les changements du lot en cours, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Ajout de la commande !client @membre pour ouvrir une fiche client complète.',
-  'Ajout d’un menu interactif pour retrouver commandes, recharges, wallet, avis et tickets d’un membre.',
-  'Les boutons de la fiche client sont réservés au staff et aux owners.'
+  'Quand un owner utilise !reduc, les clients ayant déjà commandé reçoivent un MP promo.',
+  'L’envoi est ciblé uniquement sur le rôle client donné après une commande terminée.',
+  'Les envois impossibles sont comptés et loggés côté admin.'
 ];
 const REVIEW_REQUIRED_COUNT = 3;
 const REVIEW_REWARD_CENTS = 100;
@@ -6747,6 +6747,79 @@ async function sendDmToClientMembers(interaction, title, body) {
   }
 }
 
+async function sendDiscountDmToClientMembers(message, percent) {
+  const lockKey = message.guild.id;
+
+  if (clientDmBroadcastLocks.has(lockKey)) {
+    await sendAdminLog('🏷️ MP réduction non envoyé', [
+      `Owner : ${logUser(message.author)}`,
+      'Raison : un envoi MP clients est déjà en cours.'
+    ], 0xF1C40F);
+    return { recipients: 0, sent: 0, failed: 0, skipped: true };
+  }
+
+  clientDmBroadcastLocks.add(lockKey);
+
+  try {
+    const members = await message.guild.members.fetch();
+    const recipients = members
+      .filter(member => !member.user.bot && member.roles.cache.has(CUSTOMER_ROLE_ID))
+      .map(member => member);
+
+    if (!recipients.length) {
+      await sendAdminLog('🏷️ MP réduction annulé', [
+        `Owner : ${logUser(message.author)}`,
+        `Raison : aucun membre avec le rôle <@&${CUSTOMER_ROLE_ID}>`
+      ], 0xF1C40F);
+      return { recipients: 0, sent: 0, failed: 0, skipped: false };
+    }
+
+    const percentText = formatPercentValue(percent);
+    const embed = buildClientDmEmbed(
+      message.guild,
+      `🏷️ Réduction boutique -${percentText}%`,
+      [
+        `Une réduction de **-${percentText}%** vient d’être activée sur la boutique.`,
+        '',
+        'Elle s’applique automatiquement sur les produits disponibles tant qu’elle est active.',
+        '',
+        `Tu peux retourner commander ici : <#${SHOP_CHANNEL_ID}>`
+      ].join('\n'),
+      message.author
+    );
+    let sentCount = 0;
+    let failedCount = 0;
+    const failedSamples = [];
+
+    for (const member of recipients) {
+      const sent = await member.send({ embeds: [embed] })
+        .then(() => true)
+        .catch(() => {
+          failedCount += 1;
+          if (failedSamples.length < 10) failedSamples.push(`${member.user.tag || member.user.username} (${member.id})`);
+          return false;
+        });
+
+      if (sent) sentCount += 1;
+      if (CLIENT_DM_BROADCAST_DELAY > 0) await wait(CLIENT_DM_BROADCAST_DELAY);
+    }
+
+    await sendAdminLog('🏷️ MP réduction envoyé aux clients', [
+      `Owner : ${logUser(message.author)}`,
+      `Réduction : **-${percentText}%**`,
+      `Rôle ciblé : <@&${CUSTOMER_ROLE_ID}>`,
+      `Clients trouvés : **${recipients.length}**`,
+      `MP envoyés : **${sentCount}**`,
+      `MP impossibles : **${failedCount}**`,
+      failedSamples.length ? `Exemples MP fermés : ${failedSamples.join(', ')}` : null
+    ].filter(Boolean), failedCount ? 0xF1C40F : 0x2ECC71);
+
+    return { recipients: recipients.length, sent: sentCount, failed: failedCount, skipped: false };
+  } finally {
+    clientDmBroadcastLocks.delete(lockKey);
+  }
+}
+
 function buildCompletedOrderTicketEmbed(ticketRequest, dmSent) {
   return new EmbedBuilder()
     .setColor(0x2ECC71)
@@ -8411,6 +8484,8 @@ client.on('messageCreate', async message => {
       `Salon : ${logChannel(message.channel)}`
     ], 0x2ECC71);
 
+    const dmStats = await sendDiscountDmToClientMembers(message, percent);
+
     return message.channel.send({
       embeds: [
         new EmbedBuilder()
@@ -8420,7 +8495,11 @@ client.on('messageCreate', async message => {
             `Réduction active : **-${formatDiscountPercent()}%**`,
             '',
             'Elle s’applique à toute la boutique, sur les prix actuels.',
-            'Utilise `!resetreduc` pour retirer la réduction.'
+            'Utilise `!resetreduc` pour retirer la réduction.',
+            '',
+            dmStats.skipped
+              ? '📩 MP clients : non envoyé car un envoi est déjà en cours.'
+              : `📩 MP clients : **${dmStats.sent}/${dmStats.recipients}** envoyé(s) au rôle client.`
           ].join('\n'))
       ]
     });
