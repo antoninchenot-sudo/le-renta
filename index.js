@@ -61,6 +61,7 @@ const DELETE_DELAY = 10_000;
 const ARCHIVED_TICKET_TTL = 24 * 60 * 60 * 1000;
 const TICKET_NO_RESPONSE_REMINDER_DELAY = 60 * 60 * 1000;
 const TICKET_NO_RESPONSE_TTL = 4 * 60 * 60 * 1000;
+const ORDER_WARRANTY_DURATION = 15 * 60 * 1000;
 const WALLET_CONFIRMATION_TTL = 5 * 60 * 1000;
 const CLIENT_DM_BROADCAST_DELAY = 250;
 
@@ -135,14 +136,12 @@ const DATA_BACKUP_FILES = [
   PRODUCT_STOCK_FILE,
   PAYMENT_CONFIG_FILE
 ];
-const BOT_CHANGELOG_VERSION = '2026-05-10-review-rewards';
+const BOT_CHANGELOG_VERSION = '2026-05-10-client-history-panel';
 // Garder uniquement les changements du lot en cours, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Ajout du système d’avis récompensés : 3 avis comptés donnent 1.00€ sur le portefeuille.',
-  'Sauvegarde complète des avis dans reviews.json avec backups dédiés.',
-  'Un seul avis par jour compte par membre, et une photo déjà utilisée ne recompte pas.',
-  'Envoi d’un MP au membre quand un avis compte, ne compte pas, ou débloque une récompense.',
-  'Ajout des logs avis avec bouton Annuler avis pour corriger une erreur staff.'
+  'Ajout de la commande !client @membre pour ouvrir une fiche client complète.',
+  'Ajout d’un menu interactif pour retrouver commandes, recharges, wallet, avis et tickets d’un membre.',
+  'Les boutons de la fiche client sont réservés au staff et aux owners.'
 ];
 const REVIEW_REQUIRED_COUNT = 3;
 const REVIEW_REWARD_CENTS = 100;
@@ -798,6 +797,10 @@ function canManageReviews(member) {
   );
 }
 
+function canViewClientProfile(member) {
+  return canManageReviews(member);
+}
+
 function createRequest(type, channelId, userId, data = {}) {
   requests.counter += 1;
   const prefix = type === 'recharge' ? 'R' : type === 'support' ? 'S' : 'C';
@@ -1181,7 +1184,9 @@ function walletHistoryTypeLabel(type) {
     remove: 'Retrait manuel',
     order: 'Commande payée',
     refund: 'Remboursement commande',
-    referral: 'Récompense parrainage'
+    referral: 'Récompense parrainage',
+    review_reward: 'Récompense avis',
+    review_cancel: 'Annulation avis'
   };
 
   return labels[type] || 'Action portefeuille';
@@ -1337,6 +1342,26 @@ function getTicketHistoryRows(userId) {
   return [...rows.values()]
     .sort((a, b) => Number(b.createdAt || b.updatedAt || 0) - Number(a.createdAt || a.updatedAt || 0))
     .slice(0, 10);
+}
+
+function getClientTicketRows(userId, options = {}) {
+  const rows = new Map();
+  const limit = Number(options.limit) || 10;
+
+  for (const entry of ensureTicketHistory(userId)) {
+    const key = entry.id || entry.channelId;
+    if (key) rows.set(key, entry);
+  }
+
+  for (const entry of currentTicketHistoryRecords(userId)) {
+    const key = entry.id || entry.channelId;
+    if (key) rows.set(key, { ...rows.get(key), ...entry });
+  }
+
+  return [...rows.values()]
+    .filter(entry => !options.type || entry.type === options.type)
+    .sort((a, b) => Number(b.createdAt || b.updatedAt || 0) - Number(a.createdAt || a.updatedAt || 0))
+    .slice(0, limit);
 }
 
 function formatTicketHistoryLine(ticketRequest, index) {
@@ -1741,6 +1766,185 @@ async function cancelReviewById(reviewId, actorUser, guild = null) {
   ], 0xE67E22);
 
   return { ok: true, message: `Avis ${entry.id} annulé.`, entry, rewardDelta, newBalance };
+}
+
+function clientProfileButton(view, targetUserId, label, emoji, activeView) {
+  return new ButtonBuilder()
+    .setCustomId(`client_profile:${view}:${targetUserId}`)
+    .setLabel(label)
+    .setEmoji(emoji)
+    .setStyle(view === activeView ? ButtonStyle.Primary : ButtonStyle.Secondary)
+    .setDisabled(view === activeView);
+}
+
+function clientProfileComponents(targetUserId, activeView = 'overview') {
+  return [
+    new ActionRowBuilder().addComponents(
+      clientProfileButton('overview', targetUserId, 'Fiche', '👤', activeView),
+      clientProfileButton('orders', targetUserId, 'Commandes', '📦', activeView),
+      clientProfileButton('recharges', targetUserId, 'Recharges', '💳', activeView),
+      clientProfileButton('wallet', targetUserId, 'Wallet', '👛', activeView),
+      clientProfileButton('reviews', targetUserId, 'Avis', '⭐', activeView)
+    ),
+    new ActionRowBuilder().addComponents(
+      clientProfileButton('tickets', targetUserId, 'Tickets', '🎫', activeView)
+    )
+  ];
+}
+
+function clientProfileDate(timestamp) {
+  return timestamp ? `<t:${Math.floor(timestamp / 1000)}:f>` : 'Date inconnue';
+}
+
+function clientProfileTicketLink(row) {
+  return row?.channelId ? `<#${row.channelId}>` : 'Ticket supprimé / introuvable';
+}
+
+function clientOrderLine(row, index) {
+  return [
+    `**${index + 1}. #${row.id || 'inconnu'} — ${row.product || 'Produit non précisé'}**`,
+    `Statut : **${ticketStatusLabel(row)}**`,
+    `Payé : **${formatWalletAmount(Number(row.price) || 0)}**`,
+    row.completedAt ? `Terminée : ${clientProfileDate(row.completedAt)}${row.completedBy ? ` par <@${row.completedBy}>` : ''}` : `Créée : ${clientProfileDate(row.createdAt)}`,
+    row.refundedAt ? `Remboursée : **${formatWalletAmount(Number(row.refundedAmount || row.price) || 0)}** le ${clientProfileDate(row.refundedAt)}` : null,
+    `Ticket : ${clientProfileTicketLink(row)}`
+  ].filter(Boolean).join('\n');
+}
+
+function clientRechargeLine(row, index) {
+  return [
+    `**${index + 1}. #${row.id || 'inconnu'} — ${row.amount || 'Montant non précisé'}**`,
+    `Statut : **${ticketStatusLabel(row)}**`,
+    `Moyen : **${row.method ? paymentLabel(row.method) : 'Non précisé'}**`,
+    row.paidAt ? `Validée : ${clientProfileDate(row.paidAt)}${row.paidBy ? ` par <@${row.paidBy}>` : ''}` : `Créée : ${clientProfileDate(row.createdAt)}`,
+    row.validatedAmount ? `Montant validé : **${row.validatedAmount}**` : null,
+    `Ticket : ${clientProfileTicketLink(row)}`
+  ].filter(Boolean).join('\n');
+}
+
+function clientReviewRows(userId, limit = 10) {
+  return Object.values(reviews.entries || {})
+    .filter(entry => entry.userId === userId)
+    .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0))
+    .slice(0, limit);
+}
+
+function clientReviewLine(entry, index) {
+  const link = reviewMessageLink(entry);
+  const status = entry.status === 'counted'
+    ? 'Compté'
+    : entry.status === 'cancelled'
+      ? 'Annulé'
+      : `Non compté (${reviewIgnoredReasonLabel(entry.ignoredReason)})`;
+
+  return [
+    `**${index + 1}. ${entry.id || 'Avis'} — ${status}**`,
+    `Date : ${clientProfileDate(entry.createdAt)}`,
+    entry.status === 'counted' ? `Progression après : **${reviewProgressText(entry.progressAfter)}**` : null,
+    entry.rewardGranted ? `Récompense : **+${formatCents(REVIEW_REWARD_CENTS)}**` : null,
+    entry.imageUrls?.length ? 'Photo : oui' : 'Photo : non',
+    link ? `Message : ${link}` : null
+  ].filter(Boolean).join('\n');
+}
+
+function buildClientProfileOverviewEmbed(user) {
+  const balance = Number(wallets[user.id]?.balance) || 0;
+  const orders = getClientTicketRows(user.id, { type: 'commande', limit: 100 });
+  const recharges = getClientTicketRows(user.id, { type: 'recharge', limit: 100 });
+  const completedOrders = orders.filter(row => row.completedAt);
+  const validatedRecharges = recharges.filter(row => row.paidAt);
+  const walletEntries = ensureWalletHistory(user.id);
+  const reviewStats = ensureReviewUserStats(user.id);
+  const referralSummary = getReferralSummary(user.id);
+
+  return new EmbedBuilder()
+    .setColor(0xD4AF37)
+    .setAuthor({ name: `Fiche client — ${user.tag}`, iconURL: user.displayAvatarURL({ dynamic: true }) })
+    .setTitle('👤 Fiche client')
+    .setDescription([
+      `Membre : ${user}`,
+      `ID : \`${user.id}\``,
+      '',
+      `👛 Solde actuel : **${formatWalletAmount(balance)}**`,
+      `📦 Commandes terminées : **${completedOrders.length}** / ${orders.length} enregistrée(s)`,
+      `💳 Recharges validées : **${validatedRecharges.length}** / ${recharges.length} enregistrée(s)`,
+      `⭐ Avis : **${reviewProgressText(reviewStats.progress)}** • Total comptés : **${reviewStats.totalCounted}**`,
+      `🎁 Parrainage : **${referralSummary.validated.length}** validé(s) / **${referralSummary.pending.length}** en attente`,
+      `📜 Mouvements wallet : **${walletEntries.length}**`
+    ].join('\n'))
+    .setFooter({ text: 'Utilise les boutons pour naviguer dans l’historique client' })
+    .setTimestamp();
+}
+
+function buildClientProfileOrdersEmbed(user) {
+  const rows = getClientTicketRows(user.id, { type: 'commande', limit: 10 });
+
+  return new EmbedBuilder()
+    .setColor(0x3498DB)
+    .setAuthor({ name: `Commandes — ${user.tag}`, iconURL: user.displayAvatarURL({ dynamic: true }) })
+    .setTitle('📦 Historique commandes')
+    .setDescription(rows.length
+      ? rows.map(clientOrderLine).join('\n\n')
+      : 'Aucune commande enregistrée pour ce membre.')
+    .setFooter({ text: 'Affichage limité aux 10 dernières commandes' })
+    .setTimestamp();
+}
+
+function buildClientProfileRechargesEmbed(user) {
+  const rows = getClientTicketRows(user.id, { type: 'recharge', limit: 10 });
+
+  return new EmbedBuilder()
+    .setColor(0x2ECC71)
+    .setAuthor({ name: `Recharges — ${user.tag}`, iconURL: user.displayAvatarURL({ dynamic: true }) })
+    .setTitle('💳 Historique recharges')
+    .setDescription(rows.length
+      ? rows.map(clientRechargeLine).join('\n\n')
+      : 'Aucune recharge enregistrée pour ce membre.')
+    .setFooter({ text: 'Affichage limité aux 10 dernières recharges' })
+    .setTimestamp();
+}
+
+function buildClientProfileWalletEmbed(user) {
+  return buildWalletHistoryEmbed(user)
+    .setAuthor({ name: `Wallet — ${user.tag}`, iconURL: user.displayAvatarURL({ dynamic: true }) });
+}
+
+function buildClientProfileReviewsEmbed(user) {
+  const rows = clientReviewRows(user.id, 10);
+  const stats = ensureReviewUserStats(user.id);
+
+  return new EmbedBuilder()
+    .setColor(0xF1C40F)
+    .setAuthor({ name: `Avis — ${user.tag}`, iconURL: user.displayAvatarURL({ dynamic: true }) })
+    .setTitle('⭐ Historique avis')
+    .setDescription(rows.length
+      ? rows.map(clientReviewLine).join('\n\n')
+      : 'Aucun avis enregistré pour ce membre.')
+    .addFields({
+      name: 'Progression',
+      value: [
+        `Progression actuelle : **${reviewProgressText(stats.progress)}**`,
+        `Avis comptés : **${stats.totalCounted}**`,
+        `Récompenses reçues : **${stats.rewardsEarned}**`
+      ].join('\n'),
+      inline: false
+    })
+    .setFooter({ text: 'Affichage limité aux 10 derniers avis' })
+    .setTimestamp();
+}
+
+function buildClientProfileTicketsEmbed(user) {
+  return buildTicketHistoryEmbed(user)
+    .setAuthor({ name: `Tickets — ${user.tag}`, iconURL: user.displayAvatarURL({ dynamic: true }) });
+}
+
+function buildClientProfileEmbed(user, view = 'overview') {
+  if (view === 'orders') return buildClientProfileOrdersEmbed(user);
+  if (view === 'recharges') return buildClientProfileRechargesEmbed(user);
+  if (view === 'wallet') return buildClientProfileWalletEmbed(user);
+  if (view === 'reviews') return buildClientProfileReviewsEmbed(user);
+  if (view === 'tickets') return buildClientProfileTicketsEmbed(user);
+  return buildClientProfileOverviewEmbed(user);
 }
 
 function getDailyRecapDateParts(timestamp = Date.now()) {
@@ -6295,6 +6499,7 @@ function buildHelpEmbed(guild) {
           ['unwarn @membre [nombre]', 'retire les derniers warns.'],
           ['clearwarns @membre', 'supprime tous les warns du membre.'],
           ['wallet @membre', 'affiche le solde d’un membre.'],
+          ['client @membre', 'ouvre une fiche avec commandes, recharges, wallet, avis et tickets.'],
           ['invites @membre', 'affiche les infos parrainage d’un membre.'],
           ['topinvites', 'affiche le classement parrainage.']
         ]),
@@ -6558,19 +6763,39 @@ function buildCompletedOrderTicketEmbed(ticketRequest, dmSent) {
         : '⚠️ Impossible d’envoyer un MP au client.',
       'Merci de conserver les informations de livraison dans ce ticket.',
       '',
-      '**Avis** ⭐️',
-      '',
-      'Ta commande est terminée, merci pour ta confiance !',
-      '',
-      `N’hésite pas à laisser un avis ici : <#${AVIS_CHANNEL_ID}>`,
-      'Et si tu as apprécié le service, parle-en autour de toi !',
-      '',
-      'Bon appétit 😋',
+      ...completedOrderReminderLines({
+        includeWarrantyCountdown: true,
+        completedAt: ticketRequest?.completedAt
+      }),
       '',
       'Ce ticket commande sera supprimé automatiquement dans 24h. 🕒'
     ].join('\n'))
     .setFooter({ text: 'Boutique' })
     .setTimestamp();
+}
+
+function completedOrderReminderLines(options = {}) {
+  const completedAt = Number(options.completedAt) || Date.now();
+  const warrantyEndsAt = completedAt + ORDER_WARRANTY_DURATION;
+  const warrantyEndsUnix = Math.floor(warrantyEndsAt / 1000);
+
+  return [
+    '**Avis récompensé** ⭐️',
+    '',
+    `Tu peux laisser un avis ici : <#${AVIS_CHANNEL_ID}>.`,
+    `Tous les **${REVIEW_REQUIRED_COUNT} avis validés**, tu gagnes **${formatCents(REVIEW_REWARD_CENTS)}** sur ton portefeuille.`,
+    '',
+    '**Validité et garantie du QR**',
+    '',
+    'Le QR code est valable **24h**.',
+    'La garantie est de **15 minutes après la livraison**.',
+    options.includeWarrantyCountdown
+      ? `⏳ Compte à rebours garantie : <t:${warrantyEndsUnix}:R> — fin à <t:${warrantyEndsUnix}:t>.`
+      : null,
+    'Après ce délai, aucun remboursement ne sera fourni.',
+    '',
+    'Merci pour ta confiance.'
+  ].filter(Boolean);
 }
 
 function buildCompletedOrderDmEmbed(ticketRequest) {
@@ -6582,8 +6807,7 @@ function buildCompletedOrderDmEmbed(ticketRequest) {
       '',
       `🧾 Demande : #${ticketRequest?.id || 'Non précisée'}`,
       '',
-      'Merci pour ta confiance !',
-      `Tu peux laisser un avis ici : <#${AVIS_CHANNEL_ID}>.`
+      ...completedOrderReminderLines()
     ].join('\n'))
     .setFooter({ text: 'Boutique' })
     .setTimestamp();
@@ -7616,7 +7840,8 @@ client.on('messageCreate', async message => {
     const commandName = message.content.trim().split(/\s+/)[0].toLowerCase();
     const canUseCommand = isAdminMember(message.member)
       || (commandName === '!ban' && canUseBanCommand(message.member))
-      || (commandName === '!annulavis' && canManageReviews(message.member));
+      || (commandName === '!annulavis' && canManageReviews(message.member))
+      || (commandName === '!client' && canViewClientProfile(message.member));
 
     if (!canUseCommand) {
       await sendActionLog(message.member, '⛔ Commande refusée', [
@@ -8905,6 +9130,39 @@ client.on('messageCreate', async message => {
     return message.channel.send({ embeds: [buildWalletHistoryEmbed(user)] });
   }
 
+  if (message.content.trim().split(/\s+/)[0] === '!client') {
+    if (!canViewClientProfile(message.member)) {
+      const reply = await message.channel.send('❌ Seul le staff ou les owners peuvent consulter une fiche client.');
+      return deleteLater(reply);
+    }
+
+    const user = message.mentions.users.first();
+
+    if (!user) {
+      const reply = await message.channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0xE74C3C)
+            .setTitle('❌ Commande invalide')
+            .setDescription('Utilisation : `!client @membre`')
+        ]
+      });
+
+      return deleteLater(reply);
+    }
+
+    await sendAdminLog('👤 Fiche client consultée', [
+      `Staff : ${logUser(message.author)}`,
+      `Membre : ${logUser(user)}`,
+      `Salon : ${logChannel(message.channel)}`
+    ], 0x3498DB);
+
+    return message.channel.send({
+      embeds: [buildClientProfileEmbed(user, 'overview')],
+      components: clientProfileComponents(user.id, 'overview')
+    });
+  }
+
   if (message.content.trim().split(/\s+/)[0] === '!tickets') {
     if (!isOwnerMember(message.member)) {
       const reply = await message.channel.send('❌ Seul le rôle owner peut consulter l’historique tickets.');
@@ -9083,6 +9341,30 @@ client.on(Events.InteractionCreate, async interaction => {
       return interaction.reply({
         content: result.ok ? `✅ ${result.message}` : `❌ ${result.message}`,
         ephemeral: true
+      });
+    }
+
+    if (interaction.customId.startsWith('client_profile:')) {
+      if (!canViewClientProfile(interaction.member)) {
+        return interaction.reply({
+          content: '❌ Seul le staff ou les owners peuvent consulter une fiche client.',
+          ephemeral: true
+        });
+      }
+
+      const [, view, targetUserId] = interaction.customId.split(':');
+      const targetUser = await client.users.fetch(targetUserId).catch(() => null);
+
+      if (!targetUser) {
+        return interaction.reply({
+          content: '❌ Membre introuvable.',
+          ephemeral: true
+        });
+      }
+
+      return interaction.update({
+        embeds: [buildClientProfileEmbed(targetUser, view)],
+        components: clientProfileComponents(targetUser.id, view)
       });
     }
 
