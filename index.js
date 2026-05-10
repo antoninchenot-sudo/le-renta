@@ -48,6 +48,7 @@ const ADMIN_CHANGELOG_CHANNEL_ID = '1500475167313231983';
 const AVAILABILITY_CHANNEL_ID = '1310355422993186896';
 const DAILY_RECAP_CHANNEL_ID = '1502779855152877578';
 const AVIS_CHANNEL_ID = '1497652398259306516';
+const REVIEW_LOG_CHANNEL_ID = '1502983277349441606';
 const INVITE_ANNOUNCE_CHANNEL_ID = '1310355769824383059';
 const INVITE_ADMIN_CHANNEL_ID = '1499523428112142568';
 const INVITE_GIVEAWAY_CHANNEL_ID = '1498450310832717825';
@@ -83,6 +84,7 @@ const DEFAULT_PAYMENT_CONFIG = {
   updatedBy: null
 };
 const NO_NOTE_TEXT = '❗❗ Aucune note / aucun commentaire / aucun libellé lors du paiement ❗❗';
+const PAYMENT_COUNTING_RULE_TEXT = '⚠️ **Tout paiement avec une note, un commentaire ou un libellé ne sera pas comptabilisé. Pour PayPal, le paiement doit aussi être envoyé en amis/proches, sinon il ne sera pas comptabilisé.**';
 const WALLET_FILE = dataPath('wallets.json');
 const WALLET_HISTORY_FILE = dataPath('wallet-history.json');
 const WALLET_HISTORY_LIMIT = 50;
@@ -92,6 +94,8 @@ const WALLET_BACKUP_DIR = dataPath('backups', 'wallets');
 const WALLET_BACKUP_LIMIT = 50;
 const REFERRAL_BACKUP_DIR = dataPath('backups', 'referrals');
 const REFERRAL_BACKUP_LIMIT = Infinity;
+const REVIEW_BACKUP_DIR = dataPath('backups', 'reviews');
+const REVIEW_BACKUP_LIMIT = Infinity;
 const PRODUCT_CATALOG_BACKUP_DIR = dataPath('backups', 'product-catalog');
 const PRODUCT_CATALOG_BACKUP_LIMIT = 50;
 const DATA_BACKUP_DIR = dataPath('backups', 'data');
@@ -99,6 +103,7 @@ const DATA_BACKUP_LIMIT = 50;
 const DATA_BACKUP_DEBOUNCE_DELAY = 1_500;
 const REQUESTS_FILE = dataPath('requests.json');
 const REFERRALS_FILE = dataPath('referrals.json');
+const REVIEWS_FILE = dataPath('reviews.json');
 const INVITE_GIVEAWAY_FILE = dataPath('invite-giveaway.json');
 const MAINTENANCE_FILE = dataPath('maintenance-state.json');
 const SHOP_STATS_FILE = dataPath('shop-stats.json');
@@ -117,6 +122,7 @@ const DATA_BACKUP_FILES = [
   TICKET_HISTORY_FILE,
   REQUESTS_FILE,
   REFERRALS_FILE,
+  REVIEWS_FILE,
   INVITE_GIVEAWAY_FILE,
   MAINTENANCE_FILE,
   SHOP_STATS_FILE,
@@ -129,14 +135,17 @@ const DATA_BACKUP_FILES = [
   PRODUCT_STOCK_FILE,
   PAYMENT_CONFIG_FILE
 ];
-const BOT_CHANGELOG_VERSION = '2026-05-09-order-queue-daily-recap';
+const BOT_CHANGELOG_VERSION = '2026-05-10-review-rewards';
 // Garder uniquement les changements du lot en cours, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Ajout d’une file d’attente en temps réel dans les tickets commande.',
-  'Mise à jour automatique des positions quand une commande est créée, terminée, remboursée ou archivée.',
-  'Ajout d’un récap quotidien envoyé à 23h59 dans le salon stats.',
-  'Le récap compte les recharges validées, le montant validé, les commandes terminées, les nouveaux clients et le top produits.'
+  'Ajout du système d’avis récompensés : 3 avis comptés donnent 1.00€ sur le portefeuille.',
+  'Sauvegarde complète des avis dans reviews.json avec backups dédiés.',
+  'Un seul avis par jour compte par membre, et une photo déjà utilisée ne recompte pas.',
+  'Envoi d’un MP au membre quand un avis compte, ne compte pas, ou débloque une récompense.',
+  'Ajout des logs avis avec bouton Annuler avis pour corriger une erreur staff.'
 ];
+const REVIEW_REQUIRED_COUNT = 3;
+const REVIEW_REWARD_CENTS = 100;
 const AVAILABILITY_TIMEZONE = 'Europe/Paris';
 const DAILY_RECAP_TIMEZONE = 'Europe/Paris';
 const DAILY_RECAP_HOUR = 23;
@@ -449,6 +458,7 @@ let walletHistory = loadJsonFile(WALLET_HISTORY_FILE, { users: {} });
 let ticketHistory = loadJsonFile(TICKET_HISTORY_FILE, { users: {} });
 let requests = loadJsonFile(REQUESTS_FILE, { counter: 0, tickets: {} });
 let referrals = loadJsonFile(REFERRALS_FILE, { invitedBy: {}, stats: {}, inviteLinks: {} }, { backupDir: REFERRAL_BACKUP_DIR });
+let reviews = loadJsonFile(REVIEWS_FILE, { counter: 0, users: {}, photos: {}, entries: {} }, { backupDir: REVIEW_BACKUP_DIR });
 let inviteGiveawayState = loadJsonFile(INVITE_GIVEAWAY_FILE, { active: null, history: [] });
 let maintenanceState = loadJsonFile(MAINTENANCE_FILE, { enabled: false, updatedAt: null, updatedBy: null });
 let shopStats = loadJsonFile(SHOP_STATS_FILE, {
@@ -492,6 +502,14 @@ if (fs.existsSync(REFERRALS_FILE)) {
   }
 }
 
+if (fs.existsSync(REVIEWS_FILE)) {
+  try {
+    backupJsonSnapshot(REVIEWS_FILE, REVIEW_BACKUP_DIR, REVIEW_BACKUP_LIMIT);
+  } catch (error) {
+    console.error('Impossible de créer la sauvegarde initiale des avis.', error);
+  }
+}
+
 if (fs.existsSync(PRODUCT_CATALOG_FILE)) {
   try {
     backupJsonSnapshot(PRODUCT_CATALOG_FILE, PRODUCT_CATALOG_BACKUP_DIR, PRODUCT_CATALOG_BACKUP_LIMIT);
@@ -501,6 +519,13 @@ if (fs.existsSync(PRODUCT_CATALOG_FILE)) {
 }
 
 if (!referrals.inviteLinks) referrals.inviteLinks = {};
+if (!reviews || typeof reviews !== 'object' || Array.isArray(reviews)) {
+  reviews = { counter: 0, users: {}, photos: {}, entries: {} };
+}
+if (!reviews.users || typeof reviews.users !== 'object' || Array.isArray(reviews.users)) reviews.users = {};
+if (!reviews.photos || typeof reviews.photos !== 'object' || Array.isArray(reviews.photos)) reviews.photos = {};
+if (!reviews.entries || typeof reviews.entries !== 'object' || Array.isArray(reviews.entries)) reviews.entries = {};
+reviews.counter = Number(reviews.counter) || 0;
 if (!inviteGiveawayState || typeof inviteGiveawayState !== 'object' || Array.isArray(inviteGiveawayState)) {
   inviteGiveawayState = { active: null, history: [] };
 }
@@ -589,6 +614,16 @@ function saveReferrals() {
   });
 
   if (saved) scheduleDataBackup('referrals_updated');
+  return saved;
+}
+
+function saveReviews() {
+  const saved = saveJsonFile(REVIEWS_FILE, reviews, {
+    backupDir: REVIEW_BACKUP_DIR,
+    backupLimit: REVIEW_BACKUP_LIMIT
+  });
+
+  if (saved) scheduleDataBackup('reviews_updated');
   return saved;
 }
 
@@ -723,6 +758,10 @@ function interactionActionLockKey(interaction) {
     return `refund-action:${customId.split(':')[1] || channelId}`;
   }
 
+  if (customId.startsWith('cancel_review:')) {
+    return `review-action:${customId.split(':')[1] || channelId}`;
+  }
+
   return null;
 }
 
@@ -738,6 +777,17 @@ function isOwnerMember(member) {
 }
 
 function canUseBanCommand(member) {
+  const roles = member?.roles?.cache;
+
+  return Boolean(
+    roles?.has(ADMIN_ROLE_ID) ||
+    roles?.has(STAFF_ROLE_ID) ||
+    roles?.has(TICKET_ACCESS_ROLE_ID) ||
+    member?.permissions?.has?.(PermissionFlagsBits.Administrator)
+  );
+}
+
+function canManageReviews(member) {
   const roles = member?.roles?.cache;
 
   return Boolean(
@@ -1334,6 +1384,363 @@ function buildTicketHistoryEmbed(user) {
     .setThumbnail(user.displayAvatarURL({ dynamic: true }))
     .setFooter({ text: 'Historique limité aux 10 derniers tickets affichés' })
     .setTimestamp();
+}
+
+function ensureReviewUserStats(userId) {
+  if (!reviews.users[userId] || typeof reviews.users[userId] !== 'object' || Array.isArray(reviews.users[userId])) {
+    reviews.users[userId] = {
+      progress: 0,
+      totalCounted: 0,
+      rewardsEarned: 0,
+      lastCountedDate: null,
+      reviewIds: []
+    };
+  }
+
+  const stats = reviews.users[userId];
+  stats.progress = Number(stats.progress) || 0;
+  stats.totalCounted = Number(stats.totalCounted) || 0;
+  stats.rewardsEarned = Number(stats.rewardsEarned) || 0;
+  stats.lastCountedDate = stats.lastCountedDate || null;
+  if (!Array.isArray(stats.reviewIds)) stats.reviewIds = [];
+  return stats;
+}
+
+function nextReviewId() {
+  reviews.counter = (Number(reviews.counter) || 0) + 1;
+  return `A-${String(reviews.counter).padStart(4, '0')}`;
+}
+
+function reviewProgressText(progress) {
+  return `${Number(progress) || 0}/${REVIEW_REQUIRED_COUNT}`;
+}
+
+function isReviewImageAttachment(attachment) {
+  const contentType = String(attachment.contentType || '').toLowerCase();
+  const name = String(attachment.name || attachment.url || '').toLowerCase();
+  return contentType.startsWith('image/') || /\.(png|jpe?g|webp|gif)$/i.test(name);
+}
+
+function reviewImageAttachments(message) {
+  return [...message.attachments.values()].filter(isReviewImageAttachment);
+}
+
+function reviewPhotoKey(attachment) {
+  return [
+    String(attachment.contentType || 'image').toLowerCase(),
+    Number(attachment.size) || 0,
+    Number(attachment.width) || 0,
+    Number(attachment.height) || 0
+  ].join(':');
+}
+
+function activeReviewForPhotoKey(photoKey) {
+  const reviewId = reviews.photos?.[photoKey];
+  const entry = reviewId ? reviews.entries?.[reviewId] : null;
+
+  if (entry && entry.status === 'counted') return entry;
+  if (reviewId) delete reviews.photos[photoKey];
+  return null;
+}
+
+function reviewMessageLink(entry) {
+  if (!entry?.guildId || !entry?.channelId || !entry?.messageId) return null;
+  return `https://discord.com/channels/${entry.guildId}/${entry.channelId}/${entry.messageId}`;
+}
+
+function reviewCancelButton(entry, disabled = false) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`cancel_review:${entry.id}`)
+      .setLabel(disabled ? 'Avis annulé' : 'Annuler avis')
+      .setEmoji(disabled ? '✅' : '↩️')
+      .setStyle(disabled ? ButtonStyle.Secondary : ButtonStyle.Danger)
+      .setDisabled(disabled)
+  );
+}
+
+function reviewIgnoredReasonLabel(reason) {
+  return {
+    not_customer: 'Le membre doit avoir une commande terminée pour que l’avis compte.',
+    daily_limit: 'Un seul avis par jour peut compter.',
+    duplicate_photo: 'Cette photo a déjà été utilisée pour un avis compté.'
+  }[reason] || 'Avis non comptabilisé.';
+}
+
+function buildReviewLogEmbed(entry) {
+  const link = reviewMessageLink(entry);
+  const isCounted = entry.status === 'counted';
+  const color = isCounted ? 0x2ECC71 : entry.status === 'cancelled' ? 0xE67E22 : 0xF1C40F;
+  const title = isCounted
+    ? '✅ Avis comptabilisé'
+    : entry.status === 'cancelled'
+      ? '↩️ Avis annulé'
+      : '⚠️ Avis non comptabilisé';
+  const lines = [
+    `Membre : <@${entry.userId}>`,
+    `Avis : **${entry.id}**`,
+    link ? `Message : ${link}` : null,
+    entry.imageUrls?.length ? `Photo : ${entry.imageUrls[0]}` : 'Photo : aucune',
+    entry.status === 'ignored' ? `Raison : **${reviewIgnoredReasonLabel(entry.ignoredReason)}**` : null,
+    entry.status === 'counted' ? `Progression : **${reviewProgressText(entry.progressAfter)}**` : null,
+    entry.status === 'counted' && entry.rewardGranted ? `Récompense : **+${formatCents(REVIEW_REWARD_CENTS)}**` : null,
+    entry.status === 'cancelled' ? `Annulé par : <@${entry.cancelledBy}>` : null,
+    entry.rewardAdjustmentCents ? `Correction wallet : **${formatCents(entry.rewardAdjustmentCents)}**` : null
+  ].filter(Boolean);
+
+  return new EmbedBuilder()
+    .setColor(color)
+    .setTitle(title)
+    .setDescription(lines.join('\n'))
+    .setTimestamp(entry.cancelledAt || entry.countedAt || entry.createdAt || Date.now());
+}
+
+async function sendReviewLog(entry) {
+  const channel = client.channels.cache.get(REVIEW_LOG_CHANNEL_ID)
+    || await client.channels.fetch(REVIEW_LOG_CHANNEL_ID).catch(() => null);
+
+  if (!channel || typeof channel.send !== 'function') return null;
+
+  const sent = await channel.send({
+    embeds: [buildReviewLogEmbed(entry)],
+    components: entry.status === 'counted' ? [reviewCancelButton(entry)] : []
+  }).catch(error => {
+    reportCrash('Log avis impossible', error, [`Avis : **${entry.id}**`]);
+    return null;
+  });
+
+  if (sent) {
+    entry.logMessageId = sent.id;
+    saveReviews();
+  }
+
+  return sent;
+}
+
+async function sendReviewDm(user, lines) {
+  if (!user) return false;
+  return user.send(lines.join('\n')).then(() => true).catch(() => false);
+}
+
+function rebuildReviewProgressForUser(userId) {
+  const existingStats = ensureReviewUserStats(userId);
+  const reviewIds = Object.values(reviews.entries || {})
+    .filter(entry => entry.userId === userId && entry.status === 'counted')
+    .sort((a, b) => (Number(a.countedAt) || 0) - (Number(b.countedAt) || 0))
+    .map(entry => entry.id);
+  let progress = 0;
+  let rewardsEarned = 0;
+  let lastCountedDate = null;
+
+  for (const reviewId of reviewIds) {
+    const entry = reviews.entries[reviewId];
+    entry.progressBefore = progress;
+    progress += 1;
+    entry.countedDate = entry.countedDate || getDailyRecapDateParts(entry.countedAt || entry.createdAt).dateKey;
+    lastCountedDate = entry.countedDate;
+
+    if (progress >= REVIEW_REQUIRED_COUNT) {
+      rewardsEarned += 1;
+      entry.rewardGranted = true;
+      entry.rewardAmountCents = REVIEW_REWARD_CENTS;
+      progress = 0;
+    } else {
+      entry.rewardGranted = false;
+      entry.rewardAmountCents = 0;
+    }
+
+    entry.progressAfter = progress;
+  }
+
+  existingStats.progress = progress;
+  existingStats.totalCounted = reviewIds.length;
+  existingStats.rewardsEarned = rewardsEarned;
+  existingStats.lastCountedDate = lastCountedDate;
+  existingStats.reviewIds = reviewIds;
+  reviews.users[userId] = existingStats;
+  return existingStats;
+}
+
+async function applyReviewReward(userId, amountCents, actorId, reviewId) {
+  if (!wallets[userId]) wallets[userId] = { balance: 0 };
+  wallets[userId].balance += amountCents / 100;
+  saveWallets();
+  recordWalletHistory(userId, {
+    type: amountCents >= 0 ? 'review_reward' : 'review_cancel',
+    amountCents,
+    balanceAfterCents: eurosToCents(wallets[userId].balance),
+    actorId,
+    note: `Avis : ${reviewId}`
+  });
+  return wallets[userId].balance;
+}
+
+async function handleReviewMessage(message) {
+  if (!message.guild || message.channel.id !== AVIS_CHANNEL_ID) return false;
+
+  const content = String(message.content || '').trim();
+  const imageAttachments = reviewImageAttachments(message);
+  if (content.startsWith('!')) return false;
+  if (!content && imageAttachments.length === 0) return false;
+
+  const now = Date.now();
+  const dateKey = getDailyRecapDateParts(now).dateKey;
+  const member = message.member || await message.guild.members.fetch(message.author.id).catch(() => null);
+  const stats = ensureReviewUserStats(message.author.id);
+  const imageKeys = imageAttachments.map(reviewPhotoKey);
+  const duplicatePhoto = imageKeys.map(activeReviewForPhotoKey).find(Boolean);
+  const entry = {
+    id: nextReviewId(),
+    status: 'ignored',
+    userId: message.author.id,
+    guildId: message.guild.id,
+    channelId: message.channel.id,
+    messageId: message.id,
+    content: content.slice(0, 1000),
+    imageKeys,
+    imageUrls: imageAttachments.map(attachment => attachment.url).filter(Boolean),
+    createdAt: now,
+    countedAt: null,
+    countedDate: null,
+    progressBefore: stats.progress,
+    progressAfter: stats.progress,
+    rewardGranted: false,
+    rewardAmountCents: 0,
+    ignoredReason: null,
+    logMessageId: null
+  };
+
+  if (!member?.roles?.cache?.has(CUSTOMER_ROLE_ID)) {
+    entry.ignoredReason = 'not_customer';
+  } else if (stats.lastCountedDate === dateKey) {
+    entry.ignoredReason = 'daily_limit';
+  } else if (duplicatePhoto) {
+    entry.ignoredReason = 'duplicate_photo';
+    entry.duplicateOf = duplicatePhoto.id;
+  } else {
+    entry.status = 'counted';
+    entry.countedAt = now;
+    entry.countedDate = dateKey;
+    entry.progressBefore = stats.progress;
+    stats.progress += 1;
+    stats.totalCounted += 1;
+    stats.lastCountedDate = dateKey;
+    stats.reviewIds.push(entry.id);
+
+    if (stats.progress >= REVIEW_REQUIRED_COUNT) {
+      stats.progress = 0;
+      stats.rewardsEarned += 1;
+      entry.rewardGranted = true;
+      entry.rewardAmountCents = REVIEW_REWARD_CENTS;
+      const newBalance = await applyReviewReward(message.author.id, REVIEW_REWARD_CENTS, client.user?.id || null, entry.id);
+      entry.balanceAfterCents = eurosToCents(newBalance);
+    }
+
+    entry.progressAfter = stats.progress;
+    for (const imageKey of imageKeys) reviews.photos[imageKey] = entry.id;
+  }
+
+  reviews.entries[entry.id] = entry;
+  reviews.users[message.author.id] = stats;
+  saveReviews();
+
+  if (entry.status === 'counted' && entry.rewardGranted) {
+    await sendReviewDm(message.author, [
+      '🎉 **Récompense avis débloquée**',
+      '',
+      `Merci pour tes **${REVIEW_REQUIRED_COUNT} avis validés** !`,
+      `**${formatCents(REVIEW_REWARD_CENTS)}** ont été ajoutés à ton portefeuille.`,
+      `Nouveau solde : **${formatWalletAmount(wallets[message.author.id]?.balance || 0)}**`
+    ]);
+  } else if (entry.status === 'counted') {
+    await sendReviewDm(message.author, [
+      '✅ **Avis comptabilisé**',
+      '',
+      'Merci pour ton avis !',
+      `Progression récompense : **${reviewProgressText(entry.progressAfter)}**.`,
+      `Au bout de **${REVIEW_REQUIRED_COUNT} avis validés**, tu reçois **${formatCents(REVIEW_REWARD_CENTS)}** sur ton portefeuille.`
+    ]);
+  } else {
+    await sendReviewDm(message.author, [
+      '⚠️ **Avis non comptabilisé**',
+      '',
+      reviewIgnoredReasonLabel(entry.ignoredReason)
+    ]);
+  }
+
+  await sendReviewLog(entry);
+  return true;
+}
+
+async function cancelReviewById(reviewId, actorUser, guild = null) {
+  const entry = reviews.entries?.[reviewId];
+  if (!entry) {
+    return { ok: false, message: 'Avis introuvable.' };
+  }
+
+  if (entry.status === 'cancelled') {
+    return { ok: false, message: 'Cet avis est déjà annulé.' };
+  }
+
+  if (entry.status !== 'counted') {
+    return { ok: false, message: 'Cet avis n’a pas été comptabilisé, il n’y a rien à annuler.' };
+  }
+
+  const statsBefore = rebuildReviewProgressForUser(entry.userId);
+  const rewardsBefore = Number(statsBefore.rewardsEarned) || 0;
+  entry.status = 'cancelled';
+  entry.cancelledAt = Date.now();
+  entry.cancelledBy = actorUser.id;
+
+  for (const imageKey of entry.imageKeys || []) {
+    if (reviews.photos[imageKey] === entry.id) delete reviews.photos[imageKey];
+  }
+
+  const statsAfter = rebuildReviewProgressForUser(entry.userId);
+  const rewardDelta = ((Number(statsAfter.rewardsEarned) || 0) - rewardsBefore) * REVIEW_REWARD_CENTS;
+  entry.rewardAdjustmentCents = rewardDelta;
+
+  let newBalance = null;
+  if (rewardDelta !== 0) {
+    newBalance = await applyReviewReward(entry.userId, rewardDelta, actorUser.id, entry.id);
+  }
+
+  saveReviews();
+
+  const user = await client.users.fetch(entry.userId).catch(() => null);
+  await sendReviewDm(user, [
+    '⚠️ **Avis annulé par le staff**',
+    '',
+    'Ta progression récompense avis a été corrigée.',
+    rewardDelta < 0 ? `Correction portefeuille : **${formatCents(rewardDelta)}**.` : null,
+    newBalance !== null ? `Nouveau solde : **${formatWalletAmount(newBalance)}**.` : null,
+    `Progression actuelle : **${reviewProgressText(statsAfter.progress)}**.`
+  ].filter(Boolean));
+
+  const logChannel = client.channels.cache.get(REVIEW_LOG_CHANNEL_ID)
+    || await client.channels.fetch(REVIEW_LOG_CHANNEL_ID).catch(() => null);
+  if (logChannel && typeof logChannel.send === 'function') {
+    await logChannel.send({ embeds: [buildReviewLogEmbed(entry)] }).catch(() => {});
+  }
+
+  if (guild && entry.logMessageId && logChannel) {
+    const logMessage = await logChannel.messages.fetch(entry.logMessageId).catch(() => null);
+    if (logMessage) {
+      await logMessage.edit({
+        embeds: [buildReviewLogEmbed(entry)],
+        components: [reviewCancelButton(entry, true)]
+      }).catch(() => {});
+    }
+  }
+
+  await sendAdminLog('↩️ Avis annulé', [
+    `Staff : ${logUser(actorUser)}`,
+    `Avis : **${entry.id}**`,
+    `Membre : <@${entry.userId}>`,
+    rewardDelta ? `Correction wallet : **${formatCents(rewardDelta)}**` : 'Correction wallet : aucune'
+  ], 0xE67E22);
+
+  return { ok: true, message: `Avis ${entry.id} annulé.`, entry, rewardDelta, newBalance };
 }
 
 function getDailyRecapDateParts(timestamp = Date.now()) {
@@ -5347,6 +5754,7 @@ function rechargeInstructionMessage(request) {
       '',
       `⚠️ **${NO_NOTE_TEXT}**`,
       '**Ne mets rien dans la note, le commentaire ou le libellé du virement.**',
+      PAYMENT_COUNTING_RULE_TEXT,
       '',
       'Puis réponds à ce message en joignant ton screenshot du virement.',
       '⏳ Tu as **24h** pour l\'envoyer.'
@@ -5361,6 +5769,7 @@ function rechargeInstructionMessage(request) {
     `Date indiquée : **${request.paymentDate || 'Non précisée'}** | Heure : **${request.paymentTime || 'Non précisée'}**`,
     '',
     paymentInstruction(request.method),
+    PAYMENT_COUNTING_RULE_TEXT,
     '⏳ Tu as **24h** pour l\'envoyer.'
   ].join('\n');
 }
@@ -5913,6 +6322,7 @@ function buildHelpEmbed(guild) {
           ['dmclients', 'ouvre un formulaire pour envoyer un MP aux clients qui ont déjà commandé.'],
           ['giveawayinvite', 'ouvre le formulaire pour lancer un giveaway spécial invitations.'],
           ['giveawayinvite stop', 'annule le giveaway invite actif.'],
+          ['annulavis ID', 'annule un avis comptabilisé et corrige la récompense si besoin.'],
           ['backup', 'crée une sauvegarde manuelle des données importantes du bot.'],
           ['backupinvites', 'crée une sauvegarde dédiée des invites et parrainages.']
         ]),
@@ -7147,6 +7557,8 @@ client.on('messageCreate', async message => {
     }
   }
 
+  if (message.guild && await handleReviewMessage(message)) return;
+
   if (!message.guild) {
     const dmRequest = findOpenRechargeRequestByUser(message.author.id);
 
@@ -7202,7 +7614,9 @@ client.on('messageCreate', async message => {
   if (message.content.startsWith('!')) {
     await deleteCommandMessage(message);
     const commandName = message.content.trim().split(/\s+/)[0].toLowerCase();
-    const canUseCommand = isAdminMember(message.member) || (commandName === '!ban' && canUseBanCommand(message.member));
+    const canUseCommand = isAdminMember(message.member)
+      || (commandName === '!ban' && canUseBanCommand(message.member))
+      || (commandName === '!annulavis' && canManageReviews(message.member));
 
     if (!canUseCommand) {
       await sendActionLog(message.member, '⛔ Commande refusée', [
@@ -7451,6 +7865,24 @@ client.on('messageCreate', async message => {
         '3. Quand un owner marque la commande comme terminée, le rôle client t’est ajouté automatiquement.',
         '',
         'Le rôle membre seul ne suffit pas pour accéder au Général.',
+        '',
+        '**Avis récompensés ⭐**',
+        '',
+        `Après une commande, tu peux laisser un avis dans <#${AVIS_CHANNEL_ID}>.`,
+        '',
+        `🎁 **${REVIEW_REQUIRED_COUNT} avis validés = ${formatCents(REVIEW_REWARD_CENTS)} offert sur ton portefeuille.**`,
+        '',
+        'Règles importantes :',
+        '',
+        '• 1 seul avis par jour peut compter.',
+        '',
+        '• La même photo ne peut pas compter deux fois.',
+        '',
+        '• L’avis doit être réel et lié à une commande.',
+        '',
+        '• Les avis fake, doublons ou abus peuvent être annulés par le staff.',
+        '',
+        'Le bot t’envoie un MP quand ton avis est comptabilisé, refusé ou quand la récompense est débloquée.',
         '',
         '**Besoin d’aide ? 🆘**',
         '',
@@ -8503,6 +8935,31 @@ client.on('messageCreate', async message => {
     return message.channel.send({ embeds: [buildTicketHistoryEmbed(user)] });
   }
 
+  if (message.content.trim().split(/\s+/)[0] === '!annulavis') {
+    if (!canManageReviews(message.member)) {
+      const reply = await message.channel.send('❌ Seul le staff ou les owners peuvent annuler un avis.');
+      return deleteLater(reply);
+    }
+
+    const reviewId = message.content.trim().split(/\s+/)[1];
+    if (!reviewId) {
+      const reply = await message.channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0xE74C3C)
+            .setTitle('❌ Commande invalide')
+            .setDescription('Utilisation : `!annulavis A-0001`')
+        ]
+      });
+
+      return deleteLater(reply);
+    }
+
+    const result = await cancelReviewById(reviewId.toUpperCase(), message.author, message.guild);
+    const reply = await message.channel.send(result.ok ? `✅ ${result.message}` : `❌ ${result.message}`);
+    return deleteLater(reply, result.ok ? 10_000 : DELETE_DELAY);
+  }
+
   if (message.content.trim().split(/\s+/)[0] === '!refund') {
     if (!isOwnerMember(message.member)) {
       const reply = await message.channel.send('❌ Seul le rôle owner peut rembourser une commande.');
@@ -8611,6 +9068,22 @@ client.on(Events.InteractionCreate, async interaction => {
       interaction.customId.startsWith('reject_recharge_proof:')
     ) {
       return handleRechargeProofButton(interaction);
+    }
+
+    if (interaction.customId.startsWith('cancel_review:')) {
+      if (!canManageReviews(interaction.member)) {
+        return interaction.reply({
+          content: '❌ Seul le staff ou les owners peuvent annuler un avis.',
+          ephemeral: true
+        });
+      }
+
+      const reviewId = interaction.customId.split(':')[1];
+      const result = await cancelReviewById(reviewId, interaction.user, interaction.guild);
+      return interaction.reply({
+        content: result.ok ? `✅ ${result.message}` : `❌ ${result.message}`,
+        ephemeral: true
+      });
     }
 
     if (interaction.customId === 'guide_faq') {
