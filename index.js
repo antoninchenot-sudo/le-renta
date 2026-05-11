@@ -49,7 +49,7 @@ const AVAILABILITY_CHANNEL_ID = '1500829957239083202';
 const DAILY_RECAP_CHANNEL_ID = '1503470786600763533';
 const AVIS_CHANNEL_ID = '1500829957524426757';
 const REVIEW_LOG_CHANNEL_ID = '1503470974153265183';
-const INVITE_ANNOUNCE_CHANNEL_ID = '1500829958207967278';
+const INVITE_ANNOUNCE_CHANNEL_ID = '1500829957239083201';
 const INVITE_ADMIN_CHANNEL_ID = '1500829958207967278';
 const INVITE_GIVEAWAY_CHANNEL_ID = '1500829957239083203';
 const TIKTOK_INVITE_CODE = 'NuyXstpakN';
@@ -140,12 +140,11 @@ const DATA_BACKUP_FILES = [
   PRODUCT_STOCK_FILE,
   PAYMENT_CONFIG_FILE
 ];
-const BOT_CHANGELOG_VERSION = '2026-05-11-dm-recharge-history';
+const BOT_CHANGELOG_VERSION = '2026-05-11-welcome-channel';
 // Garder uniquement les changements du lot en cours, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Ajout de la commande !dmrecharges pour contacter les anciens clients ayant déjà rechargé.',
-  'Le bot récupère les IDs Discord depuis les historiques de recharge sauvegardés.',
-  'Un formulaire owner permet d’écrire le titre et le message avant envoi.'
+  'Le message de bienvenue des nouveaux membres est maintenant envoyé dans le salon bienvenue.',
+  'Les logs parrainage/invites restent envoyés dans le salon logs parrainage.'
 ];
 const REVIEW_REQUIRED_COUNT = 3;
 const REVIEW_REWARD_CENTS = 100;
