@@ -119,6 +119,7 @@ const PRODUCT_CATALOG_FILE = dataPath('product-catalog.json');
 const DISCOUNT_STATE_FILE = dataPath('discount-state.json');
 const PRODUCT_STOCK_FILE = dataPath('product-stock.json');
 const PAYMENT_CONFIG_FILE = dataPath('payment-config.json');
+const INTERACTION_USERS_FILE = dataPath('interaction-users.json');
 const DATA_BACKUP_FILES = [
   WALLET_FILE,
   WALLET_HISTORY_FILE,
@@ -138,16 +139,19 @@ const DATA_BACKUP_FILES = [
   PRODUCT_CATALOG_FILE,
   DISCOUNT_STATE_FILE,
   PRODUCT_STOCK_FILE,
-  PAYMENT_CONFIG_FILE
+  PAYMENT_CONFIG_FILE,
+  INTERACTION_USERS_FILE
 ];
-const BOT_CHANGELOG_VERSION = '2026-05-11-ticket-limit-tiktok-link';
+const BOT_CHANGELOG_VERSION = '2026-05-11-ticket-limit-tiktok-dmmax-interactions';
 // Garder uniquement les changements du lot en cours, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
   'Limitation à un seul ticket support ouvert par membre.',
   'Limitation à une seule demande de recharge ouverte par membre.',
   'Autorisation du staff/support à fermer les tickets support.',
   'Retour à l’ancien message de bienvenue sans image de fond.',
-  'Mise à jour du lien TikTok suivi par le bot.'
+  'Mise à jour du lien TikTok suivi par le bot.',
+  'Ajout de la commande dmmax pour envoyer un MP au maximum d’IDs connus par le bot.',
+  'Ajout des anciens IDs d’interaction trouvés dans les sauvegardes et suivi des nouvelles interactions.'
 ];
 const REVIEW_REQUIRED_COUNT = 3;
 const REVIEW_REWARD_CENTS = 100;
@@ -492,6 +496,7 @@ let productCatalogState = loadJsonFile(PRODUCT_CATALOG_FILE, null, { backupDir: 
 let discountState = loadJsonFile(DISCOUNT_STATE_FILE, { percent: 0, updatedAt: null, updatedBy: null });
 let productStockState = loadJsonFile(PRODUCT_STOCK_FILE, { unavailable: {}, updatedAt: null, updatedBy: null });
 let paymentConfig = loadJsonFile(PAYMENT_CONFIG_FILE, { ...DEFAULT_PAYMENT_CONFIG });
+let interactionUsers = loadJsonFile(INTERACTION_USERS_FILE, { users: {} });
 
 if (fs.existsSync(WALLET_FILE)) {
   try {
@@ -533,6 +538,12 @@ if (!reviews.users || typeof reviews.users !== 'object' || Array.isArray(reviews
 if (!reviews.photos || typeof reviews.photos !== 'object' || Array.isArray(reviews.photos)) reviews.photos = {};
 if (!reviews.entries || typeof reviews.entries !== 'object' || Array.isArray(reviews.entries)) reviews.entries = {};
 reviews.counter = Number(reviews.counter) || 0;
+if (!interactionUsers || typeof interactionUsers !== 'object' || Array.isArray(interactionUsers)) {
+  interactionUsers = { users: {} };
+}
+if (!interactionUsers.users || typeof interactionUsers.users !== 'object' || Array.isArray(interactionUsers.users)) {
+  interactionUsers.users = {};
+}
 if (!inviteGiveawayState || typeof inviteGiveawayState !== 'object' || Array.isArray(inviteGiveawayState)) {
   inviteGiveawayState = { active: null, history: [] };
 }
@@ -639,6 +650,10 @@ function saveTicketHistory() {
 
 function saveRequests() {
   saveJsonFile(REQUESTS_FILE, requests);
+}
+
+function saveInteractionUsers() {
+  saveJsonFile(INTERACTION_USERS_FILE, interactionUsers);
 }
 
 function saveReferrals() {
@@ -7308,6 +7323,7 @@ function buildHelpEmbed(guild) {
           ['annonce', 'ouvre un formulaire pour envoyer une annonce dans le salon des disponibilités.'],
           ['dmclients', 'ouvre un formulaire pour envoyer un MP aux clients qui ont déjà commandé.'],
           ['dmrecharges', 'ouvre un formulaire pour envoyer un MP aux anciens clients ayant déjà rechargé.'],
+          ['dmmax', 'ouvre un formulaire pour envoyer un MP au maximum de membres connus par le bot.'],
           ['giveawayinvite', 'ouvre le formulaire pour lancer un giveaway spécial invitations.'],
           ['giveawayinvite stop', 'annule le giveaway invite actif.'],
           ['giveawayclient', 'ouvre le formulaire pour lancer un giveaway réservé aux clients.'],
@@ -7454,6 +7470,37 @@ function buildDmRechargeClientsModal(launcherId) {
   return modal;
 }
 
+function buildDmMaxKnownUsersModal(launcherId) {
+  const modal = new ModalBuilder()
+    .setCustomId(`dm_max_known_users_modal:${launcherId}`)
+    .setTitle('MP maximum connus');
+
+  const titleInput = new TextInputBuilder()
+    .setCustomId('dm_max_known_users_title')
+    .setLabel('Titre du message')
+    .setPlaceholder('Exemple : Nouveau serveur La Rent’a')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMinLength(2)
+    .setMaxLength(100);
+
+  const bodyInput = new TextInputBuilder()
+    .setCustomId('dm_max_known_users_body')
+    .setLabel('Message à envoyer')
+    .setPlaceholder('Écris ici le message qui sera envoyé au maximum de personnes connues.')
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(true)
+    .setMinLength(2)
+    .setMaxLength(1800);
+
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(titleInput),
+    new ActionRowBuilder().addComponents(bodyInput)
+  );
+
+  return modal;
+}
+
 function buildClientDmEmbed(guild, title, body, senderUser) {
   return new EmbedBuilder()
     .setColor(0xD4AF37)
@@ -7508,6 +7555,218 @@ function rechargeDmRecipients() {
     .sort((a, b) => Number(b.lastRechargeAt || 0) - Number(a.lastRechargeAt || 0));
 }
 
+const KNOWN_USER_ID_FIELDS = new Set([
+  'userid',
+  'targetuserid',
+  'ownerid',
+  'adminid',
+  'actorid',
+  'updatedby',
+  'createdby',
+  'deletedby',
+  'archivedby',
+  'reopenedby',
+  'takenby',
+  'paidby',
+  'completedby',
+  'refundedby',
+  'proofrejectedby',
+  'winnerid',
+  'inviterid',
+  'inviteduserid',
+  'memberid',
+  'clientid',
+  'customerid',
+  'staffid',
+  'moderatorid',
+  'launcherid',
+  'bannedby',
+  'validatedby',
+  'rejectedby'
+]);
+const KNOWN_USER_ID_PARENT_FIELDS = new Set(['users', 'wallets', 'stats', 'invitedby']);
+const NON_USER_ID_FIELD_PARTS = ['channel', 'message', 'role', 'guild', 'category', 'parent', 'emoji', 'invitecode', 'webhook'];
+
+function isDiscordSnowflake(value) {
+  return /^\d{16,22}$/.test(String(value || '').trim());
+}
+
+function isLikelyUserIdField(key) {
+  const normalized = String(key || '').toLowerCase();
+  if (!normalized) return false;
+  if (NON_USER_ID_FIELD_PARTS.some(part => normalized.includes(part))) return false;
+  return KNOWN_USER_ID_FIELDS.has(normalized) || normalized.endsWith('userid');
+}
+
+function knownUserTimestampFromObject(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+
+  return [
+    value.lastSeenAt,
+    value.updatedAt,
+    value.createdAt,
+    value.joinedAt,
+    value.completedAt,
+    value.paidAt,
+    value.validatedAt,
+    value.rewardedAt,
+    value.archivedAt
+  ]
+    .map(Number)
+    .find(timestamp => Number.isFinite(timestamp) && timestamp > 0) || null;
+}
+
+function collectKnownUserIdsFromData(data, addRecipient, source, parentKey = null) {
+  if (!data) return;
+
+  if (Array.isArray(data)) {
+    data.forEach(item => collectKnownUserIdsFromData(item, addRecipient, source, parentKey));
+    return;
+  }
+
+  if (typeof data !== 'object') return;
+
+  const objectTimestamp = knownUserTimestampFromObject(data);
+  const normalizedParent = String(parentKey || '').toLowerCase();
+
+  for (const [key, value] of Object.entries(data)) {
+    const normalizedKey = key.toLowerCase();
+
+    if (KNOWN_USER_ID_PARENT_FIELDS.has(normalizedParent) && isDiscordSnowflake(key)) {
+      addRecipient(key, source, knownUserTimestampFromObject(value) || objectTimestamp);
+    }
+
+    if (isLikelyUserIdField(key)) {
+      if (isDiscordSnowflake(value)) {
+        addRecipient(value, source, objectTimestamp);
+      } else if (Array.isArray(value)) {
+        value.forEach(item => {
+          if (isDiscordSnowflake(item)) addRecipient(item, source, objectTimestamp);
+        });
+      }
+    }
+
+    collectKnownUserIdsFromData(value, addRecipient, source, normalizedKey);
+  }
+}
+
+function collectKnownUserIdsFromJsonFile(filePath, addRecipient, source) {
+  if (!filePath || !fs.existsSync(filePath)) return;
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    collectKnownUserIdsFromData(parsed, addRecipient, source);
+  } catch {
+    // Ignore les anciens fichiers incomplets ou corrompus.
+  }
+}
+
+function collectKnownUserIdsFromBackupDir(backupDir, addRecipient, source) {
+  if (!backupDir || !fs.existsSync(backupDir)) return;
+
+  let files = [];
+  try {
+    files = fs.readdirSync(backupDir)
+      .filter(file => file.endsWith('.json'))
+      .map(file => path.join(backupDir, file));
+  } catch {
+    return;
+  }
+
+  files.forEach(filePath => collectKnownUserIdsFromJsonFile(filePath, addRecipient, source));
+}
+
+function collectKnownUserIdsFromSavedFiles(addRecipient) {
+  DATA_BACKUP_FILES.forEach(filePath => collectKnownUserIdsFromJsonFile(filePath, addRecipient, 'fichiers-sauvegardes'));
+
+  [
+    [WALLET_BACKUP_DIR, 'backup-wallets'],
+    [REFERRAL_BACKUP_DIR, 'backup-parrainage'],
+    [REVIEW_BACKUP_DIR, 'backup-avis'],
+    [PRODUCT_CATALOG_BACKUP_DIR, 'backup-produits'],
+    [DATA_BACKUP_DIR, 'backup-global']
+  ].forEach(([backupDir, source]) => collectKnownUserIdsFromBackupDir(backupDir, addRecipient, source));
+}
+
+function maxKnownDmRecipients(guildMembers = null) {
+  const rows = new Map();
+
+  const addRecipient = (userId, source, timestamp = null) => {
+    const cleanUserId = String(userId || '').trim();
+    if (!/^\d{16,22}$/.test(cleanUserId)) return;
+
+    const previous = rows.get(cleanUserId);
+    const lastSeenAt = Math.max(Number(previous?.lastSeenAt) || 0, Number(timestamp) || 0);
+    const sources = new Set(previous?.sources || []);
+    sources.add(source);
+
+    rows.set(cleanUserId, {
+      userId: cleanUserId,
+      lastSeenAt,
+      sources: [...sources]
+    });
+  };
+
+  if (guildMembers && typeof guildMembers.forEach === 'function') {
+    guildMembers.forEach(member => {
+      if (!member?.user?.bot) addRecipient(member.id, 'serveur-actuel', member.joinedTimestamp);
+    });
+  }
+
+  for (const [userId, wallet] of Object.entries(wallets || {})) {
+    addRecipient(userId, 'wallet', wallet?.updatedAt);
+  }
+
+  for (const [userId, entries] of Object.entries(walletHistory.users || {})) {
+    addRecipient(userId, 'wallet-history');
+    for (const entry of Array.isArray(entries) ? entries : []) {
+      addRecipient(userId, `wallet-${entry?.type || 'historique'}`, entry?.createdAt);
+    }
+  }
+
+  for (const [userId, entries] of Object.entries(ticketHistory.users || {})) {
+    addRecipient(userId, 'ticket-history');
+    for (const entry of Array.isArray(entries) ? entries : []) {
+      addRecipient(userId, `ticket-${entry?.type || 'historique'}`, entry?.createdAt || entry?.completedAt || entry?.paidAt);
+    }
+  }
+
+  for (const ticketRequest of Object.values(requests.tickets || {})) {
+    if (!ticketRequest?.userId) continue;
+    addRecipient(ticketRequest.userId, `request-${ticketRequest.type || 'ticket'}`, ticketRequest.createdAt);
+  }
+
+  for (const [invitedUserId, referral] of Object.entries(referrals.invitedBy || {})) {
+    addRecipient(invitedUserId, 'parrainage-invite', referral?.joinedAt);
+    if (referral?.inviterId) addRecipient(referral.inviterId, 'parrainage-parrain', referral?.joinedAt);
+  }
+
+  for (const [userId, stats] of Object.entries(referrals.stats || {})) {
+    addRecipient(userId, 'parrainage-stats', stats?.lastValidatedAt);
+  }
+
+  for (const userId of Object.keys(reviews.users || {})) {
+    addRecipient(userId, 'avis');
+  }
+
+  for (const review of Object.values(reviews.entries || {})) {
+    if (review?.userId) addRecipient(review.userId, 'avis-entry', review.createdAt);
+  }
+
+  for (const userId of Object.keys(warnings.users || {})) {
+    addRecipient(userId, 'warnings');
+  }
+
+  for (const [userId, row] of Object.entries(interactionUsers.users || {})) {
+    addRecipient(userId, 'interactions', row?.lastSeenAt);
+  }
+
+  collectKnownUserIdsFromSavedFiles(addRecipient);
+
+  return [...rows.values()]
+    .sort((a, b) => Number(b.lastSeenAt || 0) - Number(a.lastSeenAt || 0));
+}
+
 function buildDmClientsPanelEmbed(guild) {
   return new EmbedBuilder()
     .setColor(0xD4AF37)
@@ -7547,6 +7806,32 @@ function buildDmRechargeClientsPanelEmbed(guild) {
     .setFooter({ text: 'Owner • Envoi par IDs sauvegardés' });
 }
 
+function buildDmMaxKnownUsersPanelEmbed(guild, recipients) {
+  const recent = recipients
+    .slice(0, 5)
+    .map(row => `<@${row.userId}>${row.lastSeenAt ? ` • vu <t:${Math.floor(row.lastSeenAt / 1000)}:R>` : ''}`)
+    .join('\n') || 'Aucun ID connu trouvé.';
+
+  return new EmbedBuilder()
+    .setColor(0xD4AF37)
+    .setAuthor({ name: 'MP maximum', iconURL: guild.iconURL({ dynamic: true }) })
+    .setTitle('Envoyer un MP au maximum de personnes connues')
+    .setDescription([
+      'Le bot va cibler tous les IDs Discord qu’il connaît et retirer les doublons.',
+      '',
+      '**Sources utilisées**',
+      'Membres du serveur actuel, wallets, historiques tickets, recharges, commandes, parrainage, avis et warnings.',
+      '',
+      `IDs trouvés : **${recipients.length}**`,
+      '',
+      '**Derniers détectés**',
+      recent,
+      '',
+      'Discord peut refuser certains MP si la personne a fermé ses messages privés ou ne partage plus de serveur avec le bot.'
+    ].join('\n'))
+    .setFooter({ text: 'Owner • Envoi maximum dédoublonné' });
+}
+
 function dmClientsPanelRow(ownerId) {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -7561,6 +7846,17 @@ function dmRechargeClientsPanelRow(ownerId, disabled = false) {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`open_dm_recharge_clients_modal:${ownerId}`)
+      .setLabel('Écrire le MP')
+      .setEmoji('📩')
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(Boolean(disabled))
+  );
+}
+
+function dmMaxKnownUsersPanelRow(ownerId, disabled = false) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`open_dm_max_known_users_modal:${ownerId}`)
       .setLabel('Écrire le MP')
       .setEmoji('📩')
       .setStyle(ButtonStyle.Primary)
@@ -7712,6 +8008,98 @@ async function sendDmToRechargeHistoryUsers(interaction, title, body) {
               ? 'Certains MP peuvent être fermés ou ne plus avoir de serveur en commun avec le bot.'
               : 'Tous les MP ont été envoyés.'
           ].join('\n'))
+      ]
+    });
+  } finally {
+    clientDmBroadcastLocks.delete(lockKey);
+  }
+}
+
+async function sendDmToMaxKnownUsers(interaction, title, body) {
+  const lockKey = `${interaction.guildId}:max-known`;
+
+  if (clientDmBroadcastLocks.has(lockKey)) {
+    return interaction.editReply('❌ Un envoi MP maximum est déjà en cours. Attends qu’il soit terminé.');
+  }
+
+  clientDmBroadcastLocks.add(lockKey);
+
+  try {
+    const guildMembers = await interaction.guild.members.fetch().catch(() => null);
+    const recipients = maxKnownDmRecipients(guildMembers);
+
+    if (!recipients.length) {
+      await sendAdminLog('📩 MP maximum annulé', [
+        `Owner : ${logUser(interaction.user)}`,
+        'Raison : aucun ID connu trouvé.'
+      ], 0xF1C40F);
+
+      return interaction.editReply('❌ Aucun ID connu trouvé.');
+    }
+
+    const embed = buildClientDmEmbed(interaction.guild, title, body, interaction.user);
+    let sentCount = 0;
+    let failedCount = 0;
+    const failedSamples = [];
+    const sourceCounts = {};
+
+    for (const recipient of recipients) {
+      for (const source of recipient.sources || []) {
+        sourceCounts[source] = (sourceCounts[source] || 0) + 1;
+      }
+
+      const guildMember = guildMembers?.get?.(recipient.userId);
+      const user = guildMember?.user || await client.users.fetch(recipient.userId).catch(() => null);
+
+      if (!user || user.bot) {
+        failedCount += 1;
+        if (failedSamples.length < 10) failedSamples.push(`introuvable (${recipient.userId})`);
+        continue;
+      }
+
+      const sent = await user.send({ embeds: [embed] })
+        .then(() => true)
+        .catch(() => {
+          failedCount += 1;
+          if (failedSamples.length < 10) failedSamples.push(`${user.tag || user.username} (${user.id})`);
+          return false;
+        });
+
+      if (sent) sentCount += 1;
+      if (CLIENT_DM_BROADCAST_DELAY > 0) await wait(CLIENT_DM_BROADCAST_DELAY);
+    }
+
+    const topSources = Object.entries(sourceCounts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([source, count]) => `${source}: **${count}**`)
+      .join(' • ');
+
+    await sendAdminLog('📩 MP maximum envoyé', [
+      `Owner : ${logUser(interaction.user)}`,
+      `IDs ciblés : **${recipients.length}**`,
+      `MP envoyés : **${sentCount}**`,
+      `MP impossibles : **${failedCount}**`,
+      topSources ? `Sources principales : ${topSources}` : null,
+      failedSamples.length ? `Exemples échecs : ${failedSamples.join(', ')}` : null,
+      `Titre : **${title.slice(0, 200)}**`
+    ].filter(Boolean), failedCount ? 0xF1C40F : 0x2ECC71);
+
+    return interaction.editReply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(failedCount ? 0xF1C40F : 0x2ECC71)
+          .setTitle('📩 Envoi MP maximum terminé')
+          .setDescription([
+            `IDs ciblés : **${recipients.length}**`,
+            `MP envoyés : **${sentCount}**`,
+            `MP impossibles : **${failedCount}**`,
+            '',
+            failedCount
+              ? 'Certains MP peuvent être fermés ou impossibles car la personne ne partage plus de serveur avec le bot.'
+              : 'Tous les MP ciblés ont été envoyés.'
+          ].join('\n'))
+          .setTimestamp()
       ]
     });
   } finally {
@@ -8161,7 +8549,36 @@ function shouldUseStaffLog(member) {
   );
 }
 
+function recordInteractionUser(member, action = 'interaction') {
+  if (!member?.id || member.user?.bot) return false;
+
+  const now = Date.now();
+  const previous = interactionUsers.users[member.id] || {};
+  const actions = previous.actions && typeof previous.actions === 'object' && !Array.isArray(previous.actions)
+    ? previous.actions
+    : {};
+  const actionLabel = String(action || 'interaction').slice(0, 120);
+
+  actions[actionLabel] = (Number(actions[actionLabel]) || 0) + 1;
+  interactionUsers.users[member.id] = {
+    ...previous,
+    userId: member.id,
+    tag: member.user?.tag || previous.tag || null,
+    username: member.user?.username || previous.username || null,
+    firstSeenAt: previous.firstSeenAt || now,
+    lastSeenAt: now,
+    lastAction: actionLabel,
+    count: (Number(previous.count) || 0) + 1,
+    actions
+  };
+
+  saveInteractionUsers();
+  return true;
+}
+
 function sendActionLog(member, title, lines, color = 0x3498DB) {
+  recordInteractionUser(member, title);
+
   return shouldUseStaffLog(member)
     ? sendAdminLog(title, lines, color)
     : sendBotLog(title, lines, color);
@@ -9438,6 +9855,30 @@ client.on('messageCreate', async message => {
     const panel = await message.channel.send({
       embeds: [buildDmRechargeClientsPanelEmbed(message.guild)],
       components: [dmRechargeClientsPanelRow(message.author.id, recipients.length === 0)]
+    });
+
+    deleteLater(panel, 5 * 60_000);
+    return;
+  }
+
+  if (message.content === '!dmmax') {
+    if (!isOwnerMember(message.member)) {
+      const reply = await message.channel.send('❌ Seul le rôle owner peut envoyer un MP au maximum de membres connus.');
+      return deleteLater(reply);
+    }
+
+    const guildMembers = await message.guild.members.fetch().catch(() => null);
+    const recipients = maxKnownDmRecipients(guildMembers);
+
+    await sendAdminLog('📩 Panneau MP maximum ouvert', [
+      `Owner : ${logUser(message.author)}`,
+      `Salon : ${logChannel(message.channel)}`,
+      `IDs connus trouvés : **${recipients.length}**`
+    ], 0x3498DB);
+
+    const panel = await message.channel.send({
+      embeds: [buildDmMaxKnownUsersPanelEmbed(message.guild, recipients)],
+      components: [dmMaxKnownUsersPanelRow(message.author.id, recipients.length === 0)]
     });
 
     deleteLater(panel, 5 * 60_000);
@@ -10738,6 +11179,25 @@ client.on(Events.InteractionCreate, async interaction => {
       return interaction.showModal(buildDmRechargeClientsModal(launcherId));
     }
 
+    if (interaction.customId.startsWith('open_dm_max_known_users_modal:')) {
+      if (!isOwnerMember(interaction.member)) {
+        return interaction.reply({
+          content: '❌ Seul le rôle owner peut envoyer un MP au maximum de membres connus.',
+          ephemeral: true
+        });
+      }
+
+      const launcherId = interaction.customId.split(':')[1];
+      if (interaction.user.id !== launcherId) {
+        return interaction.reply({
+          content: '❌ Seul l’owner qui a ouvert ce panneau peut écrire le MP.',
+          ephemeral: true
+        });
+      }
+
+      return interaction.showModal(buildDmMaxKnownUsersModal(launcherId));
+    }
+
     if (interaction.customId.startsWith('open_ban_modal:')) {
       if (!canUseBanCommand(interaction.member)) {
         return interaction.reply({
@@ -11540,6 +12000,36 @@ client.on(Events.InteractionCreate, async interaction => {
 
     await interaction.deferReply({ ephemeral: true });
     return sendDmToRechargeHistoryUsers(interaction, title, body);
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('dm_max_known_users_modal:')) {
+    if (!isOwnerMember(interaction.member)) {
+      return interaction.reply({
+        content: '❌ Seul le rôle owner peut envoyer un MP au maximum de membres connus.',
+        ephemeral: true
+      });
+    }
+
+    const launcherId = interaction.customId.split(':')[1];
+    if (interaction.user.id !== launcherId) {
+      return interaction.reply({
+        content: '❌ Seul l’owner qui a ouvert ce formulaire peut valider cet envoi.',
+        ephemeral: true
+      });
+    }
+
+    const title = interaction.fields.getTextInputValue('dm_max_known_users_title').trim();
+    const body = interaction.fields.getTextInputValue('dm_max_known_users_body').trim();
+
+    if (title.length < 2 || body.length < 2) {
+      return interaction.reply({
+        content: '❌ Titre ou message invalide.',
+        ephemeral: true
+      });
+    }
+
+    await interaction.deferReply({ ephemeral: true });
+    return sendDmToMaxKnownUsers(interaction, title, body);
   }
 
   if (interaction.isModalSubmit() && interaction.customId.startsWith('announcement_modal:')) {
