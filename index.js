@@ -71,6 +71,7 @@ const MCD0NALDS_EMOJI_NAME = '4964mcd0nalds';
 const MCD0NALDS_EMOJI = `<:${MCD0NALDS_EMOJI_NAME}:${MCD0NALDS_EMOJI_ID}>`;
 const MCD0NALDS_BUTTON_EMOJI = { id: MCD0NALDS_EMOJI_ID, name: MCD0NALDS_EMOJI_NAME };
 const INFO_IMAGE = process.env.INFO_IMAGE || 'https://i0.wp.com/direct-actu.fr/wp-content/uploads/2024/11/1725353427343-ad6c22b5-478a-412e-9c6f-8e14646acd5e_1.png?ssl=1';
+const WELCOME_IMAGE = process.env.WELCOME_IMAGE || 'https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=1400&q=80';
 const PAYPAL_LINK = 'https://www.paypal.me/LaRenta23';
 const REVOLUT_LINK = 'https://revolut.me/arthur23320/pocket/vNrIna0VcG';
 const IBAN = 'FR76 2823 3000 0165 8385 8232 516';
@@ -140,11 +141,12 @@ const DATA_BACKUP_FILES = [
   PRODUCT_STOCK_FILE,
   PAYMENT_CONFIG_FILE
 ];
-const BOT_CHANGELOG_VERSION = '2026-05-11-welcome-channel';
+const BOT_CHANGELOG_VERSION = '2026-05-11-welcome-banner';
 // Garder uniquement les changements du lot en cours, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Le message de bienvenue des nouveaux membres est maintenant envoyé dans le salon bienvenue.',
-  'Les logs parrainage/invites restent envoyés dans le salon logs parrainage.'
+  'Nouveau message de bienvenue plus propre dans le salon bienvenue.',
+  'Ajout d’une grande image de fond configurable avec la variable WELCOME_IMAGE.',
+  'Le message affiche la source d’arrivée et redirige clairement vers le règlement puis la boutique.'
 ];
 const REVIEW_REQUIRED_COUNT = 3;
 const REVIEW_REWARD_CENTS = 100;
@@ -8651,36 +8653,43 @@ async function sendInviteJoinAnnouncement(member, referral) {
 
   if (!channel || typeof channel.send !== 'function') return;
 
-  const description = isTikTokReferralSource(referral)
-    ? [
-        `👋 Bienvenue ${member} sur le serveur !`,
-        '',
-        `👥 ${TIKTOK_SOURCE_LABEL}`
-      ]
-    : referral
-    ? [
-        `👋 Bienvenue ${member} sur le serveur !`,
-        '',
-        `👥 Invité par : <@${referral.inviterId}>`
-      ]
-    : [
-        `👋 Bienvenue ${member} sur le serveur !`,
-        '',
-        '👥 Invité par : **non détecté**',
-        '',
-        'Le bot n’a pas pu identifier l’invitation utilisée.'
-      ];
+  const sourceText = isTikTokReferralSource(referral)
+    ? TIKTOK_SOURCE_LABEL
+    : referral?.inviterId
+      ? `Invité par <@${referral.inviterId}>`
+      : 'Arrivée non détectée';
+
+  const detailsText = referral?.inviterId
+    ? 'Ton invitation est enregistrée pour le parrainage.'
+    : isTikTokReferralSource(referral)
+      ? 'Tu arrives depuis TikTok, bienvenue dans la boutique.'
+      : 'Le bot n’a pas pu identifier le lien utilisé.';
+
+  const embed = new EmbedBuilder()
+    .setColor(inviteWelcomeColor(referral))
+    .setAuthor({ name: 'La Rent’a', iconURL: member.guild.iconURL({ dynamic: true }) })
+    .setTitle('Bienvenue chez La Rent’a')
+    .setDescription([
+      `Content de te voir ici ${member}.`,
+      '',
+      `👥 **${sourceText}**`,
+      detailsText,
+      '',
+      '**Pour commencer**',
+      `1. Accepte le règlement pour recevoir le rôle <@&${RULES_ROLE_ID}>.`,
+      `2. Va dans <#${SHOP_CHANNEL_ID}> pour recharger ton solde ou commander.`,
+      `3. Besoin d’aide ? Le support est ici : <#${SUPPORT_CHANNEL_ID}>.`
+    ].join('\n'))
+    .setThumbnail(member.user.displayAvatarURL({ dynamic: true, size: 256 }))
+    .setFooter({ text: 'Bienvenue • La Rent’a' })
+    .setTimestamp();
+
+  if (WELCOME_IMAGE) embed.setImage(WELCOME_IMAGE);
 
   await channel.send({
-    embeds: [
-      new EmbedBuilder()
-        .setColor(inviteWelcomeColor(referral))
-        .setTitle('Nouvelle arrivée 🎉')
-        .setDescription(description.join('\n'))
-        .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
-        .setFooter({ text: 'Invitations • Parrainage • Boutique' })
-        .setTimestamp()
-    ]
+    content: `Bienvenue ${member}`,
+    embeds: [embed],
+    allowedMentions: { users: [member.id], roles: [] }
   }).catch(() => {});
 }
 
