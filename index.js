@@ -106,6 +106,7 @@ const REQUESTS_FILE = dataPath('requests.json');
 const REFERRALS_FILE = dataPath('referrals.json');
 const REVIEWS_FILE = dataPath('reviews.json');
 const INVITE_GIVEAWAY_FILE = dataPath('invite-giveaway.json');
+const CLIENT_GIVEAWAY_FILE = dataPath('client-giveaway.json');
 const MAINTENANCE_FILE = dataPath('maintenance-state.json');
 const ORDER_PAUSE_STATE_FILE = dataPath('order-pause-state.json');
 const SHOP_STATS_FILE = dataPath('shop-stats.json');
@@ -126,6 +127,7 @@ const DATA_BACKUP_FILES = [
   REFERRALS_FILE,
   REVIEWS_FILE,
   INVITE_GIVEAWAY_FILE,
+  CLIENT_GIVEAWAY_FILE,
   MAINTENANCE_FILE,
   ORDER_PAUSE_STATE_FILE,
   SHOP_STATS_FILE,
@@ -138,13 +140,12 @@ const DATA_BACKUP_FILES = [
   PRODUCT_STOCK_FILE,
   PAYMENT_CONFIG_FILE
 ];
-const BOT_CHANGELOG_VERSION = '2026-05-10-order-pause-mode';
+const BOT_CHANGELOG_VERSION = '2026-05-11-client-giveaway';
 // Garder uniquement les changements du lot en cours, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Ajout de la commande !pausecommande pour bloquer uniquement les nouvelles commandes pendant une durée choisie.',
-  'Envoi d’une annonce @everyone dans le salon annonce avec un compte à rebours en temps réel.',
-  'Les recharges, le portefeuille et le support restent accessibles pendant la pause commande.',
-  'La pause commande se retire automatiquement à la fin de la durée prévue, même après redémarrage du bot.'
+  'Ajout de la commande !giveawayclient pour organiser un giveaway réservé aux clients.',
+  'Seuls les membres avec le rôle client et au moins une commande terminée peuvent participer.',
+  'Le giveaway client se termine automatiquement après la durée choisie et tire un gagnant au hasard.'
 ];
 const REVIEW_REQUIRED_COUNT = 3;
 const REVIEW_REWARD_CENTS = 100;
@@ -462,6 +463,7 @@ let requests = loadJsonFile(REQUESTS_FILE, { counter: 0, tickets: {} });
 let referrals = loadJsonFile(REFERRALS_FILE, { invitedBy: {}, stats: {}, inviteLinks: {} }, { backupDir: REFERRAL_BACKUP_DIR });
 let reviews = loadJsonFile(REVIEWS_FILE, { counter: 0, users: {}, photos: {}, entries: {} }, { backupDir: REVIEW_BACKUP_DIR });
 let inviteGiveawayState = loadJsonFile(INVITE_GIVEAWAY_FILE, { active: null, history: [] });
+let clientGiveawayState = loadJsonFile(CLIENT_GIVEAWAY_FILE, { active: null, history: [] });
 let maintenanceState = loadJsonFile(MAINTENANCE_FILE, { enabled: false, updatedAt: null, updatedBy: null });
 let orderPauseState = loadJsonFile(ORDER_PAUSE_STATE_FILE, { enabled: false, endsAt: null, updatedAt: null, updatedBy: null, reason: null });
 let shopStats = loadJsonFile(SHOP_STATS_FILE, {
@@ -538,6 +540,12 @@ if (inviteGiveawayState.active && !Array.isArray(inviteGiveawayState.active.entr
 if (inviteGiveawayState.active && !Array.isArray(inviteGiveawayState.active.progressMessages)) {
   inviteGiveawayState.active.progressMessages = [];
 }
+if (!clientGiveawayState || typeof clientGiveawayState !== 'object' || Array.isArray(clientGiveawayState)) {
+  clientGiveawayState = { active: null, history: [] };
+}
+if (!Array.isArray(clientGiveawayState.history)) clientGiveawayState.history = [];
+if (clientGiveawayState.active && typeof clientGiveawayState.active !== 'object') clientGiveawayState.active = null;
+if (clientGiveawayState.active && !Array.isArray(clientGiveawayState.active.entries)) clientGiveawayState.active.entries = [];
 if (!walletHistory.users) walletHistory.users = {};
 if (!ticketHistory.users) ticketHistory.users = {};
 if (typeof maintenanceState.enabled !== 'boolean') maintenanceState.enabled = false;
@@ -611,6 +619,7 @@ let availabilitySchedulerTimer = null;
 let dailyRecapSchedulerTimer = null;
 let discountSchedulerTimer = null;
 let orderPauseSchedulerTimer = null;
+let clientGiveawaySchedulerTimer = null;
 let tariffRefreshTimer = null;
 const CRASH_LOG_COOLDOWN = 60_000;
 
@@ -683,6 +692,12 @@ function saveInviteGiveawayState() {
   const saved = saveJsonFile(INVITE_GIVEAWAY_FILE, inviteGiveawayState);
 
   if (saved) scheduleDataBackup('invite_giveaway_updated');
+}
+
+function saveClientGiveawayState() {
+  const saved = saveJsonFile(CLIENT_GIVEAWAY_FILE, clientGiveawayState);
+
+  if (saved) scheduleDataBackup('client_giveaway_updated');
 }
 
 function saveShopStats() {
@@ -3458,6 +3473,10 @@ function isReferralCountable(referral) {
   return Boolean(referral && !referral.sourceOnly && !referral.excludedAt);
 }
 
+function hasInviteGiveawayMinimumAccess(member) {
+  return Boolean(member?.roles?.cache?.has(RULES_ROLE_ID));
+}
+
 function isTikTokReferralSource(referral) {
   return referral?.source === 'tiktok';
 }
@@ -3730,6 +3749,9 @@ function buildInviteGiveawayPanelEmbed(guild) {
         'Le compteur commence à **0** au lancement.',
         'Le classement normal du parrainage reste intact.',
         '',
+        `✅ Une invitation compte seulement si l’invité accepte le règlement et obtient le rôle <@&${RULES_ROLE_ID}>.`,
+        'Les bots, faux comptes ou arrivées sans vérification ne montent pas le classement.',
+        '',
         'Clique sur le bouton pour remplir le formulaire.'
       ].join('\n'))
       .setFooter({ text: 'Owner • Giveaway invite' });
@@ -3744,6 +3766,7 @@ function buildInviteGiveawayPanelEmbed(guild) {
       `Objectif : **${active.requiredInvites}** invitation${active.requiredInvites > 1 ? 's' : ''}`,
       `Démarré : <t:${Math.floor(active.startedAt / 1000)}:R>`,
       `Salon : <#${INVITE_GIVEAWAY_CHANNEL_ID}>`,
+      `Condition : invité avec rôle <@&${RULES_ROLE_ID}> obligatoire`,
       '',
       '**Classement temporaire**',
       inviteGiveawayProgressText(active)
@@ -3814,6 +3837,9 @@ function buildInviteGiveawayStartEmbed(giveaway, guild) {
       `Objectif : inviter **${giveaway.requiredInvites}** personne${giveaway.requiredInvites > 1 ? 's' : ''}`,
       '',
       'Le premier membre qui atteint l’objectif gagne.',
+      '',
+      `✅ Une invitation est comptée seulement quand l’invité accepte le règlement et obtient le rôle <@&${RULES_ROLE_ID}>.`,
+      'Les comptes qui rejoignent sans passer cette vérification ne comptent pas.',
       '',
       'Le compteur de ce giveaway démarre maintenant à **0**.',
       'Le classement parrainage habituel ne change pas.'
@@ -4008,6 +4034,7 @@ async function recordInviteGiveawayJoin(member, referral) {
   ]);
 
   if (isReferralExcludedMember(invitedMember) || isReferralExcludedMember(inviterMember)) return null;
+  if (!hasInviteGiveawayMinimumAccess(invitedMember)) return null;
 
   giveaway.entries.push({
     invitedUserId: member.id,
@@ -4085,6 +4112,444 @@ async function recordInviteGiveawayJoin(member, referral) {
   }
 
   return giveaway;
+}
+
+function clientCompletedOrderRows(userId) {
+  const rows = new Map();
+
+  for (const entry of ensureTicketHistory(userId)) {
+    const key = entry.id || entry.channelId;
+    if (key) rows.set(key, entry);
+  }
+
+  for (const entry of currentTicketHistoryRecords(userId)) {
+    const key = entry.id || entry.channelId;
+    if (key) rows.set(key, { ...rows.get(key), ...entry });
+  }
+
+  return [...rows.values()]
+    .filter(row => row?.type === 'commande' && row.completedAt)
+    .sort((a, b) => Number(b.completedAt || b.createdAt || 0) - Number(a.completedAt || a.createdAt || 0));
+}
+
+function hasCompletedOrderForClientGiveaway(userId) {
+  return clientCompletedOrderRows(userId).length > 0;
+}
+
+function clientGiveawayEligibility(member) {
+  if (!member?.roles?.cache?.has(CUSTOMER_ROLE_ID)) {
+    return {
+      ok: false,
+      reason: `Tu dois avoir le rôle <@&${CUSTOMER_ROLE_ID}> obtenu après une commande terminée.`
+    };
+  }
+
+  if (!hasCompletedOrderForClientGiveaway(member.id)) {
+    return {
+      ok: false,
+      reason: 'Le bot ne retrouve aucune commande terminée sur ton profil.'
+    };
+  }
+
+  return { ok: true, reason: null };
+}
+
+function clientGiveawayParticipantText(giveaway = clientGiveawayState.active) {
+  const count = Array.isArray(giveaway?.entries) ? giveaway.entries.length : 0;
+  return `Participants : **${count}**`;
+}
+
+function clientGiveawayEndLine(giveaway) {
+  const endUnix = Math.floor(Number(giveaway?.endsAt || Date.now()) / 1000);
+  return `Fin : <t:${endUnix}:R> — <t:${endUnix}:f>`;
+}
+
+function buildClientGiveawayPanelEmbed(guild) {
+  const active = clientGiveawayState.active;
+
+  if (!active) {
+    return new EmbedBuilder()
+      .setColor(0xD4AF37)
+      .setAuthor({ name: 'Giveaway clients', iconURL: guild.iconURL({ dynamic: true }) })
+      .setTitle('Créer un giveaway réservé aux clients')
+      .setDescription([
+        `Le giveaway sera annoncé dans <#${INVITE_GIVEAWAY_CHANNEL_ID}> avec **@everyone**.`,
+        '',
+        `✅ Participation réservée aux membres avec le rôle <@&${CUSTOMER_ROLE_ID}>.`,
+        '✅ Le bot vérifie aussi qu’au moins une commande a été marquée comme terminée.',
+        '',
+        'Les nouveaux arrivants qui viennent uniquement pour profiter du giveaway ne pourront pas participer.',
+        '',
+        'Clique sur le bouton pour remplir le formulaire.'
+      ].join('\n'))
+      .setFooter({ text: 'Owner • Giveaway clients' });
+  }
+
+  return new EmbedBuilder()
+    .setColor(0x3498DB)
+    .setAuthor({ name: 'Giveaway clients', iconURL: guild.iconURL({ dynamic: true }) })
+    .setTitle('Giveaway client en cours')
+    .setDescription([
+      `Récompense : **${active.reward}**`,
+      clientGiveawayEndLine(active),
+      clientGiveawayParticipantText(active),
+      `Salon : <#${INVITE_GIVEAWAY_CHANNEL_ID}>`,
+      '',
+      `Condition : rôle <@&${CUSTOMER_ROLE_ID}> + commande terminée obligatoire.`
+    ].join('\n'))
+    .setFooter({ text: 'Les participations sont sauvegardées pendant le giveaway.' });
+}
+
+function buildClientGiveawayPanelComponents() {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('open_client_giveaway_modal')
+        .setLabel(clientGiveawayState.active ? 'Giveaway déjà actif' : 'Créer le giveaway')
+        .setEmoji('🎁')
+        .setStyle(ButtonStyle.Primary)
+        .setDisabled(Boolean(clientGiveawayState.active))
+    )
+  ];
+}
+
+function buildClientGiveawayModal() {
+  const modal = new ModalBuilder()
+    .setCustomId('client_giveaway_create_modal')
+    .setTitle('Giveaway clients');
+
+  const rewardInput = new TextInputBuilder()
+    .setCustomId('client_giveaway_reward')
+    .setLabel('Lot à gagner')
+    .setPlaceholder('Exemple : compte McD0nald’s 75-99 pts')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMinLength(2)
+    .setMaxLength(120);
+
+  const durationInput = new TextInputBuilder()
+    .setCustomId('client_giveaway_duration')
+    .setLabel('Durée du giveaway')
+    .setPlaceholder('Exemple : 30m, 2h, 1j')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMinLength(2)
+    .setMaxLength(20);
+
+  const announcementInput = new TextInputBuilder()
+    .setCustomId('client_giveaway_announcement')
+    .setLabel('Message envoyé au lancement')
+    .setPlaceholder('Exemple : Giveaway réservé aux vrais clients La Rent’a.')
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(false)
+    .setMaxLength(1000);
+
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(rewardInput),
+    new ActionRowBuilder().addComponents(durationInput),
+    new ActionRowBuilder().addComponents(announcementInput)
+  );
+
+  return modal;
+}
+
+function buildClientGiveawayStartEmbed(giveaway, guild) {
+  return new EmbedBuilder()
+    .setColor(0xD4AF37)
+    .setAuthor({ name: 'La Rent’a', iconURL: guild.iconURL({ dynamic: true }) })
+    .setTitle('🎁 Giveaway clients')
+    .setDescription([
+      `Récompense : **${giveaway.reward}**`,
+      clientGiveawayEndLine(giveaway),
+      '',
+      'Clique sur le bouton ci-dessous pour participer.',
+      '',
+      '**Conditions obligatoires**',
+      `• Avoir le rôle <@&${CUSTOMER_ROLE_ID}>.`,
+      '• Avoir déjà eu au moins une commande marquée comme terminée.',
+      '',
+      'Les comptes qui rejoignent juste pour le giveaway ne peuvent pas participer.'
+    ].join('\n'))
+    .setFooter({ text: 'Giveaway clients • Participation contrôlée' })
+    .setTimestamp();
+}
+
+function clientGiveawayEntryRow(giveaway, disabled = false) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`join_client_giveaway:${giveaway.id}`)
+      .setLabel(disabled ? 'Giveaway terminé' : 'Participer')
+      .setEmoji('🎁')
+      .setStyle(disabled ? ButtonStyle.Secondary : ButtonStyle.Success)
+      .setDisabled(Boolean(disabled))
+  );
+}
+
+function buildClientGiveawayAnnouncementContent(giveaway) {
+  return [
+    '@everyone',
+    giveaway.announcementMessage || null
+  ].filter(Boolean).join('\n\n');
+}
+
+function buildClientGiveawayWinnerEmbed(giveaway, winnerId) {
+  return new EmbedBuilder()
+    .setColor(0x2ECC71)
+    .setTitle('🎉 Giveaway clients terminé')
+    .setDescription([
+      `Gagnant : <@${winnerId}>`,
+      `Récompense : **${giveaway.reward}**`,
+      `Participants : **${giveaway.entries?.length || 0}**`,
+      '',
+      'Merci aux clients La Rent’a pour votre confiance.'
+    ].join('\n'))
+    .setTimestamp();
+}
+
+function buildClientGiveawayNoWinnerEmbed(giveaway) {
+  return new EmbedBuilder()
+    .setColor(0xE67E22)
+    .setTitle('🎁 Giveaway clients terminé')
+    .setDescription([
+      `Récompense : **${giveaway.reward}**`,
+      '',
+      'Aucun participant éligible n’a participé.',
+      'Aucun gagnant n’a été tiré.'
+    ].join('\n'))
+    .setTimestamp();
+}
+
+function buildClientGiveawayCanceledEmbed(giveaway, user) {
+  return new EmbedBuilder()
+    .setColor(0xE67E22)
+    .setTitle('🎁 Giveaway clients annulé')
+    .setDescription([
+      `Annulé par : ${user}`,
+      `Récompense : **${giveaway.reward}**`,
+      `Participants enregistrés : **${giveaway.entries?.length || 0}**`
+    ].join('\n'))
+    .setTimestamp();
+}
+
+async function fetchClientGiveawayChannel() {
+  return fetchInviteGiveawayChannel();
+}
+
+async function startClientGiveaway({ guild, ownerUser, reward, duration, announcementMessage }) {
+  const giveaway = {
+    id: `CG-${Date.now()}`,
+    guildId: guild.id,
+    channelId: INVITE_GIVEAWAY_CHANNEL_ID,
+    reward,
+    announcementMessage: announcementMessage || null,
+    createdBy: ownerUser.id,
+    startedAt: Date.now(),
+    endsAt: Date.now() + duration,
+    entries: [],
+    announcementMessageId: null
+  };
+
+  clientGiveawayState.active = giveaway;
+  saveClientGiveawayState();
+  scheduleClientGiveawayEnd();
+
+  const giveawayChannel = await fetchClientGiveawayChannel();
+  if (giveawayChannel?.send) {
+    const announcement = await giveawayChannel.send({
+      content: buildClientGiveawayAnnouncementContent(giveaway),
+      embeds: [buildClientGiveawayStartEmbed(giveaway, guild)],
+      components: [clientGiveawayEntryRow(giveaway)],
+      allowedMentions: { parse: ['everyone'] }
+    }).catch(error => reportCrash('Annonce giveaway clients impossible', error, [
+      `Salon : <#${INVITE_GIVEAWAY_CHANNEL_ID}>`,
+      `Giveaway : **${giveaway.id}**`
+    ]));
+
+    if (announcement?.id) {
+      giveaway.announcementMessageId = announcement.id;
+      clientGiveawayState.active = giveaway;
+      saveClientGiveawayState();
+    }
+  }
+
+  await sendAdminLog('🎁 Giveaway clients lancé', [
+    `Owner : ${logUser(ownerUser)}`,
+    `Récompense : **${reward}**`,
+    clientGiveawayEndLine(giveaway),
+    announcementMessage ? `Message : ${announcementMessage.slice(0, 500)}` : 'Message : annonce classique',
+    `Salon : <#${INVITE_GIVEAWAY_CHANNEL_ID}>`
+  ], 0xD4AF37);
+
+  return giveaway;
+}
+
+async function disableClientGiveawayButton(giveaway, channel) {
+  if (!channel?.messages?.fetch || !giveaway?.announcementMessageId) return false;
+
+  const message = await channel.messages.fetch(giveaway.announcementMessageId).catch(() => null);
+  if (!message) return false;
+
+  return message.edit({
+    components: [clientGiveawayEntryRow(giveaway, true)]
+  }).then(() => true).catch(() => false);
+}
+
+async function finishClientGiveaway(reason = 'ended', user = client.user) {
+  const giveaway = clientGiveawayState.active;
+  if (!giveaway) return null;
+
+  const entries = Array.isArray(giveaway.entries) ? giveaway.entries : [];
+  const winnerEntry = reason === 'canceled' || !entries.length
+    ? null
+    : entries[Math.floor(Math.random() * entries.length)];
+  const completedGiveaway = {
+    ...giveaway,
+    status: reason === 'canceled' ? 'canceled' : 'completed',
+    endedAt: Date.now(),
+    endedBy: user?.id || null,
+    winnerId: winnerEntry?.userId || null
+  };
+
+  clientGiveawayState.history.unshift(completedGiveaway);
+  clientGiveawayState.history = clientGiveawayState.history.slice(0, 20);
+  clientGiveawayState.active = null;
+  saveClientGiveawayState();
+  scheduleClientGiveawayEnd();
+
+  const giveawayChannel = await fetchClientGiveawayChannel();
+  if (giveawayChannel) await disableClientGiveawayButton(completedGiveaway, giveawayChannel);
+
+  if (giveawayChannel?.send) {
+    if (reason === 'canceled') {
+      await giveawayChannel.send({
+        embeds: [buildClientGiveawayCanceledEmbed(completedGiveaway, user)]
+      }).catch(() => {});
+    } else if (winnerEntry?.userId) {
+      await giveawayChannel.send({
+        content: `🎉 GG <@${winnerEntry.userId}>, tu as gagné le giveaway clients !`,
+        embeds: [buildClientGiveawayWinnerEmbed(completedGiveaway, winnerEntry.userId)],
+        allowedMentions: { users: [winnerEntry.userId] }
+      }).catch(() => {});
+    } else {
+      await giveawayChannel.send({
+        embeds: [buildClientGiveawayNoWinnerEmbed(completedGiveaway)]
+      }).catch(() => {});
+    }
+  }
+
+  if (winnerEntry?.userId) {
+    const winner = await client.users.fetch(winnerEntry.userId).catch(() => null);
+    if (winner) {
+      await winner.send([
+        '🎉 **Tu as gagné le giveaway clients La Rent’a !**',
+        '',
+        `Récompense : **${completedGiveaway.reward}**`,
+        '',
+        'Un owner va te contacter pour te donner ton lot.'
+      ].join('\n')).catch(() => {});
+    }
+  }
+
+  await sendAdminLog(reason === 'canceled' ? '🎁 Giveaway clients annulé' : '🎉 Giveaway clients terminé', [
+    user ? `Déclenché par : ${logUser(user)}` : null,
+    completedGiveaway.winnerId ? `Gagnant : <@${completedGiveaway.winnerId}>` : 'Gagnant : aucun',
+    `Récompense : **${completedGiveaway.reward}**`,
+    `Participants : **${entries.length}**`,
+    `Salon : <#${INVITE_GIVEAWAY_CHANNEL_ID}>`
+  ].filter(Boolean), completedGiveaway.winnerId ? 0x2ECC71 : 0xE67E22);
+
+  return completedGiveaway;
+}
+
+function scheduleClientGiveawayEnd() {
+  if (clientGiveawaySchedulerTimer) {
+    clearTimeout(clientGiveawaySchedulerTimer);
+    clientGiveawaySchedulerTimer = null;
+  }
+
+  const giveaway = clientGiveawayState.active;
+  if (!giveaway?.endsAt) return;
+
+  const maxDelay = 2_147_483_647;
+  const delay = Math.max(Number(giveaway.endsAt) - Date.now(), 0);
+
+  clientGiveawaySchedulerTimer = setTimeout(() => {
+    const active = clientGiveawayState.active;
+    const remaining = Math.max(Number(active?.endsAt || 0) - Date.now(), 0);
+
+    if (active && remaining > 0) {
+      scheduleClientGiveawayEnd();
+      return;
+    }
+
+    finishClientGiveaway('ended', client.user).catch(error => reportCrash('Fin giveaway clients impossible', error));
+  }, Math.min(delay, maxDelay));
+
+  clientGiveawaySchedulerTimer.unref?.();
+}
+
+async function handleClientGiveawayJoin(interaction) {
+  const giveaway = clientGiveawayState.active;
+  const giveawayId = interaction.customId.split(':')[1];
+
+  if (!giveaway || giveaway.id !== giveawayId) {
+    return interaction.reply({
+      content: '❌ Ce giveaway n’est plus actif.',
+      ephemeral: true
+    });
+  }
+
+  if (Number(giveaway.endsAt) <= Date.now()) {
+    await finishClientGiveaway('ended', client.user);
+    return interaction.reply({
+      content: '⏱️ Ce giveaway vient de se terminer.',
+      ephemeral: true
+    }).catch(() => {});
+  }
+
+  const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+  const eligibility = clientGiveawayEligibility(member);
+
+  if (!eligibility.ok) {
+    return interaction.reply({
+      content: [
+        '❌ Tu ne peux pas participer à ce giveaway.',
+        '',
+        eligibility.reason
+      ].join('\n'),
+      ephemeral: true
+    });
+  }
+
+  if (!Array.isArray(giveaway.entries)) giveaway.entries = [];
+  if (giveaway.entries.some(entry => entry.userId === interaction.user.id)) {
+    return interaction.reply({
+      content: '✅ Tu participes déjà à ce giveaway.',
+      ephemeral: true
+    });
+  }
+
+  giveaway.entries.push({
+    userId: interaction.user.id,
+    tag: interaction.user.tag,
+    joinedAt: Date.now()
+  });
+  clientGiveawayState.active = giveaway;
+  saveClientGiveawayState();
+
+  await sendAdminLog('🎁 Participation giveaway clients', [
+    `Membre : ${logUser(interaction.user)}`,
+    `Giveaway : **${giveaway.id}**`,
+    `Participants : **${giveaway.entries.length}**`
+  ], 0x3498DB);
+
+  return interaction.reply({
+    content: [
+      '✅ Participation enregistrée.',
+      clientGiveawayEndLine(giveaway)
+    ].join('\n'),
+    ephemeral: true
+  });
 }
 
 function findPersonalInviteOwner(inviteCode) {
@@ -6818,6 +7283,8 @@ function buildHelpEmbed(guild) {
           ['dmclients', 'ouvre un formulaire pour envoyer un MP aux clients qui ont déjà commandé.'],
           ['giveawayinvite', 'ouvre le formulaire pour lancer un giveaway spécial invitations.'],
           ['giveawayinvite stop', 'annule le giveaway invite actif.'],
+          ['giveawayclient', 'ouvre le formulaire pour lancer un giveaway réservé aux clients.'],
+          ['giveawayclient stop', 'annule le giveaway client actif.'],
           ['annulavis ID', 'annule un avis comptabilisé et corrige la récompense si besoin.'],
           ['backup', 'crée une sauvegarde manuelle des données importantes du bot.'],
           ['backupinvites', 'crée une sauvegarde dédiée des invites et parrainages.']
@@ -8080,6 +8547,7 @@ client.once('ready', async () => {
     startDailyRecapScheduler();
     scheduleDiscountExpiration();
     scheduleOrderPauseExpiration();
+    scheduleClientGiveawayEnd();
     await refreshOrderQueueMessages('startup');
     await announceBotChangelog();
     await announcePersistentStorageStatus();
@@ -8138,11 +8606,19 @@ client.on(Events.InviteDelete, invite => {
 
 client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
   try {
-    if (isReferralExcludedMember(oldMember) || !isReferralExcludedMember(newMember)) return;
+    const hadGiveawayMinimumAccess = hasInviteGiveawayMinimumAccess(oldMember);
+    const hasGiveawayMinimumAccess = hasInviteGiveawayMinimumAccess(newMember);
 
-    await excludeReferralsForStaffOrOwner(newMember);
+    if (!hadGiveawayMinimumAccess && hasGiveawayMinimumAccess) {
+      const referral = referrals.invitedBy?.[newMember.id];
+      if (referral) await recordInviteGiveawayJoin(newMember, referral);
+    }
+
+    if (!isReferralExcludedMember(oldMember) && isReferralExcludedMember(newMember)) {
+      await excludeReferralsForStaffOrOwner(newMember);
+    }
   } catch (error) {
-    await reportCrash('Erreur exclusion parrainage staff/owner', error, [
+    await reportCrash('Erreur mise à jour membre parrainage', error, [
       `Membre : ${newMember?.user ? logUser(newMember.user) : 'Inconnu'}`
     ]);
   }
@@ -8727,6 +9203,40 @@ client.on('messageCreate', async message => {
       components: [dmClientsPanelRow(message.author.id)]
     });
 
+    deleteLater(panel, 5 * 60_000);
+    return;
+  }
+
+  if (message.content.trim().split(/\s+/)[0] === '!giveawayclient') {
+    if (!isOwnerMember(message.member)) {
+      const reply = await message.channel.send('❌ Seul le rôle owner peut créer un giveaway client.');
+      return deleteLater(reply);
+    }
+
+    const args = message.content.trim().split(/\s+/);
+    const action = (args[1] || 'panel').toLowerCase();
+
+    if (['stop', 'annuler', 'cancel'].includes(action)) {
+      if (!clientGiveawayState.active) {
+        const reply = await message.channel.send('❌ Aucun giveaway client actif à annuler.');
+        return deleteLater(reply);
+      }
+
+      await finishClientGiveaway('canceled', message.author);
+      return message.channel.send('✅ Giveaway client annulé.');
+    }
+
+    await sendAdminLog('🎁 Panneau giveaway client ouvert', [
+      `Owner : ${logUser(message.author)}`,
+      `Salon commande : ${logChannel(message.channel)}`,
+      `Salon giveaway : <#${INVITE_GIVEAWAY_CHANNEL_ID}>`,
+      clientGiveawayState.active ? `Giveaway actif : **${clientGiveawayState.active.id}**` : 'Giveaway actif : **non**'
+    ], 0x3498DB);
+
+    const panel = await message.channel.send({
+      embeds: [buildClientGiveawayPanelEmbed(message.guild)],
+      components: buildClientGiveawayPanelComponents()
+    });
     deleteLater(panel, 5 * 60_000);
     return;
   }
@@ -9943,6 +10453,28 @@ client.on(Events.InteractionCreate, async interaction => {
       return interaction.showModal(buildInviteGiveawayModal());
     }
 
+    if (interaction.customId === 'open_client_giveaway_modal') {
+      if (!isOwnerMember(interaction.member)) {
+        return interaction.reply({
+          content: '❌ Seul le rôle owner peut créer un giveaway client.',
+          ephemeral: true
+        });
+      }
+
+      if (clientGiveawayState.active) {
+        return interaction.reply({
+          content: '❌ Un giveaway client est déjà actif. Attends qu’il soit terminé avant d’en créer un nouveau.',
+          ephemeral: true
+        });
+      }
+
+      return interaction.showModal(buildClientGiveawayModal());
+    }
+
+    if (interaction.customId.startsWith('join_client_giveaway:')) {
+      return handleClientGiveawayJoin(interaction);
+    }
+
     if (interaction.customId.startsWith('open_ban_modal:')) {
       if (!canUseBanCommand(interaction.member)) {
         return interaction.reply({
@@ -10236,14 +10768,23 @@ client.on(Events.InteractionCreate, async interaction => {
         });
       }
 
-      await member.roles.add(RULES_ROLE_ID).catch(async () => {
+      const updatedMember = await member.roles.add(RULES_ROLE_ID).catch(async () => {
         await interaction.reply({
           content: '❌ Impossible de te donner le rôle. Contacte un administrateur.',
           ephemeral: true
         });
+        return null;
       });
 
       if (interaction.replied) return;
+
+      const memberWithRole = updatedMember || await interaction.guild.members.fetch(interaction.user.id).catch(() => member);
+      const referral = referrals.invitedBy?.[member.id];
+      if (referral) {
+        await recordInviteGiveawayJoin(memberWithRole, referral).catch(error => reportCrash('Comptage giveaway après règlement impossible', error, [
+          `Membre : ${logUser(interaction.user)}`
+        ]));
+      }
 
       sendActionLog(member, '✅ Règlement accepté', [
         `Membre : ${logUser(interaction.user)}`,
@@ -10920,6 +11461,49 @@ client.on(Events.InteractionCreate, async interaction => {
     return interaction.reply({
       embeds: [buildInviteGiveawayPanelEmbed(interaction.guild)],
       content: `✅ Giveaway lancé dans <#${INVITE_GIVEAWAY_CHANNEL_ID}> avec @everyone.\nObjectif : **${giveaway.requiredInvites}** invitation${giveaway.requiredInvites > 1 ? 's' : ''} • Récompense : **${giveaway.reward}**`,
+      ephemeral: true
+    });
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId === 'client_giveaway_create_modal') {
+    if (!isOwnerMember(interaction.member)) {
+      return interaction.reply({
+        content: '❌ Seul le rôle owner peut créer un giveaway client.',
+        ephemeral: true
+      });
+    }
+
+    if (clientGiveawayState.active) {
+      return interaction.reply({
+        content: '❌ Un giveaway client est déjà actif. Attends qu’il soit terminé avant d’en créer un nouveau.',
+        ephemeral: true
+      });
+    }
+
+    const reward = normalizeInviteGiveawayReward(interaction.fields.getTextInputValue('client_giveaway_reward'));
+    const duration = parseDurationInput(interaction.fields.getTextInputValue('client_giveaway_duration'));
+    const announcementMessage = normalizeInviteGiveawayAnnouncement(
+      interaction.fields.getTextInputValue('client_giveaway_announcement')
+    );
+
+    if (!reward || !Number.isFinite(duration)) {
+      return interaction.reply({
+        content: '❌ Formulaire invalide. Indique un lot et une durée valide comme `30m`, `2h` ou `1j`.',
+        ephemeral: true
+      });
+    }
+
+    const giveaway = await startClientGiveaway({
+      guild: interaction.guild,
+      ownerUser: interaction.user,
+      reward,
+      duration,
+      announcementMessage
+    });
+
+    return interaction.reply({
+      embeds: [buildClientGiveawayPanelEmbed(interaction.guild)],
+      content: `✅ Giveaway client lancé dans <#${INVITE_GIVEAWAY_CHANNEL_ID}> avec @everyone.\nRécompense : **${giveaway.reward}** • ${clientGiveawayEndLine(giveaway)}`,
       ephemeral: true
     });
   }
