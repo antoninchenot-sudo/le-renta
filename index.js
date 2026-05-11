@@ -52,7 +52,7 @@ const REVIEW_LOG_CHANNEL_ID = '1503470974153265183';
 const INVITE_ANNOUNCE_CHANNEL_ID = '1500829957239083201';
 const INVITE_ADMIN_CHANNEL_ID = '1500829958207967278';
 const INVITE_GIVEAWAY_CHANNEL_ID = '1500829957239083203';
-const TIKTOK_INVITE_CODE = 'NuyXstpakN';
+const TIKTOK_INVITE_CODE = 'HGFq3H3Eu2';
 const TIKTOK_SOURCE_EMOJI = '<:tiktok:1501320448477106186>';
 const TIKTOK_SOURCE_LABEL = `Arrivé de TikTok ${TIKTOK_SOURCE_EMOJI}`;
 const RULES_ROLE_ID = '1500829956719116300';
@@ -140,13 +140,14 @@ const DATA_BACKUP_FILES = [
   PRODUCT_STOCK_FILE,
   PAYMENT_CONFIG_FILE
 ];
-const BOT_CHANGELOG_VERSION = '2026-05-11-ticket-limit-welcome-revert';
+const BOT_CHANGELOG_VERSION = '2026-05-11-ticket-limit-tiktok-link';
 // Garder uniquement les changements du lot en cours, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
   'Limitation à un seul ticket support ouvert par membre.',
   'Limitation à une seule demande de recharge ouverte par membre.',
   'Autorisation du staff/support à fermer les tickets support.',
-  'Retour à l’ancien message de bienvenue sans image de fond.'
+  'Retour à l’ancien message de bienvenue sans image de fond.',
+  'Mise à jour du lien TikTok suivi par le bot.'
 ];
 const REVIEW_REQUIRED_COUNT = 3;
 const REVIEW_REWARD_CENTS = 100;
