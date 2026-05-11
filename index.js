@@ -36,7 +36,7 @@ const TICKET_ACCESS_ROLE_ID = '1500829956719116302';
 const REFERRAL_EXCLUDED_ROLE_IDS = [...new Set([ADMIN_ROLE_ID, STAFF_ROLE_ID, TICKET_ACCESS_ROLE_ID])];
 const TICKET_CATEGORY = '1500829957524426759';
 const ORDER_CATEGORY = '1500829957524426760';
-const ORDER_DONE_CATEGORY = '1500829958526992396';
+const ORDER_DONE_CATEGORY = '1500829958207967280';
 const SUPPORT_CATEGORY = '1500829957524426761';
 const TICKET_ARCHIVE_CATEGORY = '1500829958526992396';
 const TICKET_RELANCE_CATEGORY = '1503470460384313415';
@@ -57,6 +57,7 @@ const TIKTOK_SOURCE_EMOJI = '<:tiktok:1501320448477106186>';
 const TIKTOK_SOURCE_LABEL = `Arrivé de TikTok ${TIKTOK_SOURCE_EMOJI}`;
 const RULES_ROLE_ID = '1500829956719116300';
 const CUSTOMER_ROLE_ID = '1500829956719116301';
+const OLD_CUSTOMER_ROLE_IDS = ['1499537426463461586'];
 const DELETE_DELAY = 10_000;
 const ARCHIVED_TICKET_TTL = 24 * 60 * 60 * 1000;
 const TICKET_NO_RESPONSE_REMINDER_DELAY = 60 * 60 * 1000;
@@ -142,7 +143,7 @@ const DATA_BACKUP_FILES = [
   PAYMENT_CONFIG_FILE,
   INTERACTION_USERS_FILE
 ];
-const BOT_CHANGELOG_VERSION = '2026-05-11-ticket-limit-tiktok-dmmax-interactions';
+const BOT_CHANGELOG_VERSION = '2026-05-11-ticket-limit-tiktok-dm-anciens-order-done-category';
 // Garder uniquement les changements du lot en cours, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
   'Limitation à un seul ticket support ouvert par membre.',
@@ -151,7 +152,9 @@ const BOT_CHANGELOG_ITEMS = [
   'Retour à l’ancien message de bienvenue sans image de fond.',
   'Mise à jour du lien TikTok suivi par le bot.',
   'Ajout de la commande dmmax pour envoyer un MP au maximum d’IDs connus par le bot.',
-  'Ajout des anciens IDs d’interaction trouvés dans les sauvegardes et suivi des nouvelles interactions.'
+  'Ajout des anciens IDs d’interaction trouvés dans les sauvegardes et suivi des nouvelles interactions.',
+  'Ajout de la commande dmanciens pour cibler les anciens clients, leurs filleuls et les ouvreurs de tickets.',
+  'Déplacement des tickets commande terminée dans leur nouvelle catégorie dédiée.'
 ];
 const REVIEW_REQUIRED_COUNT = 3;
 const REVIEW_REWARD_CENTS = 100;
@@ -7324,6 +7327,7 @@ function buildHelpEmbed(guild) {
           ['dmclients', 'ouvre un formulaire pour envoyer un MP aux clients qui ont déjà commandé.'],
           ['dmrecharges', 'ouvre un formulaire pour envoyer un MP aux anciens clients ayant déjà rechargé.'],
           ['dmmax', 'ouvre un formulaire pour envoyer un MP au maximum de membres connus par le bot.'],
+          ['dmanciens', 'ouvre un formulaire pour envoyer un MP aux anciens actifs : clients, filleuls et tickets.'],
           ['giveawayinvite', 'ouvre le formulaire pour lancer un giveaway spécial invitations.'],
           ['giveawayinvite stop', 'annule le giveaway invite actif.'],
           ['giveawayclient', 'ouvre le formulaire pour lancer un giveaway réservé aux clients.'],
@@ -7488,6 +7492,37 @@ function buildDmMaxKnownUsersModal(launcherId) {
     .setCustomId('dm_max_known_users_body')
     .setLabel('Message à envoyer')
     .setPlaceholder('Écris ici le message qui sera envoyé au maximum de personnes connues.')
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(true)
+    .setMinLength(2)
+    .setMaxLength(1800);
+
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(titleInput),
+    new ActionRowBuilder().addComponents(bodyInput)
+  );
+
+  return modal;
+}
+
+function buildDmOldActiveUsersModal(launcherId) {
+  const modal = new ModalBuilder()
+    .setCustomId(`dm_old_active_users_modal:${launcherId}`)
+    .setTitle('MP anciens actifs');
+
+  const titleInput = new TextInputBuilder()
+    .setCustomId('dm_old_active_users_title')
+    .setLabel('Titre du message')
+    .setPlaceholder('Exemple : Nouveau serveur La Rent’a')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMinLength(2)
+    .setMaxLength(100);
+
+  const bodyInput = new TextInputBuilder()
+    .setCustomId('dm_old_active_users_body')
+    .setLabel('Message à envoyer')
+    .setPlaceholder('Écris ici le message pour les anciens actifs du serveur.')
     .setStyle(TextInputStyle.Paragraph)
     .setRequired(true)
     .setMinLength(2)
@@ -7688,6 +7723,203 @@ function collectKnownUserIdsFromSavedFiles(addRecipient) {
   ].forEach(([backupDir, source]) => collectKnownUserIdsFromBackupDir(backupDir, addRecipient, source));
 }
 
+function isLeRentaCustomerRole(role) {
+  const roleName = String(role?.name || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+
+  return roleName === 'lerenta' || roleName === 'clientlerenta';
+}
+
+function hasKnownCustomerRole(member) {
+  const roles = member?.roles?.cache;
+  if (!roles) return false;
+
+  if (roles.has(CUSTOMER_ROLE_ID)) return true;
+  if (OLD_CUSTOMER_ROLE_IDS.some(roleId => roles.has(roleId))) return true;
+  return roles.some(role => isLeRentaCustomerRole(role));
+}
+
+function collectOldActiveHintsFromData(data, handlers, parentKey = null, objectKey = null) {
+  if (!data) return;
+
+  if (Array.isArray(data)) {
+    data.forEach(item => collectOldActiveHintsFromData(item, handlers, parentKey, objectKey));
+    return;
+  }
+
+  if (typeof data !== 'object') return;
+
+  const normalizedParent = String(parentKey || '').toLowerCase();
+  const rowType = String(data.type || '').toLowerCase();
+  if (data.userId && ['commande', 'recharge', 'support'].includes(rowType)) {
+    handlers.scanTicketRow(data.userId, data, 'backup-ancien-actif');
+  }
+
+  if (normalizedParent === 'invitedby' && isDiscordSnowflake(objectKey) && data.inviterId) {
+    handlers.addReferralEdge({
+      invitedUserId: objectKey,
+      inviterId: data.inviterId,
+      timestamp: data.joinedAt || data.rewardedAt || data.createdAt || data.updatedAt || null
+    });
+  }
+
+  if (normalizedParent === 'stats' && isDiscordSnowflake(objectKey) && Array.isArray(data.invitedUsers)) {
+    data.invitedUsers.forEach(invitedUserId => {
+      handlers.addReferralEdge({
+        invitedUserId,
+        inviterId: objectKey,
+        timestamp: data.lastValidatedAt || data.updatedAt || null
+      });
+    });
+  }
+
+  for (const [key, value] of Object.entries(data)) {
+    collectOldActiveHintsFromData(value, handlers, key, key);
+  }
+}
+
+function collectOldActiveHintsFromJsonFile(filePath, handlers) {
+  if (!filePath || !fs.existsSync(filePath)) return;
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    collectOldActiveHintsFromData(parsed, handlers);
+  } catch {
+    // Ignore les anciens fichiers incomplets ou corrompus.
+  }
+}
+
+function collectOldActiveHintsFromBackupDir(backupDir, handlers) {
+  if (!backupDir || !fs.existsSync(backupDir)) return;
+
+  let files = [];
+  try {
+    files = fs.readdirSync(backupDir)
+      .filter(file => file.endsWith('.json'))
+      .map(file => path.join(backupDir, file));
+  } catch {
+    return;
+  }
+
+  files.forEach(filePath => collectOldActiveHintsFromJsonFile(filePath, handlers));
+}
+
+function collectOldActiveHintsFromSavedFiles(handlers) {
+  DATA_BACKUP_FILES.forEach(filePath => collectOldActiveHintsFromJsonFile(filePath, handlers));
+
+  [
+    WALLET_BACKUP_DIR,
+    REFERRAL_BACKUP_DIR,
+    REVIEW_BACKUP_DIR,
+    DATA_BACKUP_DIR
+  ].forEach(backupDir => collectOldActiveHintsFromBackupDir(backupDir, handlers));
+}
+
+function oldActiveDmRecipients(guildMembers = null) {
+  const rows = new Map();
+  const customerIds = new Set();
+  const referralEdges = [];
+
+  const addRecipient = (userId, source, timestamp = null) => {
+    const cleanUserId = String(userId || '').trim();
+    if (!isDiscordSnowflake(cleanUserId)) return;
+
+    const previous = rows.get(cleanUserId);
+    const lastSeenAt = Math.max(Number(previous?.lastSeenAt) || 0, Number(timestamp) || 0);
+    const sources = new Set(previous?.sources || []);
+    sources.add(source);
+
+    rows.set(cleanUserId, {
+      userId: cleanUserId,
+      lastSeenAt,
+      sources: [...sources]
+    });
+  };
+
+  const addCustomer = (userId, source, timestamp = null) => {
+    if (!isDiscordSnowflake(userId)) return;
+    customerIds.add(String(userId));
+    addRecipient(userId, source, timestamp);
+  };
+
+  const scanTicketRow = (userId, row, source) => {
+    if (!row || typeof row !== 'object') return;
+    const rowUserId = row.userId || userId;
+    if (!isDiscordSnowflake(rowUserId)) return;
+
+    const timestamp = row.completedAt || row.paidAt || row.createdAt || row.updatedAt || row.archivedAt;
+    if (['commande', 'recharge', 'support'].includes(row.type)) {
+      addRecipient(rowUserId, `ticket-ouvert-${row.type}`, timestamp);
+    }
+
+    if (row.type === 'commande' && (row.completedAt || row.statsOrderCompletedAt)) {
+      addCustomer(rowUserId, 'ancien-client-commande-terminee', row.completedAt || row.statsOrderCompletedAt || timestamp);
+    }
+  };
+
+  if (guildMembers && typeof guildMembers.forEach === 'function') {
+    guildMembers.forEach(member => {
+      if (!member?.user?.bot && hasKnownCustomerRole(member)) {
+        addCustomer(member.id, 'role-le-renta', member.joinedTimestamp);
+      }
+    });
+  }
+
+  for (const [userId, entries] of Object.entries(ticketHistory.users || {})) {
+    for (const entry of Array.isArray(entries) ? entries : []) {
+      scanTicketRow(userId, entry, 'ticket-history');
+    }
+  }
+
+  for (const ticketRequest of Object.values(requests.tickets || {})) {
+    scanTicketRow(ticketRequest?.userId, ticketRequest, 'requests');
+  }
+
+  for (const [userId, entries] of Object.entries(walletHistory.users || {})) {
+    for (const entry of Array.isArray(entries) ? entries : []) {
+      if (entry?.type === 'order') {
+        addRecipient(userId, 'commande-payee-wallet', entry.createdAt);
+      }
+    }
+  }
+
+  for (const [invitedUserId, referral] of Object.entries(referrals.invitedBy || {})) {
+    if (referral?.inviterId) {
+      referralEdges.push({
+        invitedUserId,
+        inviterId: referral.inviterId,
+        timestamp: referral.joinedAt || referral.rewardedAt
+      });
+    }
+  }
+
+  for (const [inviterId, stats] of Object.entries(referrals.stats || {})) {
+    for (const invitedUserId of Array.isArray(stats?.invitedUsers) ? stats.invitedUsers : []) {
+      referralEdges.push({
+        invitedUserId,
+        inviterId,
+        timestamp: stats.lastValidatedAt || null
+      });
+    }
+  }
+
+  collectOldActiveHintsFromSavedFiles({
+    scanTicketRow,
+    addReferralEdge: edge => referralEdges.push(edge)
+  });
+
+  for (const edge of referralEdges) {
+    if (!customerIds.has(String(edge.inviterId))) continue;
+    addRecipient(edge.invitedUserId, 'filleul-ancien-client', edge.timestamp);
+  }
+
+  return [...rows.values()]
+    .sort((a, b) => Number(b.lastSeenAt || 0) - Number(a.lastSeenAt || 0));
+}
+
 function maxKnownDmRecipients(guildMembers = null) {
   const rows = new Map();
 
@@ -7832,6 +8064,34 @@ function buildDmMaxKnownUsersPanelEmbed(guild, recipients) {
     .setFooter({ text: 'Owner • Envoi maximum dédoublonné' });
 }
 
+function buildDmOldActiveUsersPanelEmbed(guild, recipients) {
+  const recent = recipients
+    .slice(0, 5)
+    .map(row => `<@${row.userId}>${row.lastSeenAt ? ` • actif <t:${Math.floor(row.lastSeenAt / 1000)}:R>` : ''}`)
+    .join('\n') || 'Aucun ancien actif trouvé dans les sauvegardes.';
+
+  return new EmbedBuilder()
+    .setColor(0xD4AF37)
+    .setAuthor({ name: 'MP anciens actifs', iconURL: guild.iconURL({ dynamic: true }) })
+    .setTitle('Envoyer un MP aux anciens actifs')
+    .setDescription([
+      'Le bot va cibler les IDs sauvegardés qui correspondent aux anciens actifs.',
+      '',
+      '**Ciblage**',
+      '• anciens clients avec commande terminée / rôle Le Rent’a reconnu',
+      '• personnes invitées par ces anciens clients',
+      '• membres ayant déjà ouvert au moins un ticket',
+      '',
+      `IDs trouvés : **${recipients.length}**`,
+      '',
+      '**Derniers détectés**',
+      recent,
+      '',
+      'Si l’ancien serveur est supprimé, les anciens rôles non sauvegardés ne peuvent pas être récupérés par Discord.'
+    ].join('\n'))
+    .setFooter({ text: 'Owner • Anciens actifs dédoublonnés' });
+}
+
 function dmClientsPanelRow(ownerId) {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -7857,6 +8117,17 @@ function dmMaxKnownUsersPanelRow(ownerId, disabled = false) {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`open_dm_max_known_users_modal:${ownerId}`)
+      .setLabel('Écrire le MP')
+      .setEmoji('📩')
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(Boolean(disabled))
+  );
+}
+
+function dmOldActiveUsersPanelRow(ownerId, disabled = false) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`open_dm_old_active_users_modal:${ownerId}`)
       .setLabel('Écrire le MP')
       .setEmoji('📩')
       .setStyle(ButtonStyle.Primary)
@@ -8090,6 +8361,98 @@ async function sendDmToMaxKnownUsers(interaction, title, body) {
         new EmbedBuilder()
           .setColor(failedCount ? 0xF1C40F : 0x2ECC71)
           .setTitle('📩 Envoi MP maximum terminé')
+          .setDescription([
+            `IDs ciblés : **${recipients.length}**`,
+            `MP envoyés : **${sentCount}**`,
+            `MP impossibles : **${failedCount}**`,
+            '',
+            failedCount
+              ? 'Certains MP peuvent être fermés ou impossibles car la personne ne partage plus de serveur avec le bot.'
+              : 'Tous les MP ciblés ont été envoyés.'
+          ].join('\n'))
+          .setTimestamp()
+      ]
+    });
+  } finally {
+    clientDmBroadcastLocks.delete(lockKey);
+  }
+}
+
+async function sendDmToOldActiveUsers(interaction, title, body) {
+  const lockKey = `${interaction.guildId}:old-active`;
+
+  if (clientDmBroadcastLocks.has(lockKey)) {
+    return interaction.editReply('❌ Un envoi MP anciens actifs est déjà en cours. Attends qu’il soit terminé.');
+  }
+
+  clientDmBroadcastLocks.add(lockKey);
+
+  try {
+    const guildMembers = await interaction.guild.members.fetch().catch(() => null);
+    const recipients = oldActiveDmRecipients(guildMembers);
+
+    if (!recipients.length) {
+      await sendAdminLog('📩 MP anciens actifs annulé', [
+        `Owner : ${logUser(interaction.user)}`,
+        'Raison : aucun ancien actif trouvé dans les sauvegardes.'
+      ], 0xF1C40F);
+
+      return interaction.editReply('❌ Aucun ancien actif trouvé dans les sauvegardes.');
+    }
+
+    const embed = buildClientDmEmbed(interaction.guild, title, body, interaction.user);
+    let sentCount = 0;
+    let failedCount = 0;
+    const failedSamples = [];
+    const sourceCounts = {};
+
+    for (const recipient of recipients) {
+      for (const source of recipient.sources || []) {
+        sourceCounts[source] = (sourceCounts[source] || 0) + 1;
+      }
+
+      const guildMember = guildMembers?.get?.(recipient.userId);
+      const user = guildMember?.user || await client.users.fetch(recipient.userId).catch(() => null);
+
+      if (!user || user.bot) {
+        failedCount += 1;
+        if (failedSamples.length < 10) failedSamples.push(`introuvable (${recipient.userId})`);
+        continue;
+      }
+
+      const sent = await user.send({ embeds: [embed] })
+        .then(() => true)
+        .catch(() => {
+          failedCount += 1;
+          if (failedSamples.length < 10) failedSamples.push(`${user.tag || user.username} (${user.id})`);
+          return false;
+        });
+
+      if (sent) sentCount += 1;
+      if (CLIENT_DM_BROADCAST_DELAY > 0) await wait(CLIENT_DM_BROADCAST_DELAY);
+    }
+
+    const topSources = Object.entries(sourceCounts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([source, count]) => `${source}: **${count}**`)
+      .join(' • ');
+
+    await sendAdminLog('📩 MP anciens actifs envoyé', [
+      `Owner : ${logUser(interaction.user)}`,
+      `IDs ciblés : **${recipients.length}**`,
+      `MP envoyés : **${sentCount}**`,
+      `MP impossibles : **${failedCount}**`,
+      topSources ? `Sources principales : ${topSources}` : null,
+      failedSamples.length ? `Exemples échecs : ${failedSamples.join(', ')}` : null,
+      `Titre : **${title.slice(0, 200)}**`
+    ].filter(Boolean), failedCount ? 0xF1C40F : 0x2ECC71);
+
+    return interaction.editReply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(failedCount ? 0xF1C40F : 0x2ECC71)
+          .setTitle('📩 Envoi MP anciens actifs terminé')
           .setDescription([
             `IDs ciblés : **${recipients.length}**`,
             `MP envoyés : **${sentCount}**`,
@@ -9885,6 +10248,30 @@ client.on('messageCreate', async message => {
     return;
   }
 
+  if (message.content === '!dmanciens') {
+    if (!isOwnerMember(message.member)) {
+      const reply = await message.channel.send('❌ Seul le rôle owner peut envoyer un MP aux anciens actifs.');
+      return deleteLater(reply);
+    }
+
+    const guildMembers = await message.guild.members.fetch().catch(() => null);
+    const recipients = oldActiveDmRecipients(guildMembers);
+
+    await sendAdminLog('📩 Panneau MP anciens actifs ouvert', [
+      `Owner : ${logUser(message.author)}`,
+      `Salon : ${logChannel(message.channel)}`,
+      `IDs anciens actifs trouvés : **${recipients.length}**`
+    ], 0x3498DB);
+
+    const panel = await message.channel.send({
+      embeds: [buildDmOldActiveUsersPanelEmbed(message.guild, recipients)],
+      components: [dmOldActiveUsersPanelRow(message.author.id, recipients.length === 0)]
+    });
+
+    deleteLater(panel, 5 * 60_000);
+    return;
+  }
+
   if (message.content.trim().split(/\s+/)[0] === '!giveawayclient') {
     if (!isOwnerMember(message.member)) {
       const reply = await message.channel.send('❌ Seul le rôle owner peut créer un giveaway client.');
@@ -11198,6 +11585,25 @@ client.on(Events.InteractionCreate, async interaction => {
       return interaction.showModal(buildDmMaxKnownUsersModal(launcherId));
     }
 
+    if (interaction.customId.startsWith('open_dm_old_active_users_modal:')) {
+      if (!isOwnerMember(interaction.member)) {
+        return interaction.reply({
+          content: '❌ Seul le rôle owner peut envoyer un MP aux anciens actifs.',
+          ephemeral: true
+        });
+      }
+
+      const launcherId = interaction.customId.split(':')[1];
+      if (interaction.user.id !== launcherId) {
+        return interaction.reply({
+          content: '❌ Seul l’owner qui a ouvert ce panneau peut écrire le MP.',
+          ephemeral: true
+        });
+      }
+
+      return interaction.showModal(buildDmOldActiveUsersModal(launcherId));
+    }
+
     if (interaction.customId.startsWith('open_ban_modal:')) {
       if (!canUseBanCommand(interaction.member)) {
         return interaction.reply({
@@ -12030,6 +12436,36 @@ client.on(Events.InteractionCreate, async interaction => {
 
     await interaction.deferReply({ ephemeral: true });
     return sendDmToMaxKnownUsers(interaction, title, body);
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('dm_old_active_users_modal:')) {
+    if (!isOwnerMember(interaction.member)) {
+      return interaction.reply({
+        content: '❌ Seul le rôle owner peut envoyer un MP aux anciens actifs.',
+        ephemeral: true
+      });
+    }
+
+    const launcherId = interaction.customId.split(':')[1];
+    if (interaction.user.id !== launcherId) {
+      return interaction.reply({
+        content: '❌ Seul l’owner qui a ouvert ce formulaire peut valider cet envoi.',
+        ephemeral: true
+      });
+    }
+
+    const title = interaction.fields.getTextInputValue('dm_old_active_users_title').trim();
+    const body = interaction.fields.getTextInputValue('dm_old_active_users_body').trim();
+
+    if (title.length < 2 || body.length < 2) {
+      return interaction.reply({
+        content: '❌ Titre ou message invalide.',
+        ephemeral: true
+      });
+    }
+
+    await interaction.deferReply({ ephemeral: true });
+    return sendDmToOldActiveUsers(interaction, title, body);
   }
 
   if (interaction.isModalSubmit() && interaction.customId.startsWith('announcement_modal:')) {
