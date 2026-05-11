@@ -71,7 +71,6 @@ const MCD0NALDS_EMOJI_NAME = '4964mcd0nalds';
 const MCD0NALDS_EMOJI = `<:${MCD0NALDS_EMOJI_NAME}:${MCD0NALDS_EMOJI_ID}>`;
 const MCD0NALDS_BUTTON_EMOJI = { id: MCD0NALDS_EMOJI_ID, name: MCD0NALDS_EMOJI_NAME };
 const INFO_IMAGE = process.env.INFO_IMAGE || 'https://i0.wp.com/direct-actu.fr/wp-content/uploads/2024/11/1725353427343-ad6c22b5-478a-412e-9c6f-8e14646acd5e_1.png?ssl=1';
-const WELCOME_IMAGE = process.env.WELCOME_IMAGE || 'https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=1400&q=80';
 const PAYPAL_LINK = 'https://www.paypal.me/LaRenta23';
 const REVOLUT_LINK = 'https://revolut.me/arthur23320/pocket/vNrIna0VcG';
 const IBAN = 'FR76 2823 3000 0165 8385 8232 516';
@@ -141,12 +140,13 @@ const DATA_BACKUP_FILES = [
   PRODUCT_STOCK_FILE,
   PAYMENT_CONFIG_FILE
 ];
-const BOT_CHANGELOG_VERSION = '2026-05-11-welcome-banner';
+const BOT_CHANGELOG_VERSION = '2026-05-11-ticket-limit-welcome-revert';
 // Garder uniquement les changements du lot en cours, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Nouveau message de bienvenue plus propre dans le salon bienvenue.',
-  'Ajout d’une grande image de fond configurable avec la variable WELCOME_IMAGE.',
-  'Le message affiche la source d’arrivée et redirige clairement vers le règlement puis la boutique.'
+  'Limitation à un seul ticket support ouvert par membre.',
+  'Limitation à une seule demande de recharge ouverte par membre.',
+  'Autorisation du staff/support à fermer les tickets support.',
+  'Retour à l’ancien message de bienvenue sans image de fond.'
 ];
 const REVIEW_REQUIRED_COUNT = 3;
 const REVIEW_REWARD_CENTS = 100;
@@ -1051,6 +1051,27 @@ async function confirmOpeningAnotherTicket(interaction, type) {
   };
   const typeLabel = typeLabels[activeTicket.ticketRequest.type] || 'ticket';
   const isRecharge = activeTicket.ticketRequest.type === 'recharge';
+  const isSingleTicketType = type === 'support' || type === 'recharge';
+
+  if (isSingleTicketType) {
+    await sendEphemeralPrompt(interaction, {
+      content: isRecharge
+        ? [
+            '⚠️ Vous avez déjà une recharge en cours.',
+            '',
+            'Pour éviter les demandes en double, vous ne pouvez ouvrir qu’une seule recharge à la fois.',
+            'Va dans tes messages privés avec le bot : les instructions de ta recharge en cours y sont envoyées.'
+          ].join('\n')
+        : [
+            '⚠️ Vous avez déjà un ticket support ouvert.',
+            '',
+            `Ticket en cours : ${activeTicket.channel}`,
+            'Ferme ce ticket ou attends qu’un staff le traite avant d’en ouvrir un nouveau.'
+          ].join('\n')
+    });
+
+    return { confirmed: false };
+  }
 
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -5605,12 +5626,15 @@ function restoreTicketPermissionOverwrites(guild, ticketRequest, ownerId) {
   return ticketPermissionOverwrites(guild, resolvedOwnerId);
 }
 
-function canManageTicket(interaction, ownerId) {
+function canManageTicket(interaction, ownerId, ticketRequest = null) {
+  const roles = interaction.member?.roles?.cache;
+
   return (
     interaction.user.id === ownerId ||
-    interaction.member.roles.cache.has(STAFF_ROLE_ID) ||
-    interaction.member.roles.cache.has(ADMIN_ROLE_ID) ||
-    interaction.member.permissions.has(PermissionFlagsBits.Administrator)
+    roles?.has(STAFF_ROLE_ID) ||
+    roles?.has(ADMIN_ROLE_ID) ||
+    (ticketRequest?.type === 'support' && roles?.has(TICKET_ACCESS_ROLE_ID)) ||
+    interaction.member?.permissions?.has(PermissionFlagsBits.Administrator)
   );
 }
 
@@ -8653,43 +8677,36 @@ async function sendInviteJoinAnnouncement(member, referral) {
 
   if (!channel || typeof channel.send !== 'function') return;
 
-  const sourceText = isTikTokReferralSource(referral)
-    ? TIKTOK_SOURCE_LABEL
-    : referral?.inviterId
-      ? `Invité par <@${referral.inviterId}>`
-      : 'Arrivée non détectée';
-
-  const detailsText = referral?.inviterId
-    ? 'Ton invitation est enregistrée pour le parrainage.'
-    : isTikTokReferralSource(referral)
-      ? 'Tu arrives depuis TikTok, bienvenue dans la boutique.'
-      : 'Le bot n’a pas pu identifier le lien utilisé.';
-
-  const embed = new EmbedBuilder()
-    .setColor(inviteWelcomeColor(referral))
-    .setAuthor({ name: 'La Rent’a', iconURL: member.guild.iconURL({ dynamic: true }) })
-    .setTitle('Bienvenue chez La Rent’a')
-    .setDescription([
-      `Content de te voir ici ${member}.`,
-      '',
-      `👥 **${sourceText}**`,
-      detailsText,
-      '',
-      '**Pour commencer**',
-      `1. Accepte le règlement pour recevoir le rôle <@&${RULES_ROLE_ID}>.`,
-      `2. Va dans <#${SHOP_CHANNEL_ID}> pour recharger ton solde ou commander.`,
-      `3. Besoin d’aide ? Le support est ici : <#${SUPPORT_CHANNEL_ID}>.`
-    ].join('\n'))
-    .setThumbnail(member.user.displayAvatarURL({ dynamic: true, size: 256 }))
-    .setFooter({ text: 'Bienvenue • La Rent’a' })
-    .setTimestamp();
-
-  if (WELCOME_IMAGE) embed.setImage(WELCOME_IMAGE);
+  const description = isTikTokReferralSource(referral)
+    ? [
+        `👋 Bienvenue ${member} sur le serveur !`,
+        '',
+        `👥 ${TIKTOK_SOURCE_LABEL}`
+      ]
+    : referral
+    ? [
+        `👋 Bienvenue ${member} sur le serveur !`,
+        '',
+        `👥 Invité par : <@${referral.inviterId}>`
+      ]
+    : [
+        `👋 Bienvenue ${member} sur le serveur !`,
+        '',
+        '👥 Invité par : **non détecté**',
+        '',
+        'Le bot n’a pas pu identifier l’invitation utilisée.'
+      ];
 
   await channel.send({
-    content: `Bienvenue ${member}`,
-    embeds: [embed],
-    allowedMentions: { users: [member.id], roles: [] }
+    embeds: [
+      new EmbedBuilder()
+        .setColor(inviteWelcomeColor(referral))
+        .setTitle('Nouvelle arrivée 🎉')
+        .setDescription(description.join('\n'))
+        .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
+        .setFooter({ text: 'Invitations • Parrainage • Boutique' })
+        .setTimestamp()
+    ]
   }).catch(() => {});
 }
 
@@ -11180,7 +11197,7 @@ client.on(Events.InteractionCreate, async interaction => {
       const ticketRequest = getTicketRequest(interaction.channel.id);
       const archived = isTicketArchived(interaction.channel, ticketRequest);
 
-      if (archived ? !isAdminMember(interaction.member) : !canManageTicket(interaction, ownerId)) {
+      if (archived ? !isAdminMember(interaction.member) : !canManageTicket(interaction, ownerId, ticketRequest)) {
         return interaction.reply({ content: '❌ Tu ne peux pas supprimer ce ticket.', ephemeral: true });
       }
 
@@ -11207,7 +11224,7 @@ client.on(Events.InteractionCreate, async interaction => {
       const ticketRequest = getTicketRequest(interaction.channel.id);
       const archived = isTicketArchived(interaction.channel, ticketRequest);
 
-      if (archived ? !isAdminMember(interaction.member) : !canManageTicket(interaction, ownerId)) {
+      if (archived ? !isAdminMember(interaction.member) : !canManageTicket(interaction, ownerId, ticketRequest)) {
         return interaction.reply({ content: '❌ Tu ne peux pas supprimer ce ticket.', ephemeral: true });
       }
 
