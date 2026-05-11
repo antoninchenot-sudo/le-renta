@@ -140,12 +140,12 @@ const DATA_BACKUP_FILES = [
   PRODUCT_STOCK_FILE,
   PAYMENT_CONFIG_FILE
 ];
-const BOT_CHANGELOG_VERSION = '2026-05-11-new-server-ids';
+const BOT_CHANGELOG_VERSION = '2026-05-11-dm-recharge-history';
 // Garder uniquement les changements du lot en cours, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Migration de la configuration vers le nouveau serveur Discord.',
-  'Mise à jour des IDs rôles, catégories, salons logs, boutique, avis, annonces et giveaway.',
-  'Les tickets commande, recharge, support, archives et relance pointent maintenant vers les nouvelles catégories.'
+  'Ajout de la commande !dmrecharges pour contacter les anciens clients ayant déjà rechargé.',
+  'Le bot récupère les IDs Discord depuis les historiques de recharge sauvegardés.',
+  'Un formulaire owner permet d’écrire le titre et le message avant envoi.'
 ];
 const REVIEW_REQUIRED_COUNT = 3;
 const REVIEW_REWARD_CENTS = 100;
@@ -7281,6 +7281,7 @@ function buildHelpEmbed(guild) {
           ['autodispo on/off/status', 'active, coupe ou consulte les messages automatiques de 11h et 18h.'],
           ['annonce', 'ouvre un formulaire pour envoyer une annonce dans le salon des disponibilités.'],
           ['dmclients', 'ouvre un formulaire pour envoyer un MP aux clients qui ont déjà commandé.'],
+          ['dmrecharges', 'ouvre un formulaire pour envoyer un MP aux anciens clients ayant déjà rechargé.'],
           ['giveawayinvite', 'ouvre le formulaire pour lancer un giveaway spécial invitations.'],
           ['giveawayinvite stop', 'annule le giveaway invite actif.'],
           ['giveawayclient', 'ouvre le formulaire pour lancer un giveaway réservé aux clients.'],
@@ -7396,6 +7397,37 @@ function buildDmClientsModal(launcherId) {
   return modal;
 }
 
+function buildDmRechargeClientsModal(launcherId) {
+  const modal = new ModalBuilder()
+    .setCustomId(`dm_recharge_clients_modal:${launcherId}`)
+    .setTitle('MP anciens rechargements');
+
+  const titleInput = new TextInputBuilder()
+    .setCustomId('dm_recharge_clients_title')
+    .setLabel('Titre du message')
+    .setPlaceholder('Exemple : Nouveau serveur La Rent’a')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMinLength(2)
+    .setMaxLength(100);
+
+  const bodyInput = new TextInputBuilder()
+    .setCustomId('dm_recharge_clients_body')
+    .setLabel('Message à envoyer')
+    .setPlaceholder('Écris ici le message qui sera envoyé aux anciens clients recharge.')
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(true)
+    .setMinLength(2)
+    .setMaxLength(1800);
+
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(titleInput),
+    new ActionRowBuilder().addComponents(bodyInput)
+  );
+
+  return modal;
+}
+
 function buildClientDmEmbed(guild, title, body, senderUser) {
   return new EmbedBuilder()
     .setColor(0xD4AF37)
@@ -7404,6 +7436,50 @@ function buildClientDmEmbed(guild, title, body, senderUser) {
     .setDescription(body.slice(0, 4096))
     .setFooter({ text: `Message boutique • ${senderUser.username}` })
     .setTimestamp();
+}
+
+function rechargeDmRecipients() {
+  const rows = new Map();
+
+  const addRecipient = (userId, source, timestamp = null) => {
+    if (!/^\d{16,22}$/.test(String(userId || ''))) return;
+
+    const previous = rows.get(userId);
+    const lastRechargeAt = Math.max(Number(previous?.lastRechargeAt) || 0, Number(timestamp) || 0);
+    const sources = new Set(previous?.sources || []);
+    sources.add(source);
+
+    rows.set(userId, {
+      userId,
+      lastRechargeAt,
+      sources: [...sources]
+    });
+  };
+
+  for (const [userId, entries] of Object.entries(walletHistory.users || {})) {
+    for (const entry of Array.isArray(entries) ? entries : []) {
+      if (entry?.type === 'recharge' && Number(entry.amountCents) > 0) {
+        addRecipient(userId, 'wallet-history', entry.createdAt);
+      }
+    }
+  }
+
+  for (const [userId, entries] of Object.entries(ticketHistory.users || {})) {
+    for (const entry of Array.isArray(entries) ? entries : []) {
+      if (entry?.type === 'recharge' && entry.paidAt) {
+        addRecipient(userId, 'ticket-history', entry.paidAt);
+      }
+    }
+  }
+
+  for (const ticketRequest of Object.values(requests.tickets || {})) {
+    if (ticketRequest?.type === 'recharge' && ticketRequest.userId && ticketRequest.paidAt) {
+      addRecipient(ticketRequest.userId, 'requests', ticketRequest.paidAt);
+    }
+  }
+
+  return [...rows.values()]
+    .sort((a, b) => Number(b.lastRechargeAt || 0) - Number(a.lastRechargeAt || 0));
 }
 
 function buildDmClientsPanelEmbed(guild) {
@@ -7421,6 +7497,30 @@ function buildDmClientsPanelEmbed(guild) {
     .setFooter({ text: 'Owner • Envoi ciblé clients' });
 }
 
+function buildDmRechargeClientsPanelEmbed(guild) {
+  const recipients = rechargeDmRecipients();
+  const recent = recipients
+    .slice(0, 5)
+    .map(row => `<@${row.userId}>${row.lastRechargeAt ? ` • dernière recharge <t:${Math.floor(row.lastRechargeAt / 1000)}:R>` : ''}`)
+    .join('\n') || 'Aucun ancien client recharge trouvé dans les sauvegardes.';
+
+  return new EmbedBuilder()
+    .setColor(0xD4AF37)
+    .setAuthor({ name: 'MP anciens clients recharge', iconURL: guild.iconURL({ dynamic: true }) })
+    .setTitle('Envoyer un MP aux anciens clients recharge')
+    .setDescription([
+      'Le bot va reprendre les IDs Discord sauvegardés dans les historiques de recharge.',
+      '',
+      `Clients recharge trouvés : **${recipients.length}**`,
+      '',
+      '**Derniers détectés**',
+      recent,
+      '',
+      'Discord peut refuser certains MP si la personne n’a plus de serveur en commun avec le bot ou si ses MP sont fermés.'
+    ].join('\n'))
+    .setFooter({ text: 'Owner • Envoi par IDs sauvegardés' });
+}
+
 function dmClientsPanelRow(ownerId) {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -7428,6 +7528,17 @@ function dmClientsPanelRow(ownerId) {
       .setLabel('Écrire le MP')
       .setEmoji('📩')
       .setStyle(ButtonStyle.Primary)
+  );
+}
+
+function dmRechargeClientsPanelRow(ownerId, disabled = false) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`open_dm_recharge_clients_modal:${ownerId}`)
+      .setLabel('Écrire le MP')
+      .setEmoji('📩')
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(Boolean(disabled))
   );
 }
 
@@ -7498,6 +7609,83 @@ async function sendDmToClientMembers(interaction, title, body) {
               : 'Tous les clients ciblés ont reçu le message.'
           ].join('\n'))
           .setTimestamp()
+      ]
+    });
+  } finally {
+    clientDmBroadcastLocks.delete(lockKey);
+  }
+}
+
+async function sendDmToRechargeHistoryUsers(interaction, title, body) {
+  const lockKey = `${interaction.guildId}:recharge-history`;
+
+  if (clientDmBroadcastLocks.has(lockKey)) {
+    return interaction.editReply('❌ Un envoi MP anciens clients recharge est déjà en cours. Attends qu’il soit terminé.');
+  }
+
+  clientDmBroadcastLocks.add(lockKey);
+
+  try {
+    const recipients = rechargeDmRecipients();
+
+    if (!recipients.length) {
+      await sendAdminLog('📩 MP anciens clients recharge annulé', [
+        `Owner : ${logUser(interaction.user)}`,
+        'Raison : aucun ID avec recharge validée trouvé dans les sauvegardes.'
+      ], 0xF1C40F);
+
+      return interaction.editReply('❌ Aucun ancien client recharge trouvé dans les sauvegardes.');
+    }
+
+    const embed = buildClientDmEmbed(interaction.guild, title, body, interaction.user);
+    let sentCount = 0;
+    let failedCount = 0;
+    const failedSamples = [];
+
+    for (const recipient of recipients) {
+      const user = await client.users.fetch(recipient.userId).catch(() => null);
+
+      if (!user) {
+        failedCount += 1;
+        if (failedSamples.length < 10) failedSamples.push(`introuvable (${recipient.userId})`);
+        continue;
+      }
+
+      const sent = await user.send({ embeds: [embed] })
+        .then(() => true)
+        .catch(() => {
+          failedCount += 1;
+          if (failedSamples.length < 10) failedSamples.push(`${user.tag || user.username} (${user.id})`);
+          return false;
+        });
+
+      if (sent) sentCount += 1;
+      if (CLIENT_DM_BROADCAST_DELAY > 0) await wait(CLIENT_DM_BROADCAST_DELAY);
+    }
+
+    await sendAdminLog('📩 MP envoyé aux anciens clients recharge', [
+      `Owner : ${logUser(interaction.user)}`,
+      `IDs ciblés : **${recipients.length}**`,
+      `MP envoyés : **${sentCount}**`,
+      `MP impossibles : **${failedCount}**`,
+      failedSamples.length ? `Exemples échecs : ${failedSamples.join(', ')}` : null,
+      `Titre : **${title.slice(0, 200)}**`
+    ].filter(Boolean), failedCount ? 0xF1C40F : 0x2ECC71);
+
+    return interaction.editReply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(failedCount ? 0xF1C40F : 0x2ECC71)
+          .setTitle('📩 Envoi MP anciens clients recharge terminé')
+          .setDescription([
+            `IDs ciblés : **${recipients.length}**`,
+            `MP envoyés : **${sentCount}**`,
+            `MP impossibles : **${failedCount}**`,
+            '',
+            failedCount
+              ? 'Certains MP peuvent être fermés ou ne plus avoir de serveur en commun avec le bot.'
+              : 'Tous les MP ont été envoyés.'
+          ].join('\n'))
       ]
     });
   } finally {
@@ -9207,6 +9395,29 @@ client.on('messageCreate', async message => {
     return;
   }
 
+  if (message.content === '!dmrecharges') {
+    if (!isOwnerMember(message.member)) {
+      const reply = await message.channel.send('❌ Seul le rôle owner peut envoyer un MP aux anciens clients recharge.');
+      return deleteLater(reply);
+    }
+
+    const recipients = rechargeDmRecipients();
+
+    await sendAdminLog('📩 Panneau MP anciens clients recharge ouvert', [
+      `Owner : ${logUser(message.author)}`,
+      `Salon : ${logChannel(message.channel)}`,
+      `IDs recharge trouvés : **${recipients.length}**`
+    ], 0x3498DB);
+
+    const panel = await message.channel.send({
+      embeds: [buildDmRechargeClientsPanelEmbed(message.guild)],
+      components: [dmRechargeClientsPanelRow(message.author.id, recipients.length === 0)]
+    });
+
+    deleteLater(panel, 5 * 60_000);
+    return;
+  }
+
   if (message.content.trim().split(/\s+/)[0] === '!giveawayclient') {
     if (!isOwnerMember(message.member)) {
       const reply = await message.channel.send('❌ Seul le rôle owner peut créer un giveaway client.');
@@ -10475,6 +10686,32 @@ client.on(Events.InteractionCreate, async interaction => {
       return handleClientGiveawayJoin(interaction);
     }
 
+    if (interaction.customId.startsWith('open_dm_recharge_clients_modal:')) {
+      if (!isOwnerMember(interaction.member)) {
+        return interaction.reply({
+          content: '❌ Seul le rôle owner peut envoyer un MP aux anciens clients recharge.',
+          ephemeral: true
+        });
+      }
+
+      const launcherId = interaction.customId.split(':')[1];
+      if (interaction.user.id !== launcherId) {
+        return interaction.reply({
+          content: '❌ Seul l’owner qui a ouvert ce panneau peut écrire le MP.',
+          ephemeral: true
+        });
+      }
+
+      if (!rechargeDmRecipients().length) {
+        return interaction.reply({
+          content: '❌ Aucun ancien client recharge trouvé dans les sauvegardes.',
+          ephemeral: true
+        });
+      }
+
+      return interaction.showModal(buildDmRechargeClientsModal(launcherId));
+    }
+
     if (interaction.customId.startsWith('open_ban_modal:')) {
       if (!canUseBanCommand(interaction.member)) {
         return interaction.reply({
@@ -11247,6 +11484,36 @@ client.on(Events.InteractionCreate, async interaction => {
 
     await interaction.deferReply({ ephemeral: true });
     return sendDmToClientMembers(interaction, title, body);
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('dm_recharge_clients_modal:')) {
+    if (!isOwnerMember(interaction.member)) {
+      return interaction.reply({
+        content: '❌ Seul le rôle owner peut envoyer un MP aux anciens clients recharge.',
+        ephemeral: true
+      });
+    }
+
+    const launcherId = interaction.customId.split(':')[1];
+    if (interaction.user.id !== launcherId) {
+      return interaction.reply({
+        content: '❌ Seul l’owner qui a ouvert ce formulaire peut valider cet envoi.',
+        ephemeral: true
+      });
+    }
+
+    const title = interaction.fields.getTextInputValue('dm_recharge_clients_title').trim();
+    const body = interaction.fields.getTextInputValue('dm_recharge_clients_body').trim();
+
+    if (title.length < 2 || body.length < 2) {
+      return interaction.reply({
+        content: '❌ Titre ou message invalide.',
+        ephemeral: true
+      });
+    }
+
+    await interaction.deferReply({ ephemeral: true });
+    return sendDmToRechargeHistoryUsers(interaction, title, body);
   }
 
   if (interaction.isModalSubmit() && interaction.customId.startsWith('announcement_modal:')) {
