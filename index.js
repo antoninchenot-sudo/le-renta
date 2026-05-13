@@ -6819,6 +6819,25 @@ async function sendRechargeInstructionsDm(user, request) {
     .catch(error => ({ sent: false, error }));
 }
 
+function rechargeInstructionFallbackMessage(request, dmSent) {
+  const instructions = rechargeInstructionMessage(request);
+  const text = [
+    dmSent
+      ? '✅ Demande de recharge créée. Le bot a tenté de t’envoyer les instructions en MP.'
+      : '⚠️ Demande créée, mais Discord a bloqué le MP automatique.',
+    `🧾 Demande : #${request.id}`,
+    '',
+    '📌 **Copie des instructions de recharge :**',
+    instructions,
+    '',
+    '📸 Pour valider : réponds au MP du bot avec ton screenshot.',
+    'Si tu n’as aucun MP ouvert, ouvre le profil du bot puis envoie-lui ton screenshot avec le numéro de demande.'
+  ].join('\n');
+
+  if (text.length <= 1900) return text;
+  return `${text.slice(0, 1850)}\n\n…\n📩 Si le texte est coupé, active tes MP Discord puis clique sur “Renvoyer les instructions en MP”.`;
+}
+
 async function handleResendRechargeDmButton(interaction) {
   const requestId = interaction.customId.split(':')[1];
   const ticketRequest = findTicketRequestById(requestId);
@@ -6866,12 +6885,7 @@ async function handleResendRechargeDmButton(interaction) {
   ].filter(Boolean), 0xF1C40F);
 
   return interaction.editReply({
-    content: [
-      '⚠️ Le bot n’arrive toujours pas à t’envoyer un MP.',
-      '',
-      'Active les messages privés pour ce serveur dans tes paramètres Discord, puis reclique sur le bouton.',
-      'Sur mobile : profil du serveur > Confidentialité > autoriser les messages privés.'
-    ].join('\n'),
+    content: rechargeInstructionFallbackMessage(ticketRequest, false),
     components: [rechargeDmResendRow(ticketRequest.id)]
   });
 }
@@ -13362,19 +13376,10 @@ ${dmSent ? '📩 Instructions envoyées au client en MP.' : '⚠️ Impossible d
       ].filter(Boolean), dmSent ? 0x2ECC71 : 0xF1C40F);
 
       const responsePayload = {
-        content: dmSent
-          ? `✅ Demande de recharge créée pour ${amount}.\n📩 **Va dans tes messages privés Discord maintenant : le bot t’a envoyé les instructions.**\n➡️ Réponds directement au MP du bot avec le screenshot du paiement.\n🔎 Si tu ne vois pas le MP, regarde tes demandes de messages.\n🧾 Demande : #${request.id}`
-          : [
-              `⚠️ Demande créée, mais impossible de t’envoyer un MP.`,
-              `🧾 Demande : #${request.id}`,
-              '',
-              'Active tes messages privés Discord pour ce serveur, puis clique sur le bouton ci-dessous pour recevoir les instructions.',
-              'Sur mobile : profil du serveur > Confidentialité > autoriser les messages privés.'
-            ].join('\n'),
-        ephemeral: true
+        content: rechargeInstructionFallbackMessage(request, dmSent),
+        ephemeral: true,
+        components: [rechargeDmResendRow(request.id)]
       };
-
-      if (!dmSent) responsePayload.components = [rechargeDmResendRow(request.id)];
 
       return replyTemp(responseInteraction, responsePayload, dmSent ? 120_000 : 180_000);
     }
