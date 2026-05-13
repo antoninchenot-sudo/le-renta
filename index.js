@@ -68,6 +68,7 @@ const CLIENT_DM_BROADCAST_DELAY = 250;
 const KNOWN_USER_BACKUP_SCAN_LIMIT = Math.max(1, Number.parseInt(process.env.KNOWN_USER_BACKUP_SCAN_LIMIT || '10', 10) || 10);
 const KNOWN_USER_RECIPIENT_CACHE_TTL = 5 * 60 * 1000;
 const DM_MAX_PROGRESS_INTERVAL = 25;
+const BULK_DM_COMMANDS_ENABLED = process.env.BULK_DM_COMMANDS_ENABLED === 'true';
 
 const SHOP_EMOJI = '🛒';
 const MCD0NALDS_EMOJI_ID = '1498440076257136830';
@@ -6651,6 +6652,92 @@ function rechargeDmResendRow(requestId) {
   );
 }
 
+function rechargeDmAccessCheckRow(options = {}) {
+  const { withRestart = false } = options;
+  const buttons = [
+    new ButtonBuilder()
+      .setCustomId('check_recharge_dm_access')
+      .setLabel('Tester mes MP')
+      .setEmoji('📩')
+      .setStyle(ButtonStyle.Primary)
+  ];
+
+  if (withRestart) {
+    buttons.push(
+      new ButtonBuilder()
+        .setCustomId('recharger')
+        .setLabel('Reprendre la recharge')
+        .setEmoji('➕')
+        .setStyle(ButtonStyle.Success)
+    );
+  }
+
+  return new ActionRowBuilder().addComponents(...buttons);
+}
+
+function rechargeDmClosedPayload(error = null) {
+  return {
+    content: [
+      '❌ **Recharge bloquée : tes messages privés avec le bot sont fermés.**',
+      '',
+      'Pour recharger, le bot doit obligatoirement pouvoir t’envoyer les instructions en MP.',
+      '',
+      '**Active les MP pour ce serveur :**',
+      '1. Clique sur le nom du serveur La Rent’a.',
+      '2. Ouvre **Paramètres de confidentialité**.',
+      '3. Active **Autoriser les messages privés des membres du serveur**.',
+      '4. Reviens ici et clique sur **Tester mes MP**.',
+      '',
+      'Sur mobile : ouvre le serveur > menu du serveur > Confidentialité > autoriser les messages privés.',
+      error ? `\nErreur Discord : \`${String(error.message || error).slice(0, 500)}\`` : null
+    ].filter(Boolean).join('\n'),
+    components: [rechargeDmAccessCheckRow()]
+  };
+}
+
+async function testRechargeDmAccess(user) {
+  if (!user) return { sent: false, error: new Error('Utilisateur introuvable.') };
+
+  return user.send([
+    '✅ **Test MP réussi.**',
+    '',
+    'Tes messages privés avec La Rent’a sont ouverts.',
+    'Retourne sur le serveur pour continuer ta recharge.',
+    '',
+    'Les instructions de paiement arriveront ici après le choix du moyen de paiement.'
+  ].join('\n'))
+    .then(() => ({ sent: true, error: null }))
+    .catch(error => ({ sent: false, error }));
+}
+
+async function handleRechargeDmAccessCheckButton(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  const dmResult = await testRechargeDmAccess(interaction.user);
+
+  if (!dmResult.sent) {
+    await sendActionLog(interaction.member, '📩 Test MP recharge refusé', [
+      `Membre : ${logUser(interaction.user)}`,
+      dmResult.error ? `Erreur : **${dmResult.error.message}**` : null
+    ].filter(Boolean), 0xF1C40F);
+
+    return interaction.editReply(rechargeDmClosedPayload(dmResult.error));
+  }
+
+  await sendActionLog(interaction.member, '📩 Test MP recharge réussi', [
+    `Membre : ${logUser(interaction.user)}`
+  ], 0x2ECC71);
+
+  return interaction.editReply({
+    content: [
+      '✅ **Tes MP sont ouverts.**',
+      '',
+      'Tu peux relancer la recharge maintenant.'
+    ].join('\n'),
+    components: [rechargeDmAccessCheckRow({ withRestart: true })]
+  });
+}
+
 function paymentLabel(method) {
   return {
     paypal: 'PayPal',
@@ -6819,23 +6906,13 @@ async function sendRechargeInstructionsDm(user, request) {
     .catch(error => ({ sent: false, error }));
 }
 
-function rechargeInstructionFallbackMessage(request, dmSent) {
-  const instructions = rechargeInstructionMessage(request);
-  const text = [
-    dmSent
-      ? '✅ Demande de recharge créée. Le bot a tenté de t’envoyer les instructions en MP.'
-      : '⚠️ Demande créée, mais Discord a bloqué le MP automatique.',
-    `🧾 Demande : #${request.id}`,
+function bulkDmDisabledMessage() {
+  return [
+    '⛔ **Commandes de MP massif désactivées.**',
     '',
-    '📌 **Copie des instructions de recharge :**',
-    instructions,
-    '',
-    '📸 Pour valider : réponds au MP du bot avec ton screenshot.',
-    'Si tu n’as aucun MP ouvert, ouvre le profil du bot puis envoie-lui ton screenshot avec le numéro de demande.'
+    'Le bot a été mis en quarantaine : on coupe les DM de masse pour éviter un nouveau signalement Discord.',
+    'Garde uniquement les MP transactionnels, déclenchés par une action du membre comme une recharge.'
   ].join('\n');
-
-  if (text.length <= 1900) return text;
-  return `${text.slice(0, 1850)}\n\n…\n📩 Si le texte est coupé, active tes MP Discord puis clique sur “Renvoyer les instructions en MP”.`;
 }
 
 async function handleResendRechargeDmButton(interaction) {
@@ -6885,7 +6962,12 @@ async function handleResendRechargeDmButton(interaction) {
   ].filter(Boolean), 0xF1C40F);
 
   return interaction.editReply({
-    content: rechargeInstructionFallbackMessage(ticketRequest, false),
+    content: [
+      '⚠️ Le bot n’arrive toujours pas à t’envoyer un MP.',
+      '',
+      'Active tes messages privés pour ce serveur, puis reclique sur le bouton.',
+      'Sur mobile : profil du serveur > Confidentialité > autoriser les messages privés.'
+    ].join('\n'),
     components: [rechargeDmResendRow(ticketRequest.id)]
   });
 }
@@ -13376,10 +13458,18 @@ ${dmSent ? '📩 Instructions envoyées au client en MP.' : '⚠️ Impossible d
       ].filter(Boolean), dmSent ? 0x2ECC71 : 0xF1C40F);
 
       const responsePayload = {
-        content: rechargeInstructionFallbackMessage(request, dmSent),
-        ephemeral: true,
-        components: [rechargeDmResendRow(request.id)]
+        content: dmSent
+          ? `✅ Demande de recharge créée pour ${amount}.\n📩 Va dans tes messages privés Discord : le bot t’a envoyé les instructions.\n🧾 Demande : #${request.id}`
+          : [
+              '⚠️ Demande créée, mais impossible de t’envoyer un MP.',
+              `🧾 Demande : #${request.id}`,
+              '',
+              'Active tes messages privés Discord pour ce serveur, puis clique sur le bouton ci-dessous.'
+            ].join('\n'),
+        ephemeral: true
       };
+
+      if (!dmSent) responsePayload.components = [rechargeDmResendRow(request.id)];
 
       return replyTemp(responseInteraction, responsePayload, dmSent ? 120_000 : 180_000);
     }
