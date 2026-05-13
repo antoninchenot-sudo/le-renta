@@ -65,6 +65,9 @@ const TICKET_NO_RESPONSE_TTL = 4 * 60 * 60 * 1000;
 const ORDER_WARRANTY_DURATION = 15 * 60 * 1000;
 const WALLET_CONFIRMATION_TTL = 5 * 60 * 1000;
 const CLIENT_DM_BROADCAST_DELAY = 250;
+const KNOWN_USER_BACKUP_SCAN_LIMIT = Math.max(1, Number.parseInt(process.env.KNOWN_USER_BACKUP_SCAN_LIMIT || '10', 10) || 10);
+const KNOWN_USER_RECIPIENT_CACHE_TTL = 5 * 60 * 1000;
+const DM_MAX_PROGRESS_INTERVAL = 25;
 
 const SHOP_EMOJI = '🛒';
 const MCD0NALDS_EMOJI_ID = '1498440076257136830';
@@ -143,7 +146,7 @@ const DATA_BACKUP_FILES = [
   PAYMENT_CONFIG_FILE,
   INTERACTION_USERS_FILE
 ];
-const BOT_CHANGELOG_VERSION = '2026-05-11-ticket-limit-tiktok-dm-anciens-order-done-category';
+const BOT_CHANGELOG_VERSION = '2026-05-13-recharge-dmmax-fix';
 // Garder uniquement les changements du lot en cours, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
   'Limitation à un seul ticket support ouvert par membre.',
@@ -154,7 +157,10 @@ const BOT_CHANGELOG_ITEMS = [
   'Ajout de la commande dmmax pour envoyer un MP au maximum d’IDs connus par le bot.',
   'Ajout des anciens IDs d’interaction trouvés dans les sauvegardes et suivi des nouvelles interactions.',
   'Ajout de la commande dmanciens pour cibler les anciens clients, leurs filleuls et les ouvreurs de tickets.',
-  'Déplacement des tickets commande terminée dans leur nouvelle catégorie dédiée.'
+  'Déplacement des tickets commande terminée dans leur nouvelle catégorie dédiée.',
+  'Correction du montant de recharge pour accepter correctement les montants décimaux comme 12,38.',
+  'Ajout d’un bouton pour renvoyer les instructions de recharge en MP si Discord bloque le premier envoi.',
+  'Correction de dmmax pour répondre immédiatement et envoyer les MP en arrière-plan sans bloquer le bot.'
 ];
 const REVIEW_REQUIRED_COUNT = 3;
 const REVIEW_REWARD_CENTS = 100;
@@ -631,6 +637,7 @@ const crashReportCooldowns = new Map();
 const ticketCleanupTimers = new Map();
 const ticketNoResponseReminderTimers = new Map();
 const clientDmBroadcastLocks = new Set();
+let maxKnownDmRecipientsCache = { expiresAt: 0, rows: null };
 let availabilitySchedulerTimer = null;
 let dailyRecapSchedulerTimer = null;
 let discountSchedulerTimer = null;
@@ -1073,13 +1080,18 @@ async function confirmOpeningAnotherTicket(interaction, type) {
   const isSingleTicketType = type === 'support' || type === 'recharge';
 
   if (isSingleTicketType) {
-    await sendEphemeralPrompt(interaction, {
+    const components = isRecharge && activeTicket.ticketRequest?.id
+      ? [rechargeDmResendRow(activeTicket.ticketRequest.id)]
+      : [];
+    const promptOptions = {
       content: isRecharge
         ? [
             '⚠️ Vous avez déjà une recharge en cours.',
             '',
             'Pour éviter les demandes en double, vous ne pouvez ouvrir qu’une seule recharge à la fois.',
-            'Va dans tes messages privés avec le bot : les instructions de ta recharge en cours y sont envoyées.'
+            'Va dans tes messages privés avec le bot : les instructions de ta recharge en cours y sont envoyées.',
+            '',
+            'Si tu n’as rien reçu, active tes MP Discord puis clique sur le bouton ci-dessous.'
           ].join('\n')
         : [
             '⚠️ Vous avez déjà un ticket support ouvert.',
@@ -1087,7 +1099,11 @@ async function confirmOpeningAnotherTicket(interaction, type) {
             `Ticket en cours : ${activeTicket.channel}`,
             'Ferme ce ticket ou attends qu’un staff le traite avant d’en ouvrir un nouveau.'
           ].join('\n')
-    });
+    };
+
+    if (components.length) promptOptions.components = components;
+
+    await sendEphemeralPrompt(interaction, promptOptions);
 
     return { confirmed: false };
   }
@@ -1164,6 +1180,14 @@ function findOpenRechargeRequestByUser(userId) {
   return Object.values(requests.tickets)
     .reverse()
     .find(request => request.type === 'recharge' && request.userId === userId && !request.paidAt) || null;
+}
+
+function findTicketRequestById(requestId) {
+  const normalizedId = String(requestId || '').trim().toUpperCase();
+  if (!normalizedId) return null;
+
+  return Object.values(requests.tickets || {})
+    .find(request => String(request?.id || '').toUpperCase() === normalizedId) || null;
 }
 
 function pendingRechargeKey(interaction) {
@@ -6598,13 +6622,33 @@ async function renameTicketChannelState(channel, ticketRequest, state) {
 }
 
 function parseAmountToCents(value) {
-  const amount = Number(value.trim().replace(',', '.'));
+  const normalized = String(value || '')
+    .normalize('NFKC')
+    .trim()
+    .replace(/[€$]/g, '')
+    .replace(/[\s\u00a0\u202f]/g, '')
+    .replace(/[，٫]/g, ',')
+    .replace(/,/g, '.');
+
+  if (!/^\d+(?:\.\d+)?$/.test(normalized)) return null;
+
+  const amount = Number.parseFloat(normalized);
   if (!Number.isFinite(amount) || amount < 1 || amount > 200) return null;
   return Math.round(amount * 100);
 }
 
 function formatAmount(cents) {
   return `${(cents / 100).toFixed(2)}€`;
+}
+
+function rechargeDmResendRow(requestId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`resend_recharge_dm:${requestId}`)
+      .setLabel('Renvoyer les instructions en MP')
+      .setEmoji('📩')
+      .setStyle(ButtonStyle.Primary)
+  );
 }
 
 function paymentLabel(method) {
@@ -6763,6 +6807,73 @@ function rechargeInstructionMessage(request) {
     PAYMENT_COUNTING_RULE_TEXT,
     '⏳ Tu as **24h** pour l\'envoyer.'
   ].join('\n');
+}
+
+async function sendRechargeInstructionsDm(user, request) {
+  if (!user || !request) {
+    return { sent: false, error: new Error('Utilisateur ou demande introuvable.') };
+  }
+
+  return user.send(rechargeInstructionMessage(request))
+    .then(() => ({ sent: true, error: null }))
+    .catch(error => ({ sent: false, error }));
+}
+
+async function handleResendRechargeDmButton(interaction) {
+  const requestId = interaction.customId.split(':')[1];
+  const ticketRequest = findTicketRequestById(requestId);
+
+  if (!ticketRequest || ticketRequest.type !== 'recharge') {
+    return interaction.reply({
+      content: '❌ Demande de recharge introuvable.',
+      ephemeral: true
+    });
+  }
+
+  const isTicketOwner = ticketRequest.userId === interaction.user.id;
+  if (!isTicketOwner && !canManageReviews(interaction.member)) {
+    return interaction.reply({
+      content: '❌ Tu ne peux pas renvoyer les instructions de cette recharge.',
+      ephemeral: true
+    });
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+
+  const user = await client.users.fetch(ticketRequest.userId).catch(() => null);
+  const dmResult = await sendRechargeInstructionsDm(user, ticketRequest);
+
+  if (dmResult.sent) {
+    await sendAdminLog('📩 Instructions recharge renvoyées', [
+      `Demande : **${ticketRequest.id}**`,
+      `Client : <@${ticketRequest.userId}>`,
+      `Action par : ${logUser(interaction.user)}`
+    ], 0x2ECC71);
+
+    return interaction.editReply({
+      content: [
+        '✅ Instructions renvoyées en MP.',
+        'Va dans tes messages privés Discord avec le bot et réponds avec ton screenshot.'
+      ].join('\n')
+    });
+  }
+
+  await sendAdminLog('⚠️ Renvoi MP recharge impossible', [
+    `Demande : **${ticketRequest.id}**`,
+    `Client : <@${ticketRequest.userId}>`,
+    `Action par : ${logUser(interaction.user)}`,
+    dmResult.error ? `Erreur : **${dmResult.error.message}**` : null
+  ].filter(Boolean), 0xF1C40F);
+
+  return interaction.editReply({
+    content: [
+      '⚠️ Le bot n’arrive toujours pas à t’envoyer un MP.',
+      '',
+      'Active les messages privés pour ce serveur dans tes paramètres Discord, puis reclique sur le bouton.',
+      'Sur mobile : profil du serveur > Confidentialité > autoriser les messages privés.'
+    ].join('\n'),
+    components: [rechargeDmResendRow(ticketRequest.id)]
+  });
 }
 
 function deleteLater(message, delay = DELETE_DELAY) {
@@ -7703,7 +7814,17 @@ function collectKnownUserIdsFromBackupDir(backupDir, addRecipient, source) {
   try {
     files = fs.readdirSync(backupDir)
       .filter(file => file.endsWith('.json'))
-      .map(file => path.join(backupDir, file));
+      .map(file => {
+        const filePath = path.join(backupDir, file);
+        let mtimeMs = 0;
+        try {
+          mtimeMs = fs.statSync(filePath).mtimeMs;
+        } catch {}
+        return { filePath, mtimeMs };
+      })
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+      .slice(0, KNOWN_USER_BACKUP_SCAN_LIMIT)
+      .map(file => file.filePath);
   } catch {
     return;
   }
@@ -7921,6 +8042,10 @@ function oldActiveDmRecipients(guildMembers = null) {
 }
 
 function maxKnownDmRecipients(guildMembers = null) {
+  if (maxKnownDmRecipientsCache.rows && maxKnownDmRecipientsCache.expiresAt > Date.now()) {
+    return maxKnownDmRecipientsCache.rows;
+  }
+
   const rows = new Map();
 
   const addRecipient = (userId, source, timestamp = null) => {
@@ -7995,8 +8120,15 @@ function maxKnownDmRecipients(guildMembers = null) {
 
   collectKnownUserIdsFromSavedFiles(addRecipient);
 
-  return [...rows.values()]
+  const result = [...rows.values()]
     .sort((a, b) => Number(b.lastSeenAt || 0) - Number(a.lastSeenAt || 0));
+
+  maxKnownDmRecipientsCache = {
+    expiresAt: Date.now() + KNOWN_USER_RECIPIENT_CACHE_TTL,
+    rows: result
+  };
+
+  return result;
 }
 
 function buildDmClientsPanelEmbed(guild) {
@@ -8286,35 +8418,48 @@ async function sendDmToRechargeHistoryUsers(interaction, title, body) {
   }
 }
 
-async function sendDmToMaxKnownUsers(interaction, title, body) {
-  const lockKey = `${interaction.guildId}:max-known`;
+function sortDmMaxRecipients(recipients, guildMembers) {
+  return [...recipients].sort((a, b) => {
+    const aInGuild = guildMembers?.has?.(a.userId) ? 1 : 0;
+    const bInGuild = guildMembers?.has?.(b.userId) ? 1 : 0;
+    if (aInGuild !== bInGuild) return bInGuild - aInGuild;
+    return Number(b.lastSeenAt || 0) - Number(a.lastSeenAt || 0);
+  });
+}
 
-  if (clientDmBroadcastLocks.has(lockKey)) {
-    return interaction.editReply('❌ Un envoi MP maximum est déjà en cours. Attends qu’il soit terminé.');
-  }
+function buildDmMaxStatusEmbed({ title, totalCount, processedCount = 0, sentCount = 0, failedCount = 0, done = false }) {
+  return new EmbedBuilder()
+    .setColor(done ? (failedCount ? 0xF1C40F : 0x2ECC71) : 0x3498DB)
+    .setTitle(done ? '📩 Envoi MP maximum terminé' : '📩 Envoi MP maximum en cours')
+    .setDescription([
+      `Titre : **${title.slice(0, 200)}**`,
+      `IDs ciblés : **${totalCount}**`,
+      `Progression : **${Math.min(processedCount, totalCount)}/${totalCount}**`,
+      `MP envoyés : **${sentCount}**`,
+      `MP impossibles : **${failedCount}**`,
+      '',
+      done
+        ? (failedCount
+          ? 'Certains MP peuvent être fermés ou impossibles car la personne ne partage plus de serveur avec le bot.'
+          : 'Tous les MP ciblés ont été envoyés.')
+        : 'Le bot continue en arrière-plan, tu peux fermer ce message.'
+    ].join('\n'))
+    .setTimestamp();
+}
 
-  clientDmBroadcastLocks.add(lockKey);
+async function runDmMaxKnownUsersBroadcast({ interaction, title, body, recipients, guildMembers, lockKey }) {
+  let sentCount = 0;
+  let failedCount = 0;
+  let processedCount = 0;
+  const failedSamples = [];
+  const sourceCounts = {};
 
   try {
-    const guildMembers = await interaction.guild.members.fetch().catch(() => null);
-    const recipients = maxKnownDmRecipients(guildMembers);
-
-    if (!recipients.length) {
-      await sendAdminLog('📩 MP maximum annulé', [
-        `Owner : ${logUser(interaction.user)}`,
-        'Raison : aucun ID connu trouvé.'
-      ], 0xF1C40F);
-
-      return interaction.editReply('❌ Aucun ID connu trouvé.');
-    }
-
     const embed = buildClientDmEmbed(interaction.guild, title, body, interaction.user);
-    let sentCount = 0;
-    let failedCount = 0;
-    const failedSamples = [];
-    const sourceCounts = {};
 
     for (const recipient of recipients) {
+      processedCount += 1;
+
       for (const source of recipient.sources || []) {
         sourceCounts[source] = (sourceCounts[source] || 0) + 1;
       }
@@ -8325,18 +8470,31 @@ async function sendDmToMaxKnownUsers(interaction, title, body) {
       if (!user || user.bot) {
         failedCount += 1;
         if (failedSamples.length < 10) failedSamples.push(`introuvable (${recipient.userId})`);
-        continue;
+      } else {
+        const sent = await user.send({ embeds: [embed] })
+          .then(() => true)
+          .catch(() => {
+            failedCount += 1;
+            if (failedSamples.length < 10) failedSamples.push(`${user.tag || user.username} (${user.id})`);
+            return false;
+          });
+
+        if (sent) sentCount += 1;
       }
 
-      const sent = await user.send({ embeds: [embed] })
-        .then(() => true)
-        .catch(() => {
-          failedCount += 1;
-          if (failedSamples.length < 10) failedSamples.push(`${user.tag || user.username} (${user.id})`);
-          return false;
-        });
+      if (processedCount % DM_MAX_PROGRESS_INTERVAL === 0 || processedCount === recipients.length) {
+        await interaction.editReply({
+          embeds: [buildDmMaxStatusEmbed({
+            title,
+            totalCount: recipients.length,
+            processedCount,
+            sentCount,
+            failedCount,
+            done: processedCount === recipients.length
+          })]
+        }).catch(() => null);
+      }
 
-      if (sent) sentCount += 1;
       if (CLIENT_DM_BROADCAST_DELAY > 0) await wait(CLIENT_DM_BROADCAST_DELAY);
     }
 
@@ -8355,26 +8513,90 @@ async function sendDmToMaxKnownUsers(interaction, title, body) {
       failedSamples.length ? `Exemples échecs : ${failedSamples.join(', ')}` : null,
       `Titre : **${title.slice(0, 200)}**`
     ].filter(Boolean), failedCount ? 0xF1C40F : 0x2ECC71);
+  } catch (error) {
+    await reportCrash('Envoi dmmax impossible', error, [
+      `Owner : ${logUser(interaction.user)}`,
+      `IDs ciblés : **${recipients.length}**`,
+      `Progression : **${processedCount}/${recipients.length}**`
+    ]);
 
-    return interaction.editReply({
+    await interaction.editReply({
+      content: '❌ L’envoi dmmax a été interrompu. Regarde les logs bot pour le détail.',
+      embeds: []
+    }).catch(() => null);
+  } finally {
+    clientDmBroadcastLocks.delete(lockKey);
+  }
+}
+
+async function sendDmToMaxKnownUsers(interaction, title, body) {
+  const lockKey = `${interaction.guildId}:max-known`;
+
+  if (clientDmBroadcastLocks.has(lockKey)) {
+    return interaction.editReply('❌ Un envoi MP maximum est déjà en cours. Attends qu’il soit terminé.');
+  }
+
+  clientDmBroadcastLocks.add(lockKey);
+
+  try {
+    await interaction.editReply({
       embeds: [
         new EmbedBuilder()
-          .setColor(failedCount ? 0xF1C40F : 0x2ECC71)
-          .setTitle('📩 Envoi MP maximum terminé')
-          .setDescription([
-            `IDs ciblés : **${recipients.length}**`,
-            `MP envoyés : **${sentCount}**`,
-            `MP impossibles : **${failedCount}**`,
-            '',
-            failedCount
-              ? 'Certains MP peuvent être fermés ou impossibles car la personne ne partage plus de serveur avec le bot.'
-              : 'Tous les MP ciblés ont été envoyés.'
-          ].join('\n'))
+          .setColor(0x3498DB)
+          .setTitle('📩 Préparation de dmmax')
+          .setDescription('Je prépare la liste des IDs connus, puis l’envoi partira en arrière-plan.')
           .setTimestamp()
       ]
     });
-  } finally {
+
+    const guildMembers = await interaction.guild.members.fetch().catch(() => null);
+    const recipients = sortDmMaxRecipients(maxKnownDmRecipients(guildMembers), guildMembers);
+
+    if (!recipients.length) {
+      clientDmBroadcastLocks.delete(lockKey);
+
+      await sendAdminLog('📩 MP maximum annulé', [
+        `Owner : ${logUser(interaction.user)}`,
+        'Raison : aucun ID connu trouvé.'
+      ], 0xF1C40F);
+
+      return interaction.editReply('❌ Aucun ID connu trouvé.');
+    }
+
+    await sendAdminLog('📩 MP maximum lancé', [
+      `Owner : ${logUser(interaction.user)}`,
+      `IDs ciblés : **${recipients.length}**`,
+      `Membres serveur prioritaires : **${guildMembers?.size || 0}**`,
+      `Titre : **${title.slice(0, 200)}**`
+    ], 0x3498DB);
+
+    await interaction.editReply({
+      embeds: [buildDmMaxStatusEmbed({
+        title,
+        totalCount: recipients.length,
+        processedCount: 0,
+        sentCount: 0,
+        failedCount: 0,
+        done: false
+      })]
+    });
+
+    void runDmMaxKnownUsersBroadcast({ interaction, title, body, recipients, guildMembers, lockKey })
+      .catch(error => {
+        clientDmBroadcastLocks.delete(lockKey);
+        reportCrash('Envoi dmmax impossible', error, [
+          `Owner : ${logUser(interaction.user)}`,
+          `IDs ciblés : **${recipients.length}**`
+        ]).catch(() => null);
+      });
+    return null;
+  } catch (error) {
     clientDmBroadcastLocks.delete(lockKey);
+    await reportCrash('Préparation dmmax impossible', error, [
+      `Owner : ${logUser(interaction.user)}`
+    ]);
+
+    return interaction.editReply('❌ Impossible de lancer dmmax. Regarde les logs bot pour le détail.').catch(() => null);
   }
 }
 
@@ -10230,6 +10452,7 @@ client.on('messageCreate', async message => {
       return deleteLater(reply);
     }
 
+    const panel = await message.channel.send('⏳ Préparation du panneau dmmax...');
     const guildMembers = await message.guild.members.fetch().catch(() => null);
     const recipients = maxKnownDmRecipients(guildMembers);
 
@@ -10239,7 +10462,8 @@ client.on('messageCreate', async message => {
       `IDs connus trouvés : **${recipients.length}**`
     ], 0x3498DB);
 
-    const panel = await message.channel.send({
+    await panel.edit({
+      content: '',
       embeds: [buildDmMaxKnownUsersPanelEmbed(message.guild, recipients)],
       components: [dmMaxKnownUsersPanelRow(message.author.id, recipients.length === 0)]
     });
@@ -11439,6 +11663,10 @@ client.on(Events.InteractionCreate, async interaction => {
       return handleWalletActionButton(interaction);
     }
 
+    if (interaction.customId.startsWith('resend_recharge_dm:')) {
+      return handleResendRechargeDmButton(interaction);
+    }
+
     if (
       interaction.customId.startsWith('confirm_refund_action:') ||
       interaction.customId.startsWith('cancel_refund_action:')
@@ -12294,11 +12522,11 @@ client.on(Events.InteractionCreate, async interaction => {
       const amountInput = new TextInputBuilder()
         .setCustomId('amount')
         .setLabel('Montant entre 1€ et 200€')
-        .setPlaceholder('Exemple : 10')
+        .setPlaceholder('Exemple : 12.38 ou 12,38')
         .setStyle(TextInputStyle.Short)
         .setRequired(true)
         .setMinLength(1)
-        .setMaxLength(6);
+        .setMaxLength(10);
       const dateInput = new TextInputBuilder()
         .setCustomId('payment_date')
         .setLabel('Date du paiement/virement')
@@ -13100,13 +13328,8 @@ client.on(Events.InteractionCreate, async interaction => {
         createdAt: ticketOpenedAt
       });
       const methodName = paymentLabel(method);
-      let dmSent = false;
-
-      await interaction.user.send(rechargeInstructionMessage(request))
-        .then(() => {
-          dmSent = true;
-        })
-        .catch(() => {});
+      const dmResult = await sendRechargeInstructionsDm(interaction.user, request);
+      const dmSent = dmResult.sent;
 
       await ticket.send({
         content: `<@&${STAFF_ROLE_ID}>
@@ -13134,15 +13357,26 @@ ${dmSent ? '📩 Instructions envoyées au client en MP.' : '⚠️ Impossible d
         `Date indiquée : **${request.paymentDate}**`,
         `Heure indiquée : **${request.paymentTime}**`,
         `Ticket : ${logChannel(ticket)}`,
-        dmSent ? 'MP instructions : envoyé' : 'MP instructions : non envoyé'
-      ], dmSent ? 0x2ECC71 : 0xF1C40F);
+        dmSent ? 'MP instructions : envoyé' : 'MP instructions : non envoyé',
+        !dmSent && dmResult.error ? `Erreur MP : **${dmResult.error.message}**` : null
+      ].filter(Boolean), dmSent ? 0x2ECC71 : 0xF1C40F);
 
-      return replyTemp(responseInteraction, {
+      const responsePayload = {
         content: dmSent
           ? `✅ Demande de recharge créée pour ${amount}.\n📩 **Va dans tes messages privés Discord maintenant : le bot t’a envoyé les instructions.**\n➡️ Réponds directement au MP du bot avec le screenshot du paiement.\n🔎 Si tu ne vois pas le MP, regarde tes demandes de messages.\n🧾 Demande : #${request.id}`
-          : `⚠️ Demande créée, mais impossible de t’envoyer un MP. Vérifie que tes messages privés Discord sont ouverts puis contacte le staff.\n🧾 Demande : #${request.id}`,
+          : [
+              `⚠️ Demande créée, mais impossible de t’envoyer un MP.`,
+              `🧾 Demande : #${request.id}`,
+              '',
+              'Active tes messages privés Discord pour ce serveur, puis clique sur le bouton ci-dessous pour recevoir les instructions.',
+              'Sur mobile : profil du serveur > Confidentialité > autoriser les messages privés.'
+            ].join('\n'),
         ephemeral: true
-      });
+      };
+
+      if (!dmSent) responsePayload.components = [rechargeDmResendRow(request.id)];
+
+      return replyTemp(responseInteraction, responsePayload, dmSent ? 120_000 : 180_000);
     }
 
     if (interaction.customId.startsWith('produits')) {
