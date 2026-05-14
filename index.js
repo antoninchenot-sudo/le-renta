@@ -1,5 +1,7 @@
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
+const crypto = require('crypto');
 const {
   Client,
   GatewayIntentBits,
@@ -70,6 +72,10 @@ const KNOWN_USER_RECIPIENT_CACHE_TTL = 5 * 60 * 1000;
 const DM_MAX_PROGRESS_INTERVAL = 25;
 const BULK_DM_COMMANDS_ENABLED = false;
 const NON_RECHARGE_DMS_ENABLED = false;
+const ADMIN_PANEL_PASSWORD = String(process.env.ADMIN_PANEL_PASSWORD || '');
+const ADMIN_PANEL_SESSIONS = new Map();
+const ADMIN_PANEL_SESSION_TTL = 12 * 60 * 60 * 1000;
+const ADMIN_PANEL_BODY_LIMIT = 64 * 1024;
 
 const SHOP_EMOJI = '🛒';
 const INFO_IMAGE = process.env.INFO_IMAGE || 'https://i0.wp.com/direct-actu.fr/wp-content/uploads/2024/11/1725353427343-ad6c22b5-478a-412e-9c6f-8e14646acd5e_1.png?ssl=1';
@@ -144,17 +150,17 @@ const DATA_BACKUP_FILES = [
   PAYMENT_CONFIG_FILE,
   INTERACTION_USERS_FILE
 ];
-const BOT_CHANGELOG_VERSION = '2026-05-14-recharge-only-progress-buttons';
+const BOT_CHANGELOG_VERSION = '2026-05-14-admin-web-panel';
 // Garder uniquement les changements du lot en cours, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Conservation uniquement des MP liés aux recharges et aux instructions de paiement.',
-  'Désactivation des MP automatiques pour les avis, le parrainage, les commandes terminées, les giveaways, les réductions et la modération.',
-  'Désactivation des commandes de MP massif pour éviter tout nouveau risque Discord.',
-  'Ajout d’un bouton de progression avis pour que les membres consultent leur avancée eux-mêmes.',
-  'Renommage du bouton parrainage en progression et affichage des filleuls validés/en attente par bouton.',
-  'Ajout des boutons progression avis et progression parrainage dans le guide.',
-  'Nettoyage des textes publics boutique, tarifs et paiements avec des intitulés plus neutres.',
-  'Mise à jour du message de commande terminée pour informer le client directement dans le ticket.'
+  'Ajout d’un panel web admin protégé par mot de passe.',
+  'Ajout de solde possible depuis le panel avec sauvegarde wallet et historique.',
+  'Validation des recharges en attente depuis le panel.',
+  'Envoi manuel des commandes payées dans le ticket client depuis le panel.',
+  'Marquage automatique de la commande comme terminée après envoi depuis le panel.',
+  'Ajout du rôle client après commande terminée via le panel.',
+  'Ajout d’une page de suivi des wallets, recharges et commandes à traiter.',
+  'Activation du panel uniquement si ADMIN_PANEL_PASSWORD est configuré sur Railway.'
 ];
 const REVIEW_REQUIRED_COUNT = 3;
 const REVIEW_REWARD_CENTS = 100;
@@ -13592,6 +13598,723 @@ ${dmSent ? '📩 Instructions envoyées au client en MP.' : '⚠️ Impossible d
     if (actionLockAcquired) releaseInteractionActionLock(actionLockKey);
   }
 });
+
+function adminPanelIsEnabled() {
+  return ADMIN_PANEL_PASSWORD.length > 0;
+}
+
+function adminPanelCleanupSessions() {
+  const now = Date.now();
+  for (const [token, session] of ADMIN_PANEL_SESSIONS.entries()) {
+    if (!session?.expiresAt || session.expiresAt <= now) {
+      ADMIN_PANEL_SESSIONS.delete(token);
+    }
+  }
+}
+
+function adminPanelCookieMap(cookieHeader = '') {
+  const cookies = {};
+  String(cookieHeader || '').split(';').forEach(part => {
+    const index = part.indexOf('=');
+    if (index === -1) return;
+    const key = part.slice(0, index).trim();
+    const value = part.slice(index + 1).trim();
+    if (key) cookies[key] = decodeURIComponent(value);
+  });
+  return cookies;
+}
+
+function adminPanelSession(req) {
+  adminPanelCleanupSessions();
+  const token = adminPanelCookieMap(req.headers.cookie).renta_admin_session;
+  if (!token) return null;
+
+  const session = ADMIN_PANEL_SESSIONS.get(token);
+  if (!session || session.expiresAt <= Date.now()) {
+    ADMIN_PANEL_SESSIONS.delete(token);
+    return null;
+  }
+
+  session.expiresAt = Date.now() + ADMIN_PANEL_SESSION_TTL;
+  return session;
+}
+
+function adminPanelCreateSession() {
+  const token = crypto.randomBytes(32).toString('hex');
+  ADMIN_PANEL_SESSIONS.set(token, {
+    createdAt: Date.now(),
+    expiresAt: Date.now() + ADMIN_PANEL_SESSION_TTL
+  });
+  return token;
+}
+
+function adminPanelClearSession(req) {
+  const token = adminPanelCookieMap(req.headers.cookie).renta_admin_session;
+  if (token) ADMIN_PANEL_SESSIONS.delete(token);
+}
+
+function adminPanelHtmlEscape(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function adminPanelAttr(value) {
+  return adminPanelHtmlEscape(value);
+}
+
+function adminPanelFormatDate(timestamp) {
+  if (!timestamp) return 'Non precise';
+  return new Intl.DateTimeFormat('fr-FR', {
+    timeZone: 'Europe/Paris',
+    dateStyle: 'short',
+    timeStyle: 'short'
+  }).format(new Date(Number(timestamp) || Date.now()));
+}
+
+function adminPanelParseAmount(value, options = {}) {
+  const minCents = Number.isFinite(options.minCents) ? options.minCents : 1;
+  const maxCents = Number.isFinite(options.maxCents) ? options.maxCents : 100_000;
+  const normalized = String(value || '')
+    .normalize('NFKC')
+    .trim()
+    .replace(/[€$]/g, '')
+    .replace(/[\s\u00a0\u202f]/g, '')
+    .replace(/[，٫]/g, ',')
+    .replace(/,/g, '.');
+
+  if (!/^\d+(?:\.\d{1,2})?$/.test(normalized)) return null;
+  const cents = Math.round(Number.parseFloat(normalized) * 100);
+  if (!Number.isFinite(cents) || cents < minCents || cents > maxCents) return null;
+  return cents;
+}
+
+function adminPanelReadBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+
+    req.on('data', chunk => {
+      body += chunk;
+      if (body.length > ADMIN_PANEL_BODY_LIMIT) {
+        reject(new Error('Formulaire trop long.'));
+        req.destroy();
+      }
+    });
+
+    req.on('end', () => {
+      resolve(new URLSearchParams(body));
+    });
+
+    req.on('error', reject);
+  });
+}
+
+function adminPanelSend(res, statusCode, body, headers = {}) {
+  res.writeHead(statusCode, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Cache-Control': 'no-store',
+    ...headers
+  });
+  res.end(body);
+}
+
+function adminPanelRedirect(res, location) {
+  res.writeHead(303, {
+    Location: location,
+    'Cache-Control': 'no-store'
+  });
+  res.end();
+}
+
+function adminPanelLayout(title, content, session = null) {
+  const nav = session
+    ? `<form method="post" action="/logout"><button class="ghost" type="submit">Deconnexion</button></form>`
+    : '';
+
+  return `<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${adminPanelHtmlEscape(title)}</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #101114;
+      --panel: #181a20;
+      --panel-2: #20232b;
+      --text: #f4f4f5;
+      --muted: #a7adb8;
+      --line: #30343d;
+      --gold: #d4af37;
+      --green: #31c48d;
+      --red: #f05252;
+      --blue: #60a5fa;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.45;
+    }
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 18px 22px;
+      background: rgba(16, 17, 20, 0.94);
+      border-bottom: 1px solid var(--line);
+      backdrop-filter: blur(12px);
+    }
+    main { width: min(1180px, 100%); margin: 0 auto; padding: 22px; }
+    h1, h2, h3 { margin: 0; letter-spacing: 0; }
+    h1 { font-size: 22px; }
+    h2 { font-size: 18px; margin-bottom: 14px; }
+    p { color: var(--muted); }
+    a { color: var(--blue); text-decoration: none; }
+    .grid { display: grid; gap: 16px; grid-template-columns: repeat(12, minmax(0, 1fr)); }
+    .card {
+      grid-column: span 12;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+    }
+    .half { grid-column: span 6; }
+    .third { grid-column: span 4; }
+    .stat {
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+    }
+    .stat strong { display: block; font-size: 22px; margin-top: 6px; }
+    label { display: block; color: var(--muted); font-size: 13px; margin: 12px 0 6px; }
+    input, textarea, select {
+      width: 100%;
+      color: var(--text);
+      background: #111318;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 10px 11px;
+      font: inherit;
+    }
+    textarea { min-height: 112px; resize: vertical; }
+    button {
+      border: 0;
+      border-radius: 7px;
+      padding: 10px 13px;
+      font: inherit;
+      font-weight: 700;
+      color: #111318;
+      background: var(--gold);
+      cursor: pointer;
+    }
+    button.secondary { color: var(--text); background: var(--panel-2); border: 1px solid var(--line); }
+    button.danger { color: white; background: var(--red); }
+    button.success { color: #07120d; background: var(--green); }
+    button.ghost { color: var(--text); background: transparent; border: 1px solid var(--line); }
+    .actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
+    .notice {
+      padding: 12px 14px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      margin-bottom: 16px;
+    }
+    .notice.ok { border-color: rgba(49, 196, 141, 0.55); }
+    .notice.error { border-color: rgba(240, 82, 82, 0.65); }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 11px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { color: var(--muted); font-size: 12px; text-transform: uppercase; }
+    .muted { color: var(--muted); }
+    .pill { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 3px 8px; color: var(--muted); font-size: 12px; }
+    .money { color: var(--green); font-weight: 800; }
+    .danger-text { color: var(--red); }
+    .nowrap { white-space: nowrap; }
+    @media (max-width: 850px) {
+      header { align-items: flex-start; flex-direction: column; }
+      main { padding: 14px; }
+      .half, .third { grid-column: span 12; }
+      table, tbody, tr, td { display: block; width: 100%; }
+      thead { display: none; }
+      tr { border-bottom: 1px solid var(--line); padding: 10px 0; }
+      td { border: 0; padding: 6px 0; }
+      td::before { content: attr(data-label); display: block; color: var(--muted); font-size: 12px; margin-bottom: 2px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>${adminPanelHtmlEscape(title)}</h1>
+      <div class="muted">Panel admin protege • donnees bot en direct</div>
+    </div>
+    ${nav}
+  </header>
+  <main>${content}</main>
+</body>
+</html>`;
+}
+
+function adminPanelLoginPage(query) {
+  const error = query.get('error');
+  const content = `
+    ${error ? `<div class="notice error">${adminPanelHtmlEscape(error)}</div>` : ''}
+    <section class="card" style="max-width: 460px; margin: 40px auto;">
+      <h2>Connexion admin</h2>
+      <p>Entre le mot de passe configure dans Railway.</p>
+      <form method="post" action="/login">
+        <label for="password">Mot de passe</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required>
+        <div class="actions">
+          <button type="submit">Se connecter</button>
+        </div>
+      </form>
+    </section>`;
+
+  return adminPanelLayout('Panel admin', content);
+}
+
+function adminPanelTicketLink(channelId) {
+  return channelId ? `<span class="pill">#${adminPanelHtmlEscape(channelId)}</span>` : '<span class="muted">Aucun ticket</span>';
+}
+
+function adminPanelDashboard(query, session) {
+  const ok = query.get('ok');
+  const error = query.get('error');
+  const selectedUserId = String(query.get('userId') || '').trim();
+  const walletRows = Object.entries(wallets || {})
+    .map(([userId, wallet]) => ({ userId, balance: Number(wallet?.balance) || 0 }))
+    .sort((a, b) => b.balance - a.balance)
+    .slice(0, 20);
+  const rechargeRows = Object.values(requests.tickets || {})
+    .filter(ticketRequest => ticketRequest?.type === 'recharge' && !ticketRequest.paidAt && !ticketRequest.archivedAt && !ticketRequest.deletedAt)
+    .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+  const orderRows = Object.values(requests.tickets || {})
+    .filter(ticketRequest => ticketRequest?.type === 'commande' && !ticketRequest.completedAt && !ticketRequest.deletedAt && !ticketRequest.refundedAt)
+    .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+  const totalWalletCents = Object.values(wallets || {})
+    .reduce((sum, wallet) => sum + eurosToCents(Number(wallet?.balance) || 0), 0);
+  const selectedWallet = selectedUserId ? Number(wallets[selectedUserId]?.balance) || 0 : null;
+
+  const content = `
+    ${ok ? `<div class="notice ok">${adminPanelHtmlEscape(ok)}</div>` : ''}
+    ${error ? `<div class="notice error">${adminPanelHtmlEscape(error)}</div>` : ''}
+    <div class="grid">
+      <section class="stat third">
+        <span class="muted">Wallets</span>
+        <strong>${Object.keys(wallets || {}).length}</strong>
+      </section>
+      <section class="stat third">
+        <span class="muted">Solde total</span>
+        <strong class="money">${formatCents(totalWalletCents)}</strong>
+      </section>
+      <section class="stat third">
+        <span class="muted">A traiter</span>
+        <strong>${rechargeRows.length} recharge(s) • ${orderRows.length} commande(s)</strong>
+      </section>
+
+      <section class="card half">
+        <h2>Ajouter du solde</h2>
+        <p>Utilise l'ID Discord du client. Le bot sauvegarde le wallet et l'historique directement.</p>
+        <form method="post" action="/wallet/add">
+          <label for="walletUserId">ID Discord client</label>
+          <input id="walletUserId" name="userId" inputmode="numeric" placeholder="Exemple : 123456789012345678" value="${adminPanelAttr(selectedUserId)}" required>
+          <label for="walletAmount">Montant a ajouter</label>
+          <input id="walletAmount" name="amount" inputmode="decimal" placeholder="Exemple : 12,38" required>
+          <label for="walletNote">Note interne</label>
+          <input id="walletNote" name="note" placeholder="Exemple : recharge manuelle panel">
+          <div class="actions">
+            <button class="success" type="submit">Crediter le solde</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="card half">
+        <h2>Rechercher un client</h2>
+        <form method="get" action="/">
+          <label for="searchUserId">ID Discord</label>
+          <input id="searchUserId" name="userId" inputmode="numeric" placeholder="ID Discord" value="${adminPanelAttr(selectedUserId)}">
+          <div class="actions">
+            <button class="secondary" type="submit">Voir le wallet</button>
+          </div>
+        </form>
+        ${selectedUserId ? `
+          <div class="notice" style="margin-top: 14px;">
+            Client : <span class="pill">${adminPanelHtmlEscape(selectedUserId)}</span><br>
+            Solde : <strong class="money">${formatWalletAmount(selectedWallet)}</strong>
+          </div>
+        ` : ''}
+      </section>
+
+      <section class="card">
+        <h2>Recharges en attente</h2>
+        ${rechargeRows.length ? `
+          <table>
+            <thead><tr><th>Demande</th><th>Client</th><th>Montant</th><th>Methode</th><th>Date</th><th>Ticket</th><th></th></tr></thead>
+            <tbody>
+              ${rechargeRows.map(ticketRequest => `
+                <tr>
+                  <td data-label="Demande">${adminPanelHtmlEscape(ticketRequest.id)}</td>
+                  <td data-label="Client"><span class="pill">${adminPanelHtmlEscape(ticketRequest.userId)}</span></td>
+                  <td data-label="Montant"><strong class="money">${adminPanelHtmlEscape(ticketRequest.amount || '0.00€')}</strong></td>
+                  <td data-label="Methode">${adminPanelHtmlEscape(paymentLabel(ticketRequest.method))}</td>
+                  <td data-label="Date">${adminPanelHtmlEscape(adminPanelFormatDate(ticketRequest.createdAt))}</td>
+                  <td data-label="Ticket">${adminPanelTicketLink(ticketRequest.channelId)}</td>
+                  <td data-label="Action">
+                    <form method="post" action="/recharge/validate">
+                      <input type="hidden" name="channelId" value="${adminPanelAttr(ticketRequest.channelId)}">
+                      <button class="success" type="submit">Valider</button>
+                    </form>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        ` : '<p>Aucune recharge en attente.</p>'}
+      </section>
+
+      <section class="card">
+        <h2>Commandes payees a envoyer</h2>
+        ${orderRows.length ? orderRows.map(ticketRequest => `
+          <div class="notice">
+            <strong>${adminPanelHtmlEscape(ticketRequest.id)}</strong>
+            <span class="pill">${adminPanelHtmlEscape(ticketRequest.userId)}</span>
+            <span class="pill">${adminPanelHtmlEscape(ticketRequest.product || 'Produit non precise')}</span>
+            <span class="pill">${adminPanelHtmlEscape(formatWalletAmount(Number(ticketRequest.price) || 0))}</span>
+            <div class="muted" style="margin-top: 6px;">Ticket : ${adminPanelTicketLink(ticketRequest.channelId)} • cree le ${adminPanelHtmlEscape(adminPanelFormatDate(ticketRequest.createdAt))}</div>
+            <form method="post" action="/order/send" style="margin-top: 12px;">
+              <input type="hidden" name="channelId" value="${adminPanelAttr(ticketRequest.channelId)}">
+              <label>Message / produit a envoyer dans le ticket client</label>
+              <textarea name="delivery" placeholder="Colle ici le code, le produit ou les instructions a envoyer au client." required></textarea>
+              <div class="actions">
+                <button type="submit">Envoyer dans le ticket et terminer</button>
+              </div>
+            </form>
+          </div>
+        `).join('') : '<p>Aucune commande payee en attente.</p>'}
+      </section>
+
+      <section class="card">
+        <h2>Wallets principaux</h2>
+        ${walletRows.length ? `
+          <table>
+            <thead><tr><th>Client</th><th>Solde</th><th>Action rapide</th></tr></thead>
+            <tbody>
+              ${walletRows.map(row => `
+                <tr>
+                  <td data-label="Client"><span class="pill">${adminPanelHtmlEscape(row.userId)}</span></td>
+                  <td data-label="Solde"><strong class="money">${formatWalletAmount(row.balance)}</strong></td>
+                  <td data-label="Action"><a href="/?userId=${encodeURIComponent(row.userId)}">ouvrir</a></td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        ` : '<p>Aucun wallet enregistre.</p>'}
+      </section>
+    </div>`;
+
+  return adminPanelLayout('Panel admin', content, session);
+}
+
+async function adminPanelAddWallet(form) {
+  const userId = String(form.get('userId') || '').trim();
+  const amountCents = adminPanelParseAmount(form.get('amount'), { minCents: 1, maxCents: 100_000 });
+  const note = String(form.get('note') || 'Recharge manuelle panel').trim().slice(0, 200) || 'Recharge manuelle panel';
+
+  if (!/^\d{17,22}$/.test(userId)) {
+    throw new Error('ID Discord invalide.');
+  }
+
+  if (!amountCents) {
+    throw new Error('Montant invalide. Exemple accepte : 12,38');
+  }
+
+  const amount = amountCents / 100;
+  if (!wallets[userId]) wallets[userId] = { balance: 0 };
+  wallets[userId].balance = Number(wallets[userId].balance || 0) + amount;
+  saveWallets();
+  recordWalletHistory(userId, {
+    type: 'add',
+    amountCents,
+    balanceAfterCents: eurosToCents(wallets[userId].balance),
+    actorId: client.user?.id || null,
+    note: `Panel web : ${note}`
+  });
+  scheduleDataBackup('panel_wallet_add', client.user || null);
+
+  await sendAdminLog('🌐 Solde ajouté depuis le panel', [
+    `Client : <@${userId}>`,
+    `Montant ajouté : **${formatCents(amountCents)}**`,
+    `Nouveau solde : **${formatWalletAmount(wallets[userId].balance)}**`,
+    `Note : ${note}`
+  ], 0x2ECC71);
+
+  return `Solde ajoute : ${formatCents(amountCents)} pour ${userId}.`;
+}
+
+async function adminPanelValidateRecharge(form) {
+  const channelId = String(form.get('channelId') || '').trim();
+  const ticketRequest = requests.tickets?.[channelId];
+
+  if (!ticketRequest || ticketRequest.type !== 'recharge') {
+    throw new Error('Recharge introuvable.');
+  }
+
+  if (ticketRequest.paidAt) {
+    throw new Error('Cette recharge est deja validee.');
+  }
+
+  const amountCents = adminPanelParseAmount(ticketRequest.amount, { minCents: 1, maxCents: 20_000 });
+  if (!amountCents) {
+    throw new Error('Montant de recharge invalide.');
+  }
+
+  if (!client.user) {
+    throw new Error('Le bot Discord n’est pas encore connecte.');
+  }
+
+  const user = await client.users.fetch(ticketRequest.userId).catch(() => null);
+  const channel = client.channels.cache.get(channelId)
+    || await client.channels.fetch(channelId).catch(() => null);
+
+  if (user && channel?.send && channel?.guild) {
+    await applyWalletAdd({
+      user,
+      amount: amountCents / 100,
+      channel,
+      guild: channel.guild,
+      adminUser: client.user,
+      ticketRequest
+    });
+  } else {
+    const userId = ticketRequest.userId;
+    if (!wallets[userId]) wallets[userId] = { balance: 0 };
+    wallets[userId].balance = Number(wallets[userId].balance || 0) + (amountCents / 100);
+    ticketRequest.paidAt = Date.now();
+    ticketRequest.paidBy = client.user.id;
+    ticketRequest.validatedAmount = formatCents(amountCents);
+    saveWallets();
+    saveRequests();
+    upsertTicketHistory(ticketRequest);
+    recordWalletHistory(userId, {
+      type: 'recharge',
+      amountCents,
+      balanceAfterCents: eurosToCents(wallets[userId].balance),
+      actorId: client.user.id,
+      ticketRequestId: ticketRequest.id,
+      note: `Panel web : ${paymentLabel(ticketRequest.method)}`
+    });
+    recordShopRecharge(amountCents / 100, true);
+    scheduleDataBackup('panel_recharge_validated', client.user);
+  }
+
+  await sendAdminLog('🌐 Recharge validée depuis le panel', [
+    `Demande : **${ticketRequest.id}**`,
+    `Client : <@${ticketRequest.userId}>`,
+    `Montant : **${formatCents(amountCents)}**`,
+    `Ticket : <#${channelId}>`
+  ], 0x2ECC71);
+
+  return `Recharge ${ticketRequest.id} validee.`;
+}
+
+async function adminPanelSendOrder(form) {
+  const channelId = String(form.get('channelId') || '').trim();
+  const delivery = String(form.get('delivery') || '').trim().slice(0, 1800);
+  const ticketRequest = requests.tickets?.[channelId];
+
+  if (!ticketRequest || ticketRequest.type !== 'commande') {
+    throw new Error('Commande introuvable.');
+  }
+
+  if (ticketRequest.completedAt) {
+    throw new Error('Cette commande est deja terminee.');
+  }
+
+  if (!delivery) {
+    throw new Error('Le message de livraison est vide.');
+  }
+
+  if (!client.user) {
+    throw new Error('Le bot Discord n’est pas encore connecte.');
+  }
+
+  const channel = client.channels.cache.get(channelId)
+    || await client.channels.fetch(channelId).catch(() => null);
+
+  if (!channel?.send || !channel?.guild) {
+    throw new Error('Ticket commande introuvable ou inaccessible.');
+  }
+
+  await channel.send({
+    content: [
+      `<@${ticketRequest.userId}>`,
+      '',
+      '📦 **Commande envoyée**',
+      '',
+      delivery,
+      '',
+      '✅ Merci de vérifier immédiatement ta commande.',
+      `🕒 Garantie : **${Math.round(ORDER_WARRANTY_DURATION / 60_000)} minutes** après envoi.`,
+      'Passé ce délai, aucun remboursement ne pourra être appliqué.'
+    ].join('\n')
+  });
+
+  ticketRequest.panelDeliveredAt = Date.now();
+  ticketRequest.panelDeliveredBy = client.user.id;
+  ticketRequest.panelDeliveryPreview = delivery.slice(0, 500);
+  saveRequests();
+  upsertTicketHistory(ticketRequest);
+
+  const completionResult = await completeOrderTicketChannel(channel, ticketRequest, client.user, ticketRequest.userId);
+  let customerRoleAdded = false;
+  let customerRoleError = null;
+
+  try {
+    customerRoleAdded = await addCustomerRoleAfterCompletedOrder(channel.guild, ticketRequest);
+  } catch (error) {
+    customerRoleError = error;
+  }
+
+  await sendAdminLog('🌐 Commande envoyée depuis le panel', [
+    `Demande : **${ticketRequest.id}**`,
+    `Client : <@${ticketRequest.userId}>`,
+    `Produit : **${ticketRequest.product || 'Non précisé'}**`,
+    `Ticket : <#${channelId}>`,
+    completionResult?.dmSent ? 'MP client : envoyé' : 'MP client : non envoyé',
+    customerRoleAdded
+      ? `Rôle client : <@&${CUSTOMER_ROLE_ID}> ajouté ou déjà présent`
+      : `Rôle client : non ajouté${customerRoleError ? ` (${customerRoleError.message})` : ''}`
+  ], customerRoleError ? 0xF1C40F : 0x2ECC71);
+
+  return customerRoleError
+    ? `Commande ${ticketRequest.id} envoyee, mais role client non ajoute : ${customerRoleError.message}`
+    : `Commande ${ticketRequest.id} envoyee et terminee.`;
+}
+
+async function adminPanelHandlePost(req, res, pathName) {
+  const form = await adminPanelReadBody(req);
+
+  if (pathName === '/login') {
+    const password = String(form.get('password') || '');
+    const expected = Buffer.from(ADMIN_PANEL_PASSWORD);
+    const received = Buffer.from(password);
+    const valid = expected.length === received.length && crypto.timingSafeEqual(expected, received);
+
+    if (!valid) {
+      return adminPanelRedirect(res, `/?error=${encodeURIComponent('Mot de passe incorrect.')}`);
+    }
+
+    const token = adminPanelCreateSession();
+    res.writeHead(303, {
+      Location: '/',
+      'Set-Cookie': `renta_admin_session=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${Math.floor(ADMIN_PANEL_SESSION_TTL / 1000)}`,
+      'Cache-Control': 'no-store'
+    });
+    res.end();
+    return;
+  }
+
+  if (pathName === '/logout') {
+    adminPanelClearSession(req);
+    res.writeHead(303, {
+      Location: '/',
+      'Set-Cookie': 'renta_admin_session=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0',
+      'Cache-Control': 'no-store'
+    });
+    res.end();
+    return;
+  }
+
+  const session = adminPanelSession(req);
+  if (!session) return adminPanelRedirect(res, '/');
+
+  const actions = {
+    '/wallet/add': adminPanelAddWallet,
+    '/recharge/validate': adminPanelValidateRecharge,
+    '/order/send': adminPanelSendOrder
+  };
+  const action = actions[pathName];
+  if (!action) {
+    return adminPanelSend(res, 404, adminPanelLayout('Page introuvable', '<section class="card">Action introuvable.</section>', session));
+  }
+
+  try {
+    const message = await action(form);
+    return adminPanelRedirect(res, `/?ok=${encodeURIComponent(message)}`);
+  } catch (error) {
+    return adminPanelRedirect(res, `/?error=${encodeURIComponent(error.message || 'Action impossible.')}`);
+  }
+}
+
+function startAdminPanelServer() {
+  const port = Number.parseInt(process.env.PORT || process.env.ADMIN_PANEL_PORT || '', 10);
+
+  if (!adminPanelIsEnabled()) {
+    console.log('Panel admin web désactivé : définis ADMIN_PANEL_PASSWORD pour l’activer.');
+    return null;
+  }
+
+  if (!Number.isFinite(port) || port <= 0) {
+    console.log('Panel admin web désactivé : aucune variable PORT/ADMIN_PANEL_PORT détectée.');
+    return null;
+  }
+
+  const server = http.createServer(async (req, res) => {
+    try {
+      const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+      const pathName = url.pathname;
+
+      if (pathName === '/healthz') {
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('ok');
+        return;
+      }
+
+      if (req.method === 'POST') {
+        return adminPanelHandlePost(req, res, pathName);
+      }
+
+      if (req.method !== 'GET') {
+        res.writeHead(405, { Allow: 'GET, POST' });
+        res.end('Method not allowed');
+        return;
+      }
+
+      if (pathName !== '/') {
+        return adminPanelSend(res, 404, adminPanelLayout('Page introuvable', '<section class="card">Page introuvable.</section>'));
+      }
+
+      const session = adminPanelSession(req);
+      const html = session
+        ? adminPanelDashboard(url.searchParams, session)
+        : adminPanelLoginPage(url.searchParams);
+      return adminPanelSend(res, 200, html);
+    } catch (error) {
+      console.error('Erreur panel admin web', error);
+      return adminPanelSend(res, 500, adminPanelLayout('Erreur panel', `<section class="card"><h2>Erreur</h2><p>${adminPanelHtmlEscape(error.message || error)}</p></section>`));
+    }
+  });
+
+  server.listen(port, () => {
+    console.log(`Panel admin web actif sur le port ${port}.`);
+  });
+
+  return server;
+}
+
+startAdminPanelServer();
 
 client.login(process.env.DISCORD_TOKEN).catch(error => {
   reportCrash('Connexion Discord impossible', error, [
