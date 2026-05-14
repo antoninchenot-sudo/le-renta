@@ -68,13 +68,10 @@ const CLIENT_DM_BROADCAST_DELAY = 250;
 const KNOWN_USER_BACKUP_SCAN_LIMIT = Math.max(1, Number.parseInt(process.env.KNOWN_USER_BACKUP_SCAN_LIMIT || '10', 10) || 10);
 const KNOWN_USER_RECIPIENT_CACHE_TTL = 5 * 60 * 1000;
 const DM_MAX_PROGRESS_INTERVAL = 25;
-const BULK_DM_COMMANDS_ENABLED = process.env.BULK_DM_COMMANDS_ENABLED === 'true';
+const BULK_DM_COMMANDS_ENABLED = false;
+const NON_RECHARGE_DMS_ENABLED = false;
 
 const SHOP_EMOJI = '🛒';
-const MCD0NALDS_EMOJI_ID = '1498440076257136830';
-const MCD0NALDS_EMOJI_NAME = '4964mcd0nalds';
-const MCD0NALDS_EMOJI = `<:${MCD0NALDS_EMOJI_NAME}:${MCD0NALDS_EMOJI_ID}>`;
-const MCD0NALDS_BUTTON_EMOJI = { id: MCD0NALDS_EMOJI_ID, name: MCD0NALDS_EMOJI_NAME };
 const INFO_IMAGE = process.env.INFO_IMAGE || 'https://i0.wp.com/direct-actu.fr/wp-content/uploads/2024/11/1725353427343-ad6c22b5-478a-412e-9c6f-8e14646acd5e_1.png?ssl=1';
 const PAYPAL_LINK = 'https://www.paypal.me/LaRenta23';
 const REVOLUT_LINK = 'https://revolut.me/arthur23320/pocket/vNrIna0VcG';
@@ -147,21 +144,17 @@ const DATA_BACKUP_FILES = [
   PAYMENT_CONFIG_FILE,
   INTERACTION_USERS_FILE
 ];
-const BOT_CHANGELOG_VERSION = '2026-05-13-recharge-dmmax-fix';
+const BOT_CHANGELOG_VERSION = '2026-05-14-recharge-only-progress-buttons';
 // Garder uniquement les changements du lot en cours, pas l’historique complet du bot.
 const BOT_CHANGELOG_ITEMS = [
-  'Limitation à un seul ticket support ouvert par membre.',
-  'Limitation à une seule demande de recharge ouverte par membre.',
-  'Autorisation du staff/support à fermer les tickets support.',
-  'Retour à l’ancien message de bienvenue sans image de fond.',
-  'Mise à jour du lien TikTok suivi par le bot.',
-  'Ajout de la commande dmmax pour envoyer un MP au maximum d’IDs connus par le bot.',
-  'Ajout des anciens IDs d’interaction trouvés dans les sauvegardes et suivi des nouvelles interactions.',
-  'Ajout de la commande dmanciens pour cibler les anciens clients, leurs filleuls et les ouvreurs de tickets.',
-  'Déplacement des tickets commande terminée dans leur nouvelle catégorie dédiée.',
-  'Correction du montant de recharge pour accepter correctement les montants décimaux comme 12,38.',
-  'Ajout d’un bouton pour renvoyer les instructions de recharge en MP si Discord bloque le premier envoi.',
-  'Correction de dmmax pour répondre immédiatement et envoyer les MP en arrière-plan sans bloquer le bot.'
+  'Conservation uniquement des MP liés aux recharges et aux instructions de paiement.',
+  'Désactivation des MP automatiques pour les avis, le parrainage, les commandes terminées, les giveaways, les réductions et la modération.',
+  'Désactivation des commandes de MP massif pour éviter tout nouveau risque Discord.',
+  'Ajout d’un bouton de progression avis pour que les membres consultent leur avancée eux-mêmes.',
+  'Renommage du bouton parrainage en progression et affichage des filleuls validés/en attente par bouton.',
+  'Ajout des boutons progression avis et progression parrainage dans le guide.',
+  'Nettoyage des textes publics boutique, tarifs et paiements avec des intitulés plus neutres.',
+  'Mise à jour du message de commande terminée pour informer le client directement dans le ticket.'
 ];
 const REVIEW_REQUIRED_COUNT = 3;
 const REVIEW_REWARD_CENTS = 100;
@@ -1347,14 +1340,14 @@ async function sendOrderPauseAnnouncement(source, endsAt, reason = '') {
     .setColor(0xE67E22)
     .setTitle('⏸️ Commandes temporairement en pause')
     .setDescription([
-      'Les commandes McD0 sont mises en pause temporairement.',
+      'Les commandes sont mises en pause temporairement.',
       '',
       orderPauseCountdownLine(endsAt),
       reason ? `Raison : **${reason}**` : null,
       '',
       'Les recharges, le portefeuille et le support restent disponibles.'
     ].filter(Boolean).join('\n'))
-    .setFooter({ text: 'La Rent’a • Pause commandes' })
+    .setFooter({ text: 'LR Services • Pause commandes' })
     .setTimestamp();
 
   return channel.send({
@@ -1388,7 +1381,7 @@ async function sendOrderPauseEndedAnnouncement(user = client.user) {
       '',
       `Tu peux maintenant retourner commander dans <#${SHOP_CHANNEL_ID}>.`
     ].join('\n'))
-    .setFooter({ text: 'La Rent’a • Commandes disponibles' })
+    .setFooter({ text: 'LR Services • Commandes disponibles' })
     .setTimestamp();
 
   return channel.send({
@@ -1847,6 +1840,7 @@ async function sendReviewLog(entry) {
 
 async function sendReviewDm(user, lines) {
   if (!user) return false;
+  if (!NON_RECHARGE_DMS_ENABLED) return false;
   return user.send(lines.join('\n')).then(() => true).catch(() => false);
 }
 
@@ -2478,7 +2472,7 @@ function buildDailyRecapEmbed(dateKey = getDailyRecapDateParts().dateKey) {
 
   return new EmbedBuilder()
     .setColor(0xD4AF37)
-    .setTitle('📊 Récap quotidien La Rent’a')
+    .setTitle('📊 Récap quotidien LR Services')
     .setDescription(`Bilan du **${dailyDateLabel(dateKey)}**.`)
     .addFields(
       {
@@ -3861,7 +3855,7 @@ function buildInviteGiveawayModal() {
   const rewardInput = new TextInputBuilder()
     .setCustomId('invite_giveaway_reward')
     .setLabel('Compte à gagner')
-    .setPlaceholder('Exemple : compte McD0nald’s 50-74 pts')
+    .setPlaceholder('Exemple : produit 50-74 pts')
     .setStyle(TextInputStyle.Short)
     .setRequired(true)
     .setMinLength(2)
@@ -3896,7 +3890,7 @@ function buildInviteGiveawayModal() {
 function buildInviteGiveawayStartEmbed(giveaway, guild) {
   return new EmbedBuilder()
     .setColor(0xD4AF37)
-    .setAuthor({ name: 'La Rent’a', iconURL: guild.iconURL({ dynamic: true }) })
+    .setAuthor({ name: 'LR Services', iconURL: guild.iconURL({ dynamic: true }) })
     .setTitle('🎁 Giveaway spécial invitations')
     .setDescription([
       `Récompense : **${giveaway.reward}**`,
@@ -4140,7 +4134,9 @@ async function recordInviteGiveawayJoin(member, referral) {
       }).catch(() => {});
     }
 
-    const winner = await client.users.fetch(winnerRow.inviterId).catch(() => null);
+    const winner = NON_RECHARGE_DMS_ENABLED
+      ? await client.users.fetch(winnerRow.inviterId).catch(() => null)
+      : null;
     if (winner) {
       await winner.send([
         '🎉 **Tu as gagné le giveaway invite !**',
@@ -4287,7 +4283,7 @@ function buildClientGiveawayModal() {
   const rewardInput = new TextInputBuilder()
     .setCustomId('client_giveaway_reward')
     .setLabel('Lot à gagner')
-    .setPlaceholder('Exemple : compte McD0nald’s 75-99 pts')
+    .setPlaceholder('Exemple : produit 75-99 pts')
     .setStyle(TextInputStyle.Short)
     .setRequired(true)
     .setMinLength(2)
@@ -4305,7 +4301,7 @@ function buildClientGiveawayModal() {
   const announcementInput = new TextInputBuilder()
     .setCustomId('client_giveaway_announcement')
     .setLabel('Message envoyé au lancement')
-    .setPlaceholder('Exemple : Giveaway réservé aux vrais clients La Rent’a.')
+    .setPlaceholder('Exemple : Giveaway réservé aux clients vérifiés.')
     .setStyle(TextInputStyle.Paragraph)
     .setRequired(false)
     .setMaxLength(1000);
@@ -4322,7 +4318,7 @@ function buildClientGiveawayModal() {
 function buildClientGiveawayStartEmbed(giveaway, guild) {
   return new EmbedBuilder()
     .setColor(0xD4AF37)
-    .setAuthor({ name: 'La Rent’a', iconURL: guild.iconURL({ dynamic: true }) })
+    .setAuthor({ name: 'LR Services', iconURL: guild.iconURL({ dynamic: true }) })
     .setTitle('🎁 Giveaway clients')
     .setDescription([
       `Récompense : **${giveaway.reward}**`,
@@ -4367,7 +4363,7 @@ function buildClientGiveawayWinnerEmbed(giveaway, winnerId) {
       `Récompense : **${giveaway.reward}**`,
       `Participants : **${giveaway.entries?.length || 0}**`,
       '',
-      'Merci aux clients La Rent’a pour votre confiance.'
+      'Merci aux clients pour votre confiance.'
     ].join('\n'))
     .setTimestamp();
 }
@@ -4503,11 +4499,11 @@ async function finishClientGiveaway(reason = 'ended', user = client.user) {
     }
   }
 
-  if (winnerEntry?.userId) {
+  if (NON_RECHARGE_DMS_ENABLED && winnerEntry?.userId) {
     const winner = await client.users.fetch(winnerEntry.userId).catch(() => null);
     if (winner) {
       await winner.send([
-        '🎉 **Tu as gagné le giveaway clients La Rent’a !**',
+        '🎉 **Tu as gagné le giveaway clients !**',
         '',
         `Récompense : **${completedGiveaway.reward}**`,
         '',
@@ -4769,6 +4765,7 @@ async function recordMemberInvite(member) {
 
 async function notifyInviterOfPendingReferral(member, referral) {
   if (!referral || !isReferralCountable(referral) || referral.joinDmSentAt || !referral.inviterId) return false;
+  if (!NON_RECHARGE_DMS_ENABLED) return false;
 
   const inviterMember = await fetchGuildMemberForReferral(member.guild, referral.inviterId);
   if (isReferralExcludedMember(member) || isReferralExcludedMember(inviterMember)) {
@@ -4891,19 +4888,23 @@ async function validateReferralReward(user, ticketRequest, amountText, guild = n
       `👛 Nouveau solde : **${newBalanceText}**`
     ].join('\n'));
 
-  await inviter.send({ embeds: [dmEmbed] }).catch(() => {});
+  if (NON_RECHARGE_DMS_ENABLED) {
+    await inviter.send({ embeds: [dmEmbed] }).catch(() => {});
+  }
 
-  await user.send({
-    embeds: [
-      new EmbedBuilder()
-        .setColor(0x2ECC71)
-        .setTitle('✅ Parrainage confirmé')
-        .setDescription([
-          'Ta première recharge a validé ton parrainage.',
-          `Ton parrain **${inviter.tag}** a reçu sa récompense automatiquement.`
-        ].join('\n'))
-    ]
-  }).catch(() => {});
+  if (NON_RECHARGE_DMS_ENABLED) {
+    await user.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0x2ECC71)
+          .setTitle('✅ Parrainage confirmé')
+          .setDescription([
+            'Ta première recharge a validé ton parrainage.',
+            `Ton parrain **${inviter.tag}** a reçu sa récompense automatiquement.`
+          ].join('\n'))
+      ]
+    }).catch(() => {});
+  }
 
   sendAdminLog('🎁 Parrainage récompensé', [
     `Parrain : ${logUser(inviter)}`,
@@ -4946,7 +4947,7 @@ const DEFAULT_PRODUCTS = [
 ];
 
 function productLabelFromRange(rangeLabel) {
-  return `McD0nald's ${rangeLabel} Points`;
+  return `Produit ${rangeLabel} Points`;
 }
 
 function parseProductRangeInput(value) {
@@ -5398,7 +5399,7 @@ function productSelectOption(product) {
     label: productPointsLabel(product).slice(0, 100),
     description: `Prix : ${formatProductPrice(product.value, { includeDiscount: false, ignoreAvailability: true })}`.slice(0, 100),
     value: product.value,
-    emoji: MCD0NALDS_BUTTON_EMOJI
+    emoji: '📦'
   };
 }
 
@@ -5424,7 +5425,7 @@ function buildProductSelectRows(customIdPrefix, placeholder, optionBuilder = pro
 }
 
 function buildPriceEditorRows() {
-  return buildProductSelectRows('edit_price_select', 'Choisir un produit McD0 à modifier...', productSelectOption, products);
+  return buildProductSelectRows('edit_price_select', 'Choisir un produit à modifier...', productSelectOption, products);
 }
 
 function buildProductCatalogEditorComponents() {
@@ -5438,19 +5439,19 @@ function buildProductCatalogEditorComponents() {
 
   return [
     addRow,
-    ...buildProductSelectRows('edit_product_catalog_select', 'Modifier une gamme McD0...', productSelectOption, products)
+    ...buildProductSelectRows('edit_product_catalog_select', 'Modifier une gamme...', productSelectOption, products)
   ].slice(0, 5);
 }
 
 function buildProductCatalogEditorEmbed(guild) {
   return new EmbedBuilder()
     .setColor(0xD4AF37)
-    .setAuthor({ name: 'Catalogue McD0nald’s', iconURL: guild.iconURL({ dynamic: true }) })
-    .setTitle(`Modifier les produits ${MCD0NALDS_EMOJI}`)
+    .setAuthor({ name: 'Catalogue boutique', iconURL: guild.iconURL({ dynamic: true }) })
+    .setTitle('Modifier les produits')
     .setDescription([
       'Ajoute une nouvelle gamme ou modifie une gamme existante.',
       '',
-      'Boutique : **McD0nald’s**',
+      'Boutique : **Catalogue**',
       `Produits actuels : **${products.length}**`,
       '',
       'Les changements sont appliqués automatiquement à :',
@@ -5506,12 +5507,12 @@ function stockSelectOption(product) {
     label: `${available ? 'Disponible' : 'Indisponible'} - ${productPointsLabel(product)} ${productStockLabel(product.value)}`.slice(0, 100),
     description: 'Clique pour modifier le nombre en stock. 0 = indisponible.',
     value: product.value,
-    emoji: MCD0NALDS_BUTTON_EMOJI
+    emoji: '📦'
   };
 }
 
 function buildStockEditorRows() {
-  return buildProductSelectRows('toggle_stock_select', 'Changer le stock McD0...', stockSelectOption, products);
+  return buildProductSelectRows('toggle_stock_select', 'Changer le stock...', stockSelectOption, products);
 }
 
 function buildStockEditorEmbed(guild) {
@@ -5519,12 +5520,12 @@ function buildStockEditorEmbed(guild) {
 
   return new EmbedBuilder()
     .setColor(0xD4AF37)
-    .setAuthor({ name: 'Stock McD0nald’s', iconURL: guild.iconURL({ dynamic: true }) })
-    .setTitle(`Gestion du stock ${MCD0NALDS_EMOJI}`)
+    .setAuthor({ name: 'Stock boutique', iconURL: guild.iconURL({ dynamic: true }) })
+    .setTitle('Gestion du stock')
     .setDescription([
       'Sélectionne un produit pour changer son état.',
       '',
-      'Boutique : **McD0nald’s**',
+      'Boutique : **Catalogue**',
       '',
       '✅ Disponible',
       '❌ Indisponible',
@@ -5560,7 +5561,7 @@ function buildProductStockModal(product) {
 }
 
 function productMenuLabel(product) {
-  const label = `McD0nald's ${product.rangeLabel || productPointsLabel(product).replace(/\s*pts$/i, '')} pts`;
+  const label = `Produit ${product.rangeLabel || productPointsLabel(product).replace(/\s*pts$/i, '')} pts`;
   return `${label} ${productStockLabel(product.value)}`.slice(0, 100);
 }
 
@@ -5573,12 +5574,12 @@ function productOrderSelectOption(product) {
     label: productMenuLabel(product),
     description: productMenuDescription(product),
     value: product.value,
-    emoji: MCD0NALDS_BUTTON_EMOJI
+    emoji: '📦'
   };
 }
 
 function buildProductOrderRows() {
-  return buildProductSelectRows('produits', 'Choisir un produit McD0nald’s...', productOrderSelectOption, availableProducts());
+  return buildProductSelectRows('produits', 'Choisir un produit...', productOrderSelectOption, availableProducts());
 }
 
 const ticketAllow = [
@@ -6274,7 +6275,7 @@ function buildOrderQueueEmbed(ticketRequest, position, total) {
       '',
       'Ce message se met à jour automatiquement quand une commande avant toi est terminée.'
     ].join('\n'))
-    .setFooter({ text: 'La Rent’a • File d’attente en temps réel' })
+    .setFooter({ text: 'LR Services • File d’attente en temps réel' })
     .setTimestamp();
 }
 
@@ -6466,7 +6467,7 @@ async function completeOrderTicketChannel(channel, ticketRequest, user, ownerId 
 
   let dmSent = false;
 
-  if (ticketRequest?.userId) {
+  if (NON_RECHARGE_DMS_ENABLED && ticketRequest?.userId) {
     const customer = await client.users.fetch(ticketRequest.userId).catch(() => null);
     if (customer) {
       await customer.send({ embeds: [buildCompletedOrderDmEmbed(ticketRequest)] })
@@ -6683,7 +6684,7 @@ function rechargeDmClosedPayload(error = null) {
       'Pour recharger, le bot doit obligatoirement pouvoir t’envoyer les instructions en MP.',
       '',
       '**Active les MP pour ce serveur :**',
-      '1. Clique sur le nom du serveur La Rent’a.',
+      '1. Clique sur le nom du serveur.',
       '2. Ouvre **Paramètres de confidentialité**.',
       '3. Active **Autoriser les messages privés des membres du serveur**.',
       '4. Reviens ici et clique sur **Tester mes MP**.',
@@ -6701,7 +6702,7 @@ async function testRechargeDmAccess(user) {
   return user.send([
     '✅ **Test MP réussi.**',
     '',
-    'Tes messages privés avec La Rent’a sont ouverts.',
+    'Tes messages privés avec le bot sont ouverts.',
     'Retourne sur le serveur pour continuer ta recharge.',
     '',
     'Les instructions de paiement arriveront ici après le choix du moyen de paiement.'
@@ -6799,7 +6800,7 @@ function buildPaymentConfigEmbed(guild) {
       { name: 'Revolut', value: `\`${paymentConfigInlineValue(paymentConfigValue('revolut'))}\``, inline: false },
       { name: 'IBAN', value: `\`\`\`text\n${paymentConfigBlockValue(paymentConfigValue('virement'))}\n\`\`\``, inline: false }
     )
-    .setFooter({ text: 'La Rent’a • Paiements configurables' })
+    .setFooter({ text: 'LR Services • Paiements configurables' })
     .setTimestamp();
 }
 
@@ -7040,7 +7041,7 @@ function productListText(options = {}) {
         ? product.label.replace(/\b\d+-\d+\b/g, match => `**${match}**`)
         : product.label;
 
-      return `${MCD0NALDS_EMOJI} ${label} → **${formatProductPrice(product.value)}**`;
+      return `📦 ${label} → **${formatProductPrice(product.value)}**`;
     })
     .join('\n');
 }
@@ -7078,8 +7079,8 @@ function buildTariffEmbed(guild) {
 
   const embed = new EmbedBuilder()
     .setColor(0xD4AF37)
-    .setAuthor({ name: 'La Rent’a', iconURL: guild.iconURL({ dynamic: true }) })
-    .setTitle(`Tarifs McD0nald’s ${MCD0NALDS_EMOJI}`)
+    .setAuthor({ name: 'LR Services', iconURL: guild.iconURL({ dynamic: true }) })
+    .setTitle('Tarifs boutique')
     .setDescription([
       'Liste des produits actuellement disponibles.',
       'Les prix affichés suivent automatiquement les changements de tarifs et le stock.',
@@ -7089,7 +7090,7 @@ function buildTariffEmbed(guild) {
         : '💰 Prix débités automatiquement du portefeuille.'
     ].join('\n'))
     .setThumbnail(guild.iconURL({ dynamic: true }))
-    .setFooter({ text: 'McD0nald’s • Solde obligatoire avant commande' })
+    .setFooter({ text: 'Boutique • Solde obligatoire avant commande' })
     .setTimestamp();
 
   if (!tariffLines.length) {
@@ -7366,32 +7367,65 @@ Le staff vous répondra dès que possible.`,
 function buildAvisEmbed() {
   return new EmbedBuilder()
     .setColor(0xD4AF37)
-    .setTitle('Merci pour ta commande')
+    .setTitle('Avis clients')
     .setDescription([
-      'Ta commande est terminée, merci pour ta confiance !',
+      'Merci pour ta confiance !',
       '',
       `N’hésite pas à laisser un avis ici : <#${AVIS_CHANNEL_ID}>`,
-      'Et si tu as apprécié le service, parle-en autour de toi !',
       '',
-      'Bon appétit 😋'
+      `Tous les **${REVIEW_REQUIRED_COUNT} avis validés**, tu reçois **${formatCents(REVIEW_REWARD_CENTS)}** sur ton portefeuille.`,
+      'Un seul avis par jour peut compter et la même photo ne peut pas compter deux fois.',
+      '',
+      'Clique sur le bouton ci-dessous pour voir ta progression.'
     ].join('\n'))
     .setFooter({ text: 'Boutique' });
+}
+
+function buildReviewProgressEmbed(user) {
+  const stats = ensureReviewUserStats(user.id);
+  const remaining = Math.max(REVIEW_REQUIRED_COUNT - (Number(stats.progress) || 0), 0);
+
+  return new EmbedBuilder()
+    .setColor(0xD4AF37)
+    .setTitle('⭐ Ma progression avis')
+    .setDescription([
+      `Progression actuelle : **${reviewProgressText(stats.progress)}**`,
+      `Avis validés au total : **${stats.totalCounted}**`,
+      `Récompenses reçues : **${stats.rewardsEarned}**`,
+      '',
+      remaining > 0
+        ? `Encore **${remaining}** avis validé(s) pour débloquer **${formatCents(REVIEW_REWARD_CENTS)}**.`
+        : `La prochaine récompense de **${formatCents(REVIEW_REWARD_CENTS)}** est prête à être débloquée.`
+    ].join('\n'))
+    .setThumbnail(user.displayAvatarURL({ dynamic: true }))
+    .setFooter({ text: 'Avis • Progression privée' })
+    .setTimestamp();
+}
+
+function reviewProgressRow() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('get_review_progress')
+      .setLabel('Ma progression avis')
+      .setEmoji('⭐')
+      .setStyle(ButtonStyle.Secondary)
+  );
 }
 
 function buildShopSetupEmbed(guild) {
   return new EmbedBuilder()
     .setColor(0xD4AF37)
-    .setAuthor({ name: 'La Rent’a', iconURL: guild.iconURL({ dynamic: true }) })
-    .setTitle(`La Rent'a - Boutique McD0nald's ${MCD0NALDS_EMOJI}`)
+    .setAuthor({ name: 'LR Services', iconURL: guild.iconURL({ dynamic: true }) })
+    .setTitle('Espace client - Boutique')
     .setDescription([
       '**Bienvenue sur la boutique officielle.**',
       '',
-      'Gère ton portefeuille, recharge ton solde, puis choisis ton produit McD0nald’s en quelques clics.',
+      'Gère ton portefeuille, recharge ton solde, puis choisis ton produit en quelques clics.',
       '',
       '👛 **Portefeuille** — consulte ton solde actuel.',
       '💳 **Recharger** — ajoute du solde via PayPal, Revolut ou virement. Les instructions arrivent en **message privé**.',
-      `${MCD0NALDS_EMOJI} **Commander McD0** — ouvre la sélection des produits disponibles.`,
-      '🎁 **Fidélité McD0** — affiche les infos du programme fidélité.',
+      '🛒 **Commander** — ouvre la sélection des produits disponibles.',
+      '🎁 **Programme fidélité** — affiche les infos du programme.',
       '',
       'Clique sur **Commander** pour voir les produits et leurs prix.',
       'Le montant sera retiré automatiquement de ton portefeuille.',
@@ -7401,15 +7435,15 @@ function buildShopSetupEmbed(guild) {
       '👇 Sélectionne une action ci-dessous.'
     ].join('\n'))
     .setThumbnail(guild.iconURL({ dynamic: true }))
-    .setFooter({ text: 'La Rent’a • Portefeuille • Recharge • Commande' });
+    .setFooter({ text: 'LR Services • Portefeuille • Recharge • Commande' });
 }
 
 function buildShopSetupRow() {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('wallet').setLabel('Portefeuille').setEmoji('👛').setStyle(ButtonStyle.Danger),
     new ButtonBuilder().setCustomId('recharger').setLabel('Recharger le solde').setEmoji('➕').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('commande').setLabel('Commander McD0').setEmoji(MCD0NALDS_BUTTON_EMOJI).setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId('infos_points').setLabel('Fidélité McD0').setEmoji('🎁').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('commande').setLabel('Commander').setEmoji('🛒').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('infos_points').setLabel('Programme fidélité').setEmoji('🎁').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('how_to_recharge').setLabel('Comment recharger ?').setEmoji('❓').setStyle(ButtonStyle.Secondary)
   );
 }
@@ -7431,13 +7465,13 @@ function buildHowToRechargeEmbed(guild) {
       '',
       `🚨 **Si tu es bloqué, va dans <#${SUPPORT_CHANNEL_ID}> et ouvre un ticket support.**`
     ].join('\n'))
-    .setFooter({ text: 'La Rent’a • Recharge en message privé' });
+    .setFooter({ text: 'LR Services • Recharge en message privé' });
 }
 
 function buildShopOrderEmbed(guild, hasProducts = true) {
   return new EmbedBuilder()
     .setColor(0xD4AF37)
-    .setTitle(`Boutique McD0nald's ${MCD0NALDS_EMOJI}`)
+    .setTitle('Boutique')
     .setDescription(hasProducts
       ? [
           'Sélectionne le produit que tu veux commander.',
@@ -7447,18 +7481,18 @@ function buildShopOrderEmbed(guild, hasProducts = true) {
           'Le montant sera retiré automatiquement de ton portefeuille après ton choix.'
         ].join('\n')
       : [
-          'Aucun produit McD0nald’s n’est disponible pour le moment.',
+          'Aucun produit n’est disponible pour le moment.',
           '',
           'Reviens plus tard ou ouvre un ticket support si besoin.'
         ].join('\n'))
     .setThumbnail(guild.iconURL({ dynamic: true }))
-    .setFooter({ text: 'La Rent’a • Sélection produit' });
+    .setFooter({ text: 'LR Services • Sélection produit' });
 }
 
 function buildLoyaltyInfoPayload() {
   const infoEmbed = new EmbedBuilder()
     .setColor(0xD4AF37)
-    .setTitle('Programme de Fidélité McD0');
+    .setTitle('Programme fidélité');
 
   if (INFO_IMAGE) infoEmbed.setImage(INFO_IMAGE);
   return { embeds: [infoEmbed], ephemeral: true };
@@ -7471,7 +7505,7 @@ function helpCommandLines(entries) {
 function buildHelpEmbed(guild) {
   return new EmbedBuilder()
     .setColor(0xD4AF37)
-    .setAuthor({ name: 'La Rent’a', iconURL: guild.iconURL({ dynamic: true }) })
+    .setAuthor({ name: 'LR Services', iconURL: guild.iconURL({ dynamic: true }) })
     .setTitle('Commandes du serveur')
     .setDescription([
       'Les commandes ci-dessous sont à taper avec `!` devant.',
@@ -7486,7 +7520,7 @@ function buildHelpEmbed(guild) {
           ['support', 'affiche le panneau support public.'],
           ['guide', 'affiche le guide public pour recharger et commander.'],
           ['regles', 'affiche le règlement public avec le bouton d’acceptation.'],
-          ['tarifs', 'affiche la grille publique des prix McD0nald’s.'],
+          ['tarifs', 'affiche la grille publique des prix.'],
           ['mdp', 'affiche le panneau public des moyens de paiement.'],
           ['parrainage', 'affiche le panneau public parrainage et ses boutons.'],
           ['avis', 'affiche le message public pour laisser un avis.']
@@ -7497,7 +7531,7 @@ function buildHelpEmbed(guild) {
         name: 'Admin / staff',
         value: helpCommandLines([
           ['help', 'affiche cette liste de commandes.'],
-          ['setup', 'envoie le message principal de la boutique McD0.'],
+          ['setup', 'envoie le message principal de la boutique.'],
           ['clear', 'nettoie le salon où la commande est utilisée.'],
           ['warnings @membre', 'affiche les warns d’un membre.'],
           ['warn @membre raison', 'ajoute un warn manuel.'],
@@ -7515,7 +7549,7 @@ function buildHelpEmbed(guild) {
         name: 'Owner - boutique',
         value: helpCommandLines([
           ['prix', 'modifie les tarifs via boutons et formulaire.'],
-          ['produits', 'ajoute ou modifie les gammes McD0nald’s et leurs prix.'],
+          ['produits', 'ajoute ou modifie les gammes et leurs prix.'],
           ['stock', 'affiche les produits en menu pour les rendre disponibles ou indisponibles.'],
           ['reduc nombre durée', 'applique une offre flash et annonce la réduction avec compte à rebours.'],
           ['resetreduc', 'retire la réduction globale.'],
@@ -7531,17 +7565,19 @@ function buildHelpEmbed(guild) {
           ['maintenance on/off/status', 'active, désactive ou consulte la maintenance.'],
           ['autodispo on/off/status', 'active, coupe ou consulte les messages automatiques de 11h et 18h.'],
           ['annonce', 'ouvre un formulaire pour envoyer une annonce dans le salon des disponibilités.'],
-          ['dmclients', 'ouvre un formulaire pour envoyer un MP aux clients qui ont déjà commandé.'],
-          ['dmrecharges', 'ouvre un formulaire pour envoyer un MP aux anciens clients ayant déjà rechargé.'],
-          ['dmmax', 'ouvre un formulaire pour envoyer un MP au maximum de membres connus par le bot.'],
-          ['dmanciens', 'ouvre un formulaire pour envoyer un MP aux anciens actifs : clients, filleuls et tickets.'],
-          ['giveawayinvite', 'ouvre le formulaire pour lancer un giveaway spécial invitations.'],
-          ['giveawayinvite stop', 'annule le giveaway invite actif.'],
-          ['giveawayclient', 'ouvre le formulaire pour lancer un giveaway réservé aux clients.'],
-          ['giveawayclient stop', 'annule le giveaway client actif.'],
           ['annulavis ID', 'annule un avis comptabilisé et corrige la récompense si besoin.'],
           ['backup', 'crée une sauvegarde manuelle des données importantes du bot.'],
           ['backupinvites', 'crée une sauvegarde dédiée des invites et parrainages.']
+        ]),
+        inline: false
+      },
+      {
+        name: 'Owner - giveaways',
+        value: helpCommandLines([
+          ['giveawayinvite', 'ouvre le formulaire pour lancer un giveaway spécial invitations.'],
+          ['giveawayinvite stop', 'annule le giveaway invite actif.'],
+          ['giveawayclient', 'ouvre le formulaire pour lancer un giveaway réservé aux clients.'],
+          ['giveawayclient stop', 'annule le giveaway client actif.']
         ]),
         inline: false
       },
@@ -7557,7 +7593,7 @@ function buildHelpEmbed(guild) {
         inline: false
       }
     )
-    .setFooter({ text: 'La Rent’a • Aide commandes' });
+    .setFooter({ text: 'LR Services • Aide commandes' });
 }
 
 function buildGuideFaqEmbed(guild) {
@@ -7567,7 +7603,7 @@ function buildGuideFaqEmbed(guild) {
     .setTitle('Questions fréquentes')
     .setDescription([
       '**Où commander ?**',
-      `Tout se passe dans <#${SHOP_CHANNEL_ID}> avec le bouton **Commander ${MCD0NALDS_EMOJI}**.`,
+      `Tout se passe dans <#${SHOP_CHANNEL_ID}> avec le bouton **Commander 🛒**.`,
       '',
       '**Comment recharger ?**',
       'Clique sur **Recharger le solde**, indique le montant/date/heure, puis choisis PayPal, Revolut ou virement.',
@@ -7587,7 +7623,7 @@ function buildGuideFaqEmbed(guild) {
       '**Besoin d’aide ?**',
       `Ouvre un ticket support dans <#${SUPPORT_CHANNEL_ID}>.`
     ].join('\n'))
-    .setFooter({ text: 'La Rent’a • FAQ rapide' });
+    .setFooter({ text: 'LR Services • FAQ rapide' });
 }
 
 function announcementTypeConfig(type) {
@@ -7611,7 +7647,7 @@ function buildAnnouncementEmbed(title, body, type) {
     .setColor(config.color)
     .setTitle(`${config.emoji} ${title}`.slice(0, 256))
     .setDescription(body.slice(0, 4096))
-    .setFooter({ text: `La Rent’a • Annonce ${config.label}` })
+    .setFooter({ text: `LR Services • Annonce ${config.label}` })
     .setTimestamp();
 }
 
@@ -7658,7 +7694,7 @@ function buildDmRechargeClientsModal(launcherId) {
   const titleInput = new TextInputBuilder()
     .setCustomId('dm_recharge_clients_title')
     .setLabel('Titre du message')
-    .setPlaceholder('Exemple : Nouveau serveur La Rent’a')
+    .setPlaceholder('Exemple : Information importante')
     .setStyle(TextInputStyle.Short)
     .setRequired(true)
     .setMinLength(2)
@@ -7689,7 +7725,7 @@ function buildDmMaxKnownUsersModal(launcherId) {
   const titleInput = new TextInputBuilder()
     .setCustomId('dm_max_known_users_title')
     .setLabel('Titre du message')
-    .setPlaceholder('Exemple : Nouveau serveur La Rent’a')
+    .setPlaceholder('Exemple : Information importante')
     .setStyle(TextInputStyle.Short)
     .setRequired(true)
     .setMinLength(2)
@@ -7720,7 +7756,7 @@ function buildDmOldActiveUsersModal(launcherId) {
   const titleInput = new TextInputBuilder()
     .setCustomId('dm_old_active_users_title')
     .setLabel('Titre du message')
-    .setPlaceholder('Exemple : Nouveau serveur La Rent’a')
+    .setPlaceholder('Exemple : Information importante')
     .setStyle(TextInputStyle.Short)
     .setRequired(true)
     .setMinLength(2)
@@ -7746,7 +7782,7 @@ function buildDmOldActiveUsersModal(launcherId) {
 function buildClientDmEmbed(guild, title, body, senderUser) {
   return new EmbedBuilder()
     .setColor(0xD4AF37)
-    .setAuthor({ name: 'La Rent’a', iconURL: guild.iconURL({ dynamic: true }) })
+    .setAuthor({ name: 'LR Services', iconURL: guild.iconURL({ dynamic: true }) })
     .setTitle(title.slice(0, 256))
     .setDescription(body.slice(0, 4096))
     .setFooter({ text: `Message boutique • ${senderUser.username}` })
@@ -8816,7 +8852,7 @@ async function sendDiscountAnnouncement(message, percent, endsAt) {
       '',
       `📍 Pour commander : <#${SHOP_CHANNEL_ID}>`
     ].join('\n'))
-    .setFooter({ text: 'La Rent’a • Offre flash' })
+    .setFooter({ text: 'LR Services • Offre flash' })
     .setTimestamp();
 
   const sent = await channel.send({
@@ -8844,6 +8880,14 @@ async function sendDiscountAnnouncement(message, percent, endsAt) {
 }
 
 async function sendDiscountDmToClientMembers(message, percent, endsAt) {
+  if (!NON_RECHARGE_DMS_ENABLED) {
+    await sendAdminLog('🏷️ MP réduction désactivé', [
+      `Owner : ${logUser(message.author)}`,
+      'Raison : les MP non liés à une recharge sont coupés.'
+    ], 0xF1C40F);
+    return { recipients: 0, sent: 0, failed: 0, skipped: true };
+  }
+
   const lockKey = message.guild.id;
 
   if (clientDmBroadcastLocks.has(lockKey)) {
@@ -8931,7 +8975,7 @@ function buildCompletedOrderTicketEmbed(ticketRequest, dmSent) {
       '',
       dmSent
         ? 'Le client a été prévenue en message privé. 📩'
-        : '⚠️ Impossible d’envoyer un MP au client.',
+        : 'Le client est informé directement dans ce ticket.',
       'Merci de conserver les informations de livraison dans ce ticket.',
       '',
       ...completedOrderReminderLines({
@@ -9048,7 +9092,7 @@ const AVAILABILITY_SLOTS = {
   morning: {
     key: 'morning',
     hour: 11,
-    title: 'La Rent’a est disponible toute la journée',
+    title: 'La boutique est disponible toute la journée',
     lines: [
       'Nous sommes dispo pour prendre vos commandes aujourd’hui.',
       'Pensez à vérifier votre portefeuille avant de commander.'
@@ -9057,7 +9101,7 @@ const AVAILABILITY_SLOTS = {
   evening: {
     key: 'evening',
     hour: 18,
-    title: 'La Rent’a est disponible toute la soirée',
+    title: 'La boutique est disponible toute la soirée',
     lines: [
       'Nous sommes dispo pour prendre vos commandes ce soir.',
       'Rechargez votre solde si besoin, puis passez commande depuis la boutique.'
@@ -9083,7 +9127,7 @@ function buildAvailabilityMessage(slot) {
   return [
     '@everyone',
     '',
-    `${MCD0NALDS_EMOJI} **${slot.title}**`,
+    `🛒 **${slot.title}**`,
     '',
     ...slot.lines,
     '',
@@ -9370,6 +9414,7 @@ async function sendTemporaryChannelNotice(channel, content) {
 }
 
 async function sendModerationDm(user, title, lines) {
+  if (!NON_RECHARGE_DMS_ENABLED) return false;
   return user.send({
     embeds: [
       new EmbedBuilder()
@@ -9954,20 +9999,12 @@ client.on(Events.GuildMemberAdd, async member => {
 
     await recordInviteGiveawayJoin(member, referral);
 
-    const inviterDmSent = await notifyInviterOfPendingReferral(member, referral);
+    await notifyInviterOfPendingReferral(member, referral);
 
     await Promise.all([
       sendInviteJoinAnnouncement(member, referral),
       sendInviteAdminAnnouncement(member, referral)
     ]);
-
-    if (isReferralCountable(referral) && !inviterDmSent) {
-      await sendAdminLog('⚠️ MP parrain impossible', [
-        `Parrain : <@${referral.inviterId}>`,
-        `Filleul : ${logUser(member.user)}`,
-        'Raison : MP fermé ou utilisateur introuvable'
-      ], 0xF1C40F);
-    }
   } catch (error) {
     await reportCrash('Erreur arrivée membre', error, [
       `Membre : ${member?.user ? logUser(member.user) : 'Inconnu'}`,
@@ -10071,7 +10108,8 @@ client.on('messageCreate', async message => {
     ], 0x95A5A6);
   }
 
-  if (message.content.trim() === '!help') {
+  if (['!help', '8help'].includes(message.content.trim().toLowerCase())) {
+    if (!isAdminMember(message.member)) return;
     return message.channel.send({ embeds: [buildHelpEmbed(message.guild)] });
   }
 
@@ -10231,7 +10269,7 @@ client.on('messageCreate', async message => {
         '',
         'Clique sur le bouton ci-dessous pour ouvrir un ticket.'
       ].join('\n'))
-      .setFooter({ text: 'Support • Boutique La Rent’a' });
+      .setFooter({ text: 'Support • LR Services' });
 
     const supportRow = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
@@ -10276,15 +10314,15 @@ client.on('messageCreate', async message => {
         '',
         '7. Un administrateur vérifie puis crédite ton portefeuille.',
         '',
-        `**Commander ${MCD0NALDS_EMOJI}**`,
+        '**Commander 🛒**',
         '',
         `1. Va dans <#${SHOP_CHANNEL_ID}>.`,
         '',
         '2. Clique sur **Portefeuille 👛** pour vérifier ton solde.',
         '',
-        `3. Clique sur **Commander ${MCD0NALDS_EMOJI}**.`,
+        '3. Clique sur **Commander 🛒**.',
         '',
-        '4. Choisis ton McD0nald’s dans le menu.',
+        '4. Choisis ton produit dans le menu.',
         '',
         '5. Si ton solde est suffisant, un ticket privé est créé pour ta commande.',
         '',
@@ -10318,7 +10356,7 @@ client.on('messageCreate', async message => {
         '',
         '• Les avis fake, doublons ou abus peuvent être annulés par le staff.',
         '',
-        'Le bot t’envoie un MP quand ton avis est comptabilisé, refusé ou quand la récompense est débloquée.',
+        'Tu peux suivre ta progression avec le bouton **Ma progression avis**.',
         '',
         '**Besoin d’aide ? 🆘**',
         '',
@@ -10332,6 +10370,16 @@ client.on('messageCreate', async message => {
         .setCustomId('guide_faq')
         .setLabel('FAQ')
         .setEmoji('❓')
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId('get_review_progress')
+        .setLabel('Progression avis')
+        .setEmoji('⭐')
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId('get_referral_stats')
+        .setLabel('Progression parrainage')
+        .setEmoji('👥')
         .setStyle(ButtonStyle.Secondary)
     );
 
@@ -10406,12 +10454,12 @@ client.on('messageCreate', async message => {
 
     const embed = new EmbedBuilder()
       .setColor(0xD4AF37)
-      .setAuthor({ name: 'Tarifs McD0nald’s', iconURL: message.guild.iconURL({ dynamic: true }) })
-      .setTitle(`Modifier les prix ${MCD0NALDS_EMOJI}`)
+      .setAuthor({ name: 'Tarifs boutique', iconURL: message.guild.iconURL({ dynamic: true }) })
+      .setTitle('Modifier les prix')
       .setDescription([
         'Choisis le produit à modifier.',
         '',
-        'Boutique : **McD0nald’s**',
+        'Boutique : **Catalogue**',
         '',
         'Un formulaire va s’ouvrir pour entrer le nouveau prix.',
         '',
@@ -10468,7 +10516,7 @@ client.on('messageCreate', async message => {
 
     const embed = new EmbedBuilder()
       .setColor(0xD4AF37)
-      .setAuthor({ name: 'Annonce La Rent’a', iconURL: message.guild.iconURL({ dynamic: true }) })
+      .setAuthor({ name: 'Annonce LR Services', iconURL: message.guild.iconURL({ dynamic: true }) })
       .setTitle('Créer une annonce')
       .setDescription([
         `L’annonce sera envoyée dans <#${AVAILABILITY_CHANNEL_ID}>.`,
@@ -10499,6 +10547,11 @@ client.on('messageCreate', async message => {
   }
 
   if (message.content === '!dmclients') {
+    if (!BULK_DM_COMMANDS_ENABLED) {
+      const reply = await message.channel.send(bulkDmDisabledMessage());
+      return deleteLater(reply, 15_000);
+    }
+
     if (!isOwnerMember(message.member)) {
       const reply = await message.channel.send('❌ Seul le rôle owner peut envoyer un MP aux clients.');
       return deleteLater(reply);
@@ -10520,6 +10573,11 @@ client.on('messageCreate', async message => {
   }
 
   if (message.content === '!dmrecharges') {
+    if (!BULK_DM_COMMANDS_ENABLED) {
+      const reply = await message.channel.send(bulkDmDisabledMessage());
+      return deleteLater(reply, 15_000);
+    }
+
     if (!isOwnerMember(message.member)) {
       const reply = await message.channel.send('❌ Seul le rôle owner peut envoyer un MP aux anciens clients recharge.');
       return deleteLater(reply);
@@ -10543,6 +10601,11 @@ client.on('messageCreate', async message => {
   }
 
   if (message.content === '!dmmax') {
+    if (!BULK_DM_COMMANDS_ENABLED) {
+      const reply = await message.channel.send(bulkDmDisabledMessage());
+      return deleteLater(reply, 15_000);
+    }
+
     if (!isOwnerMember(message.member)) {
       const reply = await message.channel.send('❌ Seul le rôle owner peut envoyer un MP au maximum de membres connus.');
       return deleteLater(reply);
@@ -10569,6 +10632,11 @@ client.on('messageCreate', async message => {
   }
 
   if (message.content === '!dmanciens') {
+    if (!BULK_DM_COMMANDS_ENABLED) {
+      const reply = await message.channel.send(bulkDmDisabledMessage());
+      return deleteLater(reply, 15_000);
+    }
+
     if (!isOwnerMember(message.member)) {
       const reply = await message.channel.send('❌ Seul le rôle owner peut envoyer un MP aux anciens actifs.');
       return deleteLater(reply);
@@ -10754,7 +10822,7 @@ client.on('messageCreate', async message => {
               : `⚠️ Annonce non envoyée dans <#${AVAILABILITY_CHANNEL_ID}>.`,
             '',
             dmStats.skipped
-              ? '📩 MP clients : non envoyé car un envoi est déjà en cours.'
+              ? '📩 MP clients : désactivés.'
               : `📩 MP clients : **${dmStats.sent}/${dmStats.recipients}** envoyé(s) au rôle client.`
           ].join('\n'))
       ]
@@ -10794,7 +10862,7 @@ client.on('messageCreate', async message => {
   if (message.content === '!mdp') {
     const paymentEmbed = new EmbedBuilder()
       .setColor(0xD4AF37)
-      .setAuthor({ name: 'Boutique La Rent’a', iconURL: message.guild.iconURL({ dynamic: true }) })
+      .setAuthor({ name: 'LR Services', iconURL: message.guild.iconURL({ dynamic: true }) })
       .setTitle('Moyens de paiement 💳')
       .setDescription([
         '**Voici les moyens disponibles pour recharger ton solde.**',
@@ -10802,30 +10870,26 @@ client.on('messageCreate', async message => {
         'Pour recharger, rends-toi dans le salon boutique :',
         `<#${SHOP_CHANNEL_ID}>`,
         '',
-        `**${NO_NOTE_TEXT}**`,
-        '**PayPal : paiement entre proches uniquement.**',
-        '**Revolut / virement : aucun message, aucune note, aucun libellé.**',
-        '',
         'Les informations de paiement ne sont pas affichées ici.',
         '',
         'Clique sur **Recharger** pour recevoir les détails en message privé.',
         '',
-        'Après le paiement, envoie ton screenshot au bot en message privé.'
+        'Après le paiement, envoie ton justificatif au bot en message privé.'
       ].join('\n'))
       .addFields(
         {
           name: 'PayPal 🅿️',
-          value: 'Disponible via **Recharger**. Paiement **entre proches** et **sans note**.',
+          value: 'Disponible via **Recharger**. Suis les instructions envoyées par le bot.',
           inline: false
         },
         {
           name: 'Revolut 💳',
-          value: 'Disponible via **Recharger**. Paiement **sans note / commentaire**.',
+          value: 'Disponible via **Recharger**. Suis les instructions envoyées par le bot.',
           inline: false
         },
         {
           name: 'Virement bancaire 🏦',
-          value: 'Disponible via **Recharger**. Virement **sans libellé / note**.',
+          value: 'Disponible via **Recharger**. Suis les instructions envoyées par le bot.',
           inline: false
         }
       )
@@ -10871,7 +10935,7 @@ client.on('messageCreate', async message => {
         .setStyle(ButtonStyle.Primary),
       new ButtonBuilder()
         .setCustomId('get_referral_stats')
-        .setLabel('Mes filleuls')
+        .setLabel('Ma progression')
         .setEmoji('👥')
         .setStyle(ButtonStyle.Secondary)
     );
@@ -10880,7 +10944,7 @@ client.on('messageCreate', async message => {
   }
 
   if (message.content === '!avis') {
-    return message.channel.send({ embeds: [buildAvisEmbed()] });
+    return message.channel.send({ embeds: [buildAvisEmbed()], components: [reviewProgressRow()] });
   }
 
   if (message.content.trim().split(/\s+/)[0].toLowerCase() === '!ban') {
@@ -11824,6 +11888,18 @@ client.on(Events.InteractionCreate, async interaction => {
       });
     }
 
+    if (interaction.customId === 'get_review_progress') {
+      sendActionLog(interaction.member, '⭐ Progression avis demandée', [
+        `Membre : ${logUser(interaction.user)}`,
+        `Affichage : message éphémère dans ${logChannel(interaction.channel)}`
+      ], 0x3498DB);
+
+      return interaction.reply({
+        embeds: [buildReviewProgressEmbed(interaction.user)],
+        ephemeral: true
+      });
+    }
+
     if (interaction.customId === 'open_invite_giveaway_modal') {
       if (!isOwnerMember(interaction.member)) {
         return interaction.reply({
@@ -11865,6 +11941,10 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.customId.startsWith('open_dm_recharge_clients_modal:')) {
+      if (!BULK_DM_COMMANDS_ENABLED) {
+        return interaction.reply({ content: bulkDmDisabledMessage(), ephemeral: true });
+      }
+
       if (!isOwnerMember(interaction.member)) {
         return interaction.reply({
           content: '❌ Seul le rôle owner peut envoyer un MP aux anciens clients recharge.',
@@ -11891,6 +11971,10 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.customId.startsWith('open_dm_max_known_users_modal:')) {
+      if (!BULK_DM_COMMANDS_ENABLED) {
+        return interaction.reply({ content: bulkDmDisabledMessage(), ephemeral: true });
+      }
+
       if (!isOwnerMember(interaction.member)) {
         return interaction.reply({
           content: '❌ Seul le rôle owner peut envoyer un MP au maximum de membres connus.',
@@ -11910,6 +11994,10 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.customId.startsWith('open_dm_old_active_users_modal:')) {
+      if (!BULK_DM_COMMANDS_ENABLED) {
+        return interaction.reply({ content: bulkDmDisabledMessage(), ephemeral: true });
+      }
+
       if (!isOwnerMember(interaction.member)) {
         return interaction.reply({
           content: '❌ Seul le rôle owner peut envoyer un MP aux anciens actifs.',
@@ -12064,6 +12152,10 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.customId.startsWith('open_dm_clients_modal:')) {
+      if (!BULK_DM_COMMANDS_ENABLED) {
+        return interaction.reply({ content: bulkDmDisabledMessage(), ephemeral: true });
+      }
+
       if (!isOwnerMember(interaction.member)) {
         return interaction.reply({
           content: '❌ Seul le rôle owner peut envoyer un MP aux clients.',
@@ -12594,7 +12686,7 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.customId === 'infos_points') {
-      sendActionLog(interaction.member, '🎁 Fidélité McD0 consultée', [
+      sendActionLog(interaction.member, '🎁 Programme fidélité consulté', [
         `Membre : ${logUser(interaction.user)}`,
         `Salon : ${logChannel(interaction.channel)}`
       ], 0x3498DB);
@@ -12673,6 +12765,10 @@ client.on(Events.InteractionCreate, async interaction => {
   }
 
   if (interaction.isModalSubmit() && interaction.customId.startsWith('dm_clients_modal:')) {
+    if (!BULK_DM_COMMANDS_ENABLED) {
+      return interaction.reply({ content: bulkDmDisabledMessage(), ephemeral: true });
+    }
+
     if (!isOwnerMember(interaction.member)) {
       return interaction.reply({
         content: '❌ Seul le rôle owner peut envoyer un MP aux clients.',
@@ -12703,6 +12799,10 @@ client.on(Events.InteractionCreate, async interaction => {
   }
 
   if (interaction.isModalSubmit() && interaction.customId.startsWith('dm_recharge_clients_modal:')) {
+    if (!BULK_DM_COMMANDS_ENABLED) {
+      return interaction.reply({ content: bulkDmDisabledMessage(), ephemeral: true });
+    }
+
     if (!isOwnerMember(interaction.member)) {
       return interaction.reply({
         content: '❌ Seul le rôle owner peut envoyer un MP aux anciens clients recharge.',
@@ -12733,6 +12833,10 @@ client.on(Events.InteractionCreate, async interaction => {
   }
 
   if (interaction.isModalSubmit() && interaction.customId.startsWith('dm_max_known_users_modal:')) {
+    if (!BULK_DM_COMMANDS_ENABLED) {
+      return interaction.reply({ content: bulkDmDisabledMessage(), ephemeral: true });
+    }
+
     if (!isOwnerMember(interaction.member)) {
       return interaction.reply({
         content: '❌ Seul le rôle owner peut envoyer un MP au maximum de membres connus.',
@@ -12763,6 +12867,10 @@ client.on(Events.InteractionCreate, async interaction => {
   }
 
   if (interaction.isModalSubmit() && interaction.customId.startsWith('dm_old_active_users_modal:')) {
+    if (!BULK_DM_COMMANDS_ENABLED) {
+      return interaction.reply({ content: bulkDmDisabledMessage(), ephemeral: true });
+    }
+
     if (!isOwnerMember(interaction.member)) {
       return interaction.reply({
         content: '❌ Seul le rôle owner peut envoyer un MP aux anciens actifs.',
@@ -13183,7 +13291,7 @@ client.on(Events.InteractionCreate, async interaction => {
     setProductPrice(productId, price, interaction.user);
     const newPrice = getProductBasePrice(productId);
 
-    await sendAdminLog('💰 Prix McD0nald’s modifié', [
+    await sendAdminLog('💰 Prix produit modifié', [
       `Owner : ${logUser(interaction.user)}`,
       `Produit : **${product.label}**`,
       `Ancien prix : **${formatWalletAmount(oldPrice)}**`,
@@ -13281,9 +13389,9 @@ client.on(Events.InteractionCreate, async interaction => {
         .setCustomId(`payment_method:${cents}`)
         .setPlaceholder('💳 Choisir puis regarder tes MP...')
         .addOptions([
-          { label: 'PayPal', description: `Recharge de ${formatAmount(cents)} - entre proches, sans note`, value: 'paypal', emoji: '🅿️' },
-          { label: 'Revolut', description: `Recharge de ${formatAmount(cents)} - sans note`, value: 'revolut', emoji: '💳' },
-          { label: 'Virement bancaire', description: `Recharge de ${formatAmount(cents)} - sans libellé`, value: 'virement', emoji: '🏦' }
+          { label: 'PayPal', description: `Recharge de ${formatAmount(cents)} - instructions en MP`, value: 'paypal', emoji: '🅿️' },
+          { label: 'Revolut', description: `Recharge de ${formatAmount(cents)} - instructions en MP`, value: 'revolut', emoji: '💳' },
+          { label: 'Virement bancaire', description: `Recharge de ${formatAmount(cents)} - instructions en MP`, value: 'virement', emoji: '🏦' }
         ])
     );
 
